@@ -62,7 +62,7 @@ export function getTableStatusLabel(status) {
     available: 'Disponível',
     occupied: 'Ocupada',
     reserved: 'Reservada',
-    cleaning: 'Limpeza',
+    cleaning: 'Aguardando Limpeza',
   };
   return labels[status] || status;
 }
@@ -86,4 +86,9 @@ export function getPaymentMethodLabel(method) {
     voucher: 'Vale',
   };
   return labels[method] || method;
+}
+
+// Gera um ID único estável para uso em keys
+export function generateStableKey(prefix, ...parts) {
+  return `${prefix}-${parts.filter(Boolean).join('-')}`;
 }
