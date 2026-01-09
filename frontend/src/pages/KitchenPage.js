@@ -14,22 +14,40 @@ export default function KitchenPage() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetchOrders();
+    let isMounted = true;
+    let interval;
     
-    // Connect to socket
-    socketService.connect();
-    socketService.joinRoom('kitchen');
-    socketService.on('kitchen_update', (updatedOrders) => {
-      setOrders(updatedOrders);
-    });
+    const handleKitchenUpdate = (updatedOrders) => {
+      if (isMounted) setOrders(updatedOrders);
+    };
 
-    // Auto-refresh every 30 seconds
-    const interval = setInterval(fetchOrders, 30000);
+    const init = async () => {
+      await fetchOrdersSafe();
+      socketService.connect();
+      socketService.joinRoom('kitchen');
+      socketService.on('kitchen_update', handleKitchenUpdate);
+      interval = setInterval(fetchOrdersSafe, 30000);
+    };
+
+    const fetchOrdersSafe = async () => {
+      if (!isMounted) return;
+      try {
+        const response = await ordersAPI.getOpen();
+        if (isMounted) setOrders(response.data);
+      } catch (error) {
+        console.error('Error fetching orders:', error);
+      } finally {
+        if (isMounted) setLoading(false);
+      }
+    };
+
+    init();
 
     return () => {
+      isMounted = false;
       socketService.off('kitchen_update');
       socketService.leaveRoom('kitchen');
-      clearInterval(interval);
+      if (interval) clearInterval(interval);
     };
   }, []);
 
@@ -39,8 +57,6 @@ export default function KitchenPage() {
       setOrders(response.data);
     } catch (error) {
       console.error('Error fetching orders:', error);
-    } finally {
-      setLoading(false);
     }
   };
 

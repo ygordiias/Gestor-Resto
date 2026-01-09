@@ -6,10 +6,14 @@ class SocketService {
   constructor() {
     this.socket = null;
     this.listeners = new Map();
+    this.isConnecting = false;
   }
 
   connect() {
-    if (this.socket?.connected) return;
+    // Evita múltiplas conexões simultâneas
+    if (this.socket?.connected || this.isConnecting) return;
+    
+    this.isConnecting = true;
 
     this.socket = io(BACKEND_URL, {
       transports: ['websocket', 'polling'],
@@ -19,6 +23,7 @@ class SocketService {
     });
 
     this.socket.on('connect', () => {
+      this.isConnecting = false;
       console.log('Socket connected:', this.socket.id);
     });
 
@@ -27,6 +32,7 @@ class SocketService {
     });
 
     this.socket.on('connect_error', (error) => {
+      this.isConnecting = false;
       console.error('Socket connection error:', error);
     });
   }
@@ -35,37 +41,50 @@ class SocketService {
     if (this.socket) {
       this.socket.disconnect();
       this.socket = null;
+      this.isConnecting = false;
     }
   }
 
   joinRoom(room) {
-    if (this.socket) {
+    if (this.socket?.connected) {
       this.socket.emit('join_room', { room });
     }
   }
 
   leaveRoom(room) {
-    if (this.socket) {
+    if (this.socket?.connected) {
       this.socket.emit('leave_room', { room });
     }
   }
 
   on(event, callback) {
-    if (this.socket) {
-      this.socket.on(event, callback);
-      this.listeners.set(event, callback);
+    if (!this.socket) return;
+    
+    // Remove listener anterior se existir para evitar duplicatas
+    if (this.listeners.has(event)) {
+      this.socket.off(event, this.listeners.get(event));
     }
+    
+    this.socket.on(event, callback);
+    this.listeners.set(event, callback);
   }
 
   off(event) {
-    if (this.socket && this.listeners.has(event)) {
+    if (!this.socket) return;
+    
+    if (this.listeners.has(event)) {
       this.socket.off(event, this.listeners.get(event));
       this.listeners.delete(event);
     }
   }
 
+  // Remove todos os listeners de um componente
+  offAll(events) {
+    events.forEach(event => this.off(event));
+  }
+
   emit(event, data) {
-    if (this.socket) {
+    if (this.socket?.connected) {
       this.socket.emit(event, data);
     }
   }
