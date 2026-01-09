@@ -428,9 +428,36 @@ async def create_table(table_data: TableBase, current_user: dict = Depends(requi
 
 @api_router.put("/tables/{table_id}")
 async def update_table(table_id: str, table_data: dict):
+    # Validação: não pode mudar mesa ocupada para outro status se tiver pedido aberto
+    if table_data.get("status") in ["available", "reserved", "cleaning"]:
+        existing_order = await db.orders.find_one({"table_id": table_id, "is_closed": False})
+        if existing_order and table_data.get("status") != "cleaning":
+            raise HTTPException(status_code=400, detail="Mesa possui comanda aberta")
+    
     await db.tables.update_one({"id": table_id}, {"$set": table_data})
-    await sio.emit('tables_updated', await get_tables())
+    tables = await get_tables()
+    await sio.emit('tables_updated', tables)
     return {"message": "Table updated"}
+
+@api_router.put("/tables/{table_id}/status")
+async def update_table_status(table_id: str, status_data: dict):
+    """Endpoint específico para atualizar status da mesa"""
+    new_status = status_data.get("status")
+    if new_status not in ["available", "occupied", "reserved", "cleaning"]:
+        raise HTTPException(status_code=400, detail="Status inválido")
+    
+    await db.tables.update_one({"id": table_id}, {"$set": {"status": new_status}})
+    tables = await get_tables()
+    await sio.emit('tables_updated', tables)
+    return {"message": f"Status atualizado para {new_status}"}
+
+@api_router.post("/tables/{table_id}/request-cleaning")
+async def request_table_cleaning(table_id: str):
+    """Solicita limpeza da mesa"""
+    await db.tables.update_one({"id": table_id}, {"$set": {"status": "cleaning"}})
+    tables = await get_tables()
+    await sio.emit('tables_updated', tables)
+    return {"message": "Limpeza solicitada"}
 
 @api_router.delete("/tables/{table_id}")
 async def delete_table(table_id: str, current_user: dict = Depends(require_role([UserRole.ADMIN]))):
@@ -830,6 +857,37 @@ async def leave_room(sid, data):
     if room:
         sio.leave_room(sid, room)
         logger.info(f"Client {sid} left room {room}")
+
+@sio.event
+async def item_ready(sid, data):
+    """Notifica garçom que item está pronto"""
+    table_number = data.get('tableNumber')
+    product_name = data.get('productName')
+    item_type = data.get('type', 'food')
+    
+    # Emite para todos os garçons conectados
+    await sio.emit('waiter_notification', {
+        'tableNumber': table_number,
+        'productName': product_name,
+        'type': item_type,
+        'message': f'{product_name} pronto para Mesa {table_number}'
+    })
+    logger.info(f"Item ready notification: {product_name} for table {table_number}")
+
+@sio.event
+async def request_cleaning(sid, data):
+    """Cliente solicita limpeza da mesa"""
+    table_id = data.get('tableId')
+    table_number = data.get('tableNumber')
+    
+    if table_id:
+        await db.tables.update_one(
+            {"id": table_id},
+            {"$set": {"status": "cleaning"}}
+        )
+        tables = await get_tables()
+        await sio.emit('tables_updated', tables)
+        logger.info(f"Cleaning requested for table {table_number}")
 
 # ==================== SETUP ====================
 @api_router.get("/")
