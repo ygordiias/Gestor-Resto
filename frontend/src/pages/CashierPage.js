@@ -45,38 +45,34 @@ export default function CashierPage() {
   const [movementAmount, setMovementAmount] = useState('');
   const [movementReason, setMovementReason] = useState('');
 
+  const fetchData = async () => {
+    try {
+      const [ordersRes, tablesRes, registerRes] = await Promise.all([
+        ordersAPI.getOpen(),
+        tablesAPI.getAll(),
+        cashRegisterAPI.getCurrent(),
+      ]);
+      setOrders(ordersRes.data);
+      setTables(tablesRes.data);
+      setRegister(registerRes.data);
+    } catch (error) {
+      console.error('Error fetching data:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   useEffect(() => {
     let isMounted = true;
     
     const handleOrderClosed = () => {
-      if (isMounted) fetchDataSafe();
+      if (isMounted) fetchData();
     };
     const handleTablesUpdate = () => {
-      if (isMounted) fetchDataSafe();
+      if (isMounted) fetchData();
     };
 
-    const fetchDataSafe = async () => {
-      if (!isMounted) return;
-      try {
-        const [ordersRes, tablesRes, registerRes] = await Promise.all([
-          ordersAPI.getOpen(),
-          tablesAPI.getAll(),
-          cashRegisterAPI.getCurrent(),
-        ]);
-
-        if (isMounted) {
-          setOrders(ordersRes.data);
-          setTables(tablesRes.data);
-          setRegister(registerRes.data);
-        }
-      } catch (error) {
-        console.error('Error fetching data:', error);
-      } finally {
-        if (isMounted) setLoading(false);
-      }
-    };
-
-    fetchDataSafe();
+    fetchData();
     socketService.connect();
     socketService.on('order_closed', handleOrderClosed);
     socketService.on('tables_updated', handleTablesUpdate);
