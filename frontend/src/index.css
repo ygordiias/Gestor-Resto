@@ -1,115 +1,198 @@
+@import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700&family=Cormorant+Garamond:wght@400;600;700&family=DM+Sans:opsz,wght@9..40,400;500;700&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-body {
-    margin: 0;
-    font-family:
-        -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", "Oxygen",
-        "Ubuntu", "Cantarell", "Fira Sans", "Droid Sans", "Helvetica Neue",
-        sans-serif;
-    -webkit-font-smoothing: antialiased;
-    -moz-osx-font-smoothing: grayscale;
-}
+@layer base {
+  :root {
+    --background: 43 33% 93%;
+    --foreground: 16 25% 18%;
+    --card: 40 33% 98%;
+    --card-foreground: 16 25% 18%;
+    --popover: 40 33% 98%;
+    --popover-foreground: 16 25% 18%;
+    --primary: 43 66% 52%;
+    --primary-foreground: 20 30% 5%;
+    --secondary: 39 33% 85%;
+    --secondary-foreground: 16 25% 18%;
+    --muted: 39 33% 85%;
+    --muted-foreground: 16 20% 45%;
+    --accent: 43 66% 52%;
+    --accent-foreground: 20 30% 5%;
+    --destructive: 0 100% 27%;
+    --destructive-foreground: 43 33% 93%;
+    --border: 25 20% 82%;
+    --input: 25 20% 82%;
+    --ring: 43 66% 52%;
+    --radius: 0.5rem;
+    --chart-1: 12 76% 61%;
+    --chart-2: 173 58% 39%;
+    --chart-3: 197 37% 24%;
+    --chart-4: 43 74% 66%;
+    --chart-5: 27 87% 67%;
+  }
 
-code {
-    font-family:
-        source-code-pro, Menlo, Monaco, Consolas, "Courier New", monospace;
+  .dark {
+    --background: 20 30% 5%;
+    --foreground: 39 33% 88%;
+    --card: 20 25% 12%;
+    --card-foreground: 39 33% 88%;
+    --popover: 20 25% 12%;
+    --popover-foreground: 39 33% 88%;
+    --primary: 43 66% 52%;
+    --primary-foreground: 20 30% 5%;
+    --secondary: 16 25% 18%;
+    --secondary-foreground: 39 33% 88%;
+    --muted: 16 25% 18%;
+    --muted-foreground: 25 15% 55%;
+    --accent: 43 66% 52%;
+    --accent-foreground: 20 30% 5%;
+    --destructive: 0 50% 25%;
+    --destructive-foreground: 39 33% 88%;
+    --border: 20 20% 22%;
+    --input: 20 20% 22%;
+    --ring: 43 66% 52%;
+    --chart-1: 220 70% 50%;
+    --chart-2: 160 60% 45%;
+    --chart-3: 30 80% 55%;
+    --chart-4: 280 65% 60%;
+    --chart-5: 340 75% 55%;
+  }
 }
 
 @layer base {
-    :root {
-        --background: 0 0% 100%;
-        --foreground: 0 0% 3.9%;
-        --card: 0 0% 100%;
-        --card-foreground: 0 0% 3.9%;
-        --popover: 0 0% 100%;
-        --popover-foreground: 0 0% 3.9%;
-        --primary: 0 0% 9%;
-        --primary-foreground: 0 0% 98%;
-        --secondary: 0 0% 96.1%;
-        --secondary-foreground: 0 0% 9%;
-        --muted: 0 0% 96.1%;
-        --muted-foreground: 0 0% 45.1%;
-        --accent: 0 0% 96.1%;
-        --accent-foreground: 0 0% 9%;
-        --destructive: 0 84.2% 60.2%;
-        --destructive-foreground: 0 0% 98%;
-        --border: 0 0% 89.8%;
-        --input: 0 0% 89.8%;
-        --ring: 0 0% 3.9%;
-        --chart-1: 12 76% 61%;
-        --chart-2: 173 58% 39%;
-        --chart-3: 197 37% 24%;
-        --chart-4: 43 74% 66%;
-        --chart-5: 27 87% 67%;
-        --radius: 0.5rem;
-    }
-    .dark {
-        --background: 0 0% 3.9%;
-        --foreground: 0 0% 98%;
-        --card: 0 0% 3.9%;
-        --card-foreground: 0 0% 98%;
-        --popover: 0 0% 3.9%;
-        --popover-foreground: 0 0% 98%;
-        --primary: 0 0% 98%;
-        --primary-foreground: 0 0% 9%;
-        --secondary: 0 0% 14.9%;
-        --secondary-foreground: 0 0% 98%;
-        --muted: 0 0% 14.9%;
-        --muted-foreground: 0 0% 63.9%;
-        --accent: 0 0% 14.9%;
-        --accent-foreground: 0 0% 98%;
-        --destructive: 0 62.8% 30.6%;
-        --destructive-foreground: 0 0% 98%;
-        --border: 0 0% 14.9%;
-        --input: 0 0% 14.9%;
-        --ring: 0 0% 83.1%;
-        --chart-1: 220 70% 50%;
-        --chart-2: 160 60% 45%;
-        --chart-3: 30 80% 55%;
-        --chart-4: 280 65% 60%;
-        --chart-5: 340 75% 55%;
-    }
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground font-body;
+  }
+  h1, h2, h3, h4, h5, h6 {
+    @apply font-heading;
+  }
 }
 
-@layer base {
-    * {
-        @apply border-border;
-    }
-    body {
-        @apply bg-background text-foreground;
-    }
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
 }
 
-@layer base {
-    [data-debug-wrapper="true"] {
-        display: contents !important;
-    }
+::-webkit-scrollbar-track {
+  @apply bg-muted;
+}
 
-    [data-debug-wrapper="true"] > * {
-        margin-left: inherit;
-        margin-right: inherit;
-        margin-top: inherit;
-        margin-bottom: inherit;
-        padding-left: inherit;
-        padding-right: inherit;
-        padding-top: inherit;
-        padding-bottom: inherit;
-        column-gap: inherit;
-        row-gap: inherit;
-        gap: inherit;
-        border-left-width: inherit;
-        border-right-width: inherit;
-        border-top-width: inherit;
-        border-bottom-width: inherit;
-        border-left-style: inherit;
-        border-right-style: inherit;
-        border-top-style: inherit;
-        border-bottom-style: inherit;
-        border-left-color: inherit;
-        border-right-color: inherit;
-        border-top-color: inherit;
-        border-bottom-color: inherit;
-    }
+::-webkit-scrollbar-thumb {
+  @apply bg-primary/50 rounded-full;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-primary;
+}
+
+/* Biblical theme decorations */
+.biblical-border {
+  border: 2px solid hsl(var(--primary));
+  box-shadow: 0 0 0 1px hsl(var(--primary) / 0.2);
+}
+
+.parchment-bg {
+  background-color: hsl(var(--background));
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='4' height='4' viewBox='0 0 4 4'%3E%3Cpath fill='%23d4af37' fill-opacity='0.03' d='M1 3h1v1H1V3zm2-2h1v1H3V1z'%3E%3C/path%3E%3C/svg%3E");
+}
+
+/* Animations */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slideIn {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(0); }
+}
+
+@keyframes pulse-gold {
+  0%, 100% { box-shadow: 0 0 0 0 hsl(43 66% 52% / 0.4); }
+  50% { box-shadow: 0 0 0 8px hsl(43 66% 52% / 0); }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.3s ease-out forwards;
+}
+
+.animate-slide-in {
+  animation: slideIn 0.3s ease-out forwards;
+}
+
+.animate-pulse-gold {
+  animation: pulse-gold 2s infinite;
+}
+
+/* Status colors for kitchen/bar */
+.status-pending {
+  @apply bg-amber-100 dark:bg-amber-900/30 border-amber-400 text-amber-800 dark:text-amber-200;
+}
+
+.status-preparing {
+  @apply bg-blue-100 dark:bg-blue-900/30 border-blue-400 text-blue-800 dark:text-blue-200;
+}
+
+.status-ready {
+  @apply bg-green-100 dark:bg-green-900/30 border-green-400 text-green-800 dark:text-green-200;
+}
+
+.status-delivered {
+  @apply bg-gray-100 dark:bg-gray-800/30 border-gray-400 text-gray-600 dark:text-gray-300;
+}
+
+/* Table status colors */
+.table-available {
+  @apply bg-green-500/20 border-green-500 text-green-700 dark:text-green-300;
+}
+
+.table-occupied {
+  @apply bg-red-500/20 border-red-500 text-red-700 dark:text-red-300;
+}
+
+.table-reserved {
+  @apply bg-amber-500/20 border-amber-500 text-amber-700 dark:text-amber-300;
+}
+
+.table-cleaning {
+  @apply bg-blue-500/20 border-blue-500 text-blue-700 dark:text-blue-300;
+}
+
+/* Large touch targets for kitchen/bar panels */
+.touch-target {
+  min-height: 44px;
+  min-width: 44px;
+}
+
+/* Card hover effects */
+.card-hover {
+  @apply transition-all duration-300 hover:-translate-y-1 hover:shadow-lg hover:border-primary;
+}
+
+/* Gold accent underline */
+.gold-underline {
+  position: relative;
+}
+
+.gold-underline::after {
+  content: '';
+  position: absolute;
+  bottom: -4px;
+  left: 0;
+  width: 100%;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, hsl(var(--primary)), transparent);
+}
+
+/* Print styles */
+@media print {
+  .no-print {
+    display: none !important;
+  }
 }
