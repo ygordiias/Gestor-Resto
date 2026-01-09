@@ -1,0 +1,204 @@
+{
+  "identity": {
+    "name": "The Digital Codex",
+    "persona": "E1 - The Anti-AI Designer",
+    "tone": "Biblical, Timeless, Professional, Warm, Efficient",
+    "aesthetic": "Modernized Illuminated Manuscript / Digital Parchment"
+  },
+  "typography": {
+    "fonts": {
+      "heading": "Cinzel, serif",
+      "subheading": "Cormorant Garamond, serif",
+      "body": "DM Sans, sans-serif",
+      "mono": "JetBrains Mono, monospace"
+    },
+    "weights": {
+      "heading": "700",
+      "subheading": "600",
+      "body": "400",
+      "bold": "700"
+    },
+    "sizes": {
+      "h1": "text-4xl md:text-6xl tracking-tight",
+      "h2": "text-3xl md:text-5xl tracking-tight",
+      "h3": "text-2xl md:text-3xl",
+      "body": "text-base md:text-lg",
+      "small": "text-sm tracking-wide"
+    },
+    "imports": [
+      "@import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700&family=Cormorant+Garamond:wght@400;600;700&family=DM+Sans:opsz,wght@9..40,400;500;700&display=swap');"
+    ]
+  },
+  "colors": {
+    "palette": {
+      "light": {
+        "background": "#F5F1E6",
+        "foreground": "#3E2723",
+        "card": "#FDFBF7",
+        "card-foreground": "#3E2723",
+        "primary": "#D4AF37",
+        "primary-foreground": "#1A120B",
+        "secondary": "#E6DCC3",
+        "secondary-foreground": "#3E2723",
+        "muted": "#E6DCC3",
+        "muted-foreground": "#8D6E63",
+        "accent": "#D4AF37",
+        "accent-foreground": "#1A120B",
+        "destructive": "#8B0000",
+        "destructive-foreground": "#F5F1E6",
+        "border": "#D7CCC8",
+        "input": "#D7CCC8",
+        "ring": "#D4AF37"
+      },
+      "dark": {
+        "background": "#1A120B",
+        "foreground": "#E6DCC3",
+        "card": "#2C241B",
+        "card-foreground": "#E6DCC3",
+        "primary": "#D4AF37",
+        "primary-foreground": "#1A120B",
+        "secondary": "#3E2723",
+        "secondary-foreground": "#E6DCC3",
+        "muted": "#3E2723",
+        "muted-foreground": "#A1887F",
+        "accent": "#D4AF37",
+        "accent-foreground": "#1A120B",
+        "destructive": "#5D1010",
+        "destructive-foreground": "#E6DCC3",
+        "border": "#4E342E",
+        "input": "#4E342E",
+        "ring": "#D4AF37"
+      }
+    },
+    "semantic": {
+      "success": "#556B2F",
+      "warning": "#DAA520",
+      "info": "#4682B4",
+      "parchment": "#F5F1E6",
+      "parchment-dark": "#E6DCC3",
+      "biblical-gold": "#D4AF37",
+      "biblical-bronze": "#CD7F32",
+      "monastic-brown": "#3E2723",
+      "monastic-black": "#1A120B"
+    }
+  },
+  "visual_enhancers": {
+    "textures": {
+      "parchment": "url('https://www.transparenttextures.com/patterns/cream-paper.png')",
+      "grain": "url('data:image/svg+xml,...')"
+    },
+    "shadows": {
+      "soft": "0 4px 20px -2px rgba(62, 39, 35, 0.1)",
+      "gold-glow": "0 0 15px rgba(212, 175, 55, 0.3)",
+      "deep": "0 10px 30px -5px rgba(26, 18, 11, 0.4)"
+    },
+    "borders": {
+      "gold-trim": "1px solid #D4AF37",
+      "faint-parchment": "1px solid rgba(62, 39, 35, 0.1)"
+    },
+    "radius": {
+      "card": "0.5rem",
+      "button": "0.25rem",
+      "input": "0.25rem"
+    }
+  },
+  "layout": {
+    "grid_system": {
+      "dashboard": "grid grid-cols-1 md:grid-cols-12 gap-6",
+      "menu": "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-8"
+    },
+    "spacing": {
+      "container_padding": "p-6 md:p-12",
+      "section_gap": "gap-8 md:gap-16"
+    },
+    "containers": {
+      "main": "max-w-7xl mx-auto w-full",
+      "narrow": "max-w-3xl mx-auto w-full"
+    }
+  },
+  "components": {
+    "buttons": {
+      "primary": "bg-[#D4AF37] text-[#1A120B] hover:bg-[#C5A028] font-serif font-bold uppercase tracking-widest shadow-md hover:shadow-lg transition-all duration-300",
+      "secondary": "bg-transparent border border-[#3E2723] text-[#3E2723] hover:bg-[#3E2723] hover:text-[#F5F1E6] dark:border-[#E6DCC3] dark:text-[#E6DCC3] dark:hover:bg-[#E6DCC3] dark:hover:text-[#1A120B] font-serif uppercase tracking-widest transition-all duration-300",
+      "ghost": "hover:bg-[#3E2723]/10 text-[#3E2723] dark:text-[#E6DCC3] dark:hover:bg-[#E6DCC3]/10"
+    },
+    "cards": {
+      "base": "bg-[#FDFBF7] dark:bg-[#2C241B] border border-[#D7CCC8] dark:border-[#4E342E] shadow-sm hover:shadow-md transition-all duration-300 relative overflow-hidden",
+      "interactive": "cursor-pointer hover:-translate-y-1 hover:border-[#D4AF37] dark:hover:border-[#D4AF37]"
+    },
+    "inputs": {
+      "base": "bg-transparent border-b-2 border-[#D7CCC8] dark:border-[#4E342E] focus:border-[#D4AF37] outline-none px-0 py-2 transition-colors duration-300 placeholder:text-[#8D6E63] dark:placeholder:text-[#A1887F]"
+    }
+  },
+  "motion": {
+    "transitions": {
+      "default": "transition-all duration-300 ease-out",
+      "slow": "transition-all duration-700 ease-in-out"
+    },
+    "animations": {
+      "fade-in": "animate-in fade-in duration-500",
+      "slide-up": "animate-in slide-in-from-bottom-4 duration-500",
+      "parchment-unroll": "animate-in zoom-in-95 duration-700 ease-out"
+    }
+  },
+  "accessibility": {
+    "contrast_check": "Ensure text meets APCA standards. Use dark brown (#3E2723) on parchment (#F5F1E6) for max readability.",
+    "focus_states": "focus:ring-2 focus:ring-[#D4AF37] focus:ring-offset-2 focus:ring-offset-[#F5F1E6] dark:focus:ring-offset-[#1A120B]",
+    "reduced_motion": "Respect prefers-reduced-motion media query."
+  },
+  "media": {
+    "image_style": "Rounded corners (sm), subtle sepia filter (sepia-[.15]) to blend with parchment theme. No harsh bright whites.",
+    "icons": "Lucide React (default). Use stroke-width={1.5} for elegance."
+  },
+  "image_urls": {
+    "menu_items": [
+      {
+        "url": "https://images.unsplash.com/photo-1762922425249-144c3bb9167e?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDk1Nzd8MHwxfHNlYXJjaHwxfHxnb3VybWV0JTIwYnVyZ2VyJTIwcGxhdGUlMjByZXN0YXVyYW50fGVufDB8fHx8MTc2Nzk4MjI3MXww&ixlib=rb-4.1.0&q=85",
+        "description": "Gourmet Burger",
+        "category": "food"
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1762631934138-c4cae144d550?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDk1Nzd8MHwxfHNlYXJjaHw0fHxnb3VybWV0JTIwYnVyZ2VyJTIwcGxhdGUlMjByZXN0YXVyYW50fGVufDB8fHx8MTc2Nzk4MjI3MXww&ixlib=rb-4.1.0&q=85",
+        "description": "Double Burger Plate",
+        "category": "food"
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1648838449733-64d7ce61f1f0?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2NzF8MHwxfHNlYXJjaHwxfHxyZWQlMjB3aW5lJTIwZ2xhc3MlMjBiYXIlMjBlbGVnYW50fGVufDB8fHx8MTc2Nzk4MjI3M3ww&ixlib=rb-4.1.0&q=85",
+        "description": "Red Wine Glass",
+        "category": "drink"
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1648838449951-50dc859ef442?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2NzF8MHwxfHNlYXJjaHwyfHxyZWQlMjB3aW5lJTIwZ2xhc3MlMjBiYXIlMjBlbGVnYW50fGVufDB8fHx8MTc2Nzk4MjI3M3ww&ixlib=rb-4.1.0&q=85",
+        "description": "Pouring Wine",
+        "category": "drink"
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1767065887251-a3fba481c3cf?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDk1ODF8MHwxfHNlYXJjaHwxfHxhcnRpc2FuJTIwYnJlYWQlMjBiYXNrZXR8ZW58MHx8fHwxNzY3OTgyMjc0fDA&ixlib=rb-4.1.0&q=85",
+        "description": "Artisan Bread",
+        "category": "food"
+      }
+    ],
+    "placeholders": {
+      "user": "https://api.dicebear.com/7.x/avataaars/svg?seed=Felix",
+      "logo": "https://via.placeholder.com/150?text=LOGO"
+    }
+  },
+  "instructions_to_main_agent": [
+    "1. INSTALL FONTS: Add the Google Fonts import to index.css immediately.",
+    "2. CONFIGURE TAILWIND: Update tailwind.config.js with the custom colors (parchment, biblical-gold, etc.) and font families.",
+    "3. THEME IMPLEMENTATION: Use the 'parchment' color as the main background for Light Mode. Do not use pure white.",
+    "4. COMPONENT OVERRIDES: Heavily customize Shadcn components. Remove default borders and replace with 'border-b' or 'gold-trim' styles where appropriate.",
+    "5. LAYOUT: Use the 'Bento' grid for the main dashboard. Ensure high contrast for the Kitchen/Bar panels (large text).",
+    "6. KANBAN BOARDS: For Kitchen/Bar, use a high-contrast, card-based layout. Status colors should be muted (Olive Green for Done, Terracotta for Pending) to fit the theme.",
+    "7. MOBILE: Ensure all touch targets are at least 44px. The 'Order Creation' flow must be thumb-friendly."
+  ],
+  "UNIVERSAL_GUIDELINES_FOR_MAIN_AGENT": [
+    "Avoid 'AI Slop' - no generic gradients or default Shadcn looks.",
+    "Use 'Cinzel' for all major headings to establish the Biblical theme.",
+    "Use 'DM Sans' for all data tables and small text for readability.",
+    "Ensure the 'Gold' color is used sparingly as an accent, not a background.",
+    "All interactive elements must have 'data-testid'.",
+    "Use 'sonner' for toasts.",
+    "Do not use 'Inter' font."
+  ]
+}
