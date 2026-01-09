@@ -46,35 +46,47 @@ export default function CashierPage() {
   const [movementReason, setMovementReason] = useState('');
 
   useEffect(() => {
-    fetchData();
+    let isMounted = true;
     
+    const handleOrderClosed = () => {
+      if (isMounted) fetchDataSafe();
+    };
+    const handleTablesUpdate = () => {
+      if (isMounted) fetchDataSafe();
+    };
+
+    const fetchDataSafe = async () => {
+      if (!isMounted) return;
+      try {
+        const [ordersRes, tablesRes, registerRes] = await Promise.all([
+          ordersAPI.getOpen(),
+          tablesAPI.getAll(),
+          cashRegisterAPI.getCurrent(),
+        ]);
+
+        if (isMounted) {
+          setOrders(ordersRes.data);
+          setTables(tablesRes.data);
+          setRegister(registerRes.data);
+        }
+      } catch (error) {
+        console.error('Error fetching data:', error);
+      } finally {
+        if (isMounted) setLoading(false);
+      }
+    };
+
+    fetchDataSafe();
     socketService.connect();
-    socketService.on('order_closed', fetchData);
-    socketService.on('tables_updated', () => fetchData());
+    socketService.on('order_closed', handleOrderClosed);
+    socketService.on('tables_updated', handleTablesUpdate);
 
     return () => {
+      isMounted = false;
       socketService.off('order_closed');
       socketService.off('tables_updated');
     };
   }, []);
-
-  const fetchData = async () => {
-    try {
-      const [ordersRes, tablesRes, registerRes] = await Promise.all([
-        ordersAPI.getOpen(),
-        tablesAPI.getAll(),
-        cashRegisterAPI.getCurrent(),
-      ]);
-
-      setOrders(ordersRes.data);
-      setTables(tablesRes.data);
-      setRegister(registerRes.data);
-    } catch (error) {
-      console.error('Error fetching data:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
 
   const handleOpenRegister = async () => {
     if (!openRegisterAmount || parseFloat(openRegisterAmount) < 0) {
