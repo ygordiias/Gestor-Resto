@@ -14,22 +14,40 @@ export default function BarPage() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetchOrders();
+    let isMounted = true;
+    let interval;
     
-    // Connect to socket
-    socketService.connect();
-    socketService.joinRoom('bar');
-    socketService.on('bar_update', (updatedOrders) => {
-      setOrders(updatedOrders);
-    });
+    const handleBarUpdate = (updatedOrders) => {
+      if (isMounted) setOrders(updatedOrders);
+    };
 
-    // Auto-refresh every 30 seconds
-    const interval = setInterval(fetchOrders, 30000);
+    const init = async () => {
+      await fetchOrdersSafe();
+      socketService.connect();
+      socketService.joinRoom('bar');
+      socketService.on('bar_update', handleBarUpdate);
+      interval = setInterval(fetchOrdersSafe, 30000);
+    };
+
+    const fetchOrdersSafe = async () => {
+      if (!isMounted) return;
+      try {
+        const response = await ordersAPI.getOpen();
+        if (isMounted) setOrders(response.data);
+      } catch (error) {
+        console.error('Error fetching orders:', error);
+      } finally {
+        if (isMounted) setLoading(false);
+      }
+    };
+
+    init();
 
     return () => {
+      isMounted = false;
       socketService.off('bar_update');
       socketService.leaveRoom('bar');
-      clearInterval(interval);
+      if (interval) clearInterval(interval);
     };
   }, []);
 
@@ -39,8 +57,6 @@ export default function BarPage() {
       setOrders(response.data);
     } catch (error) {
       console.error('Error fetching orders:', error);
-    } finally {
-      setLoading(false);
     }
   };
 

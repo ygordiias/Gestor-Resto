@@ -19,40 +19,44 @@ export default function TablesPage() {
   const { user } = useAuth();
 
   useEffect(() => {
-    fetchData();
+    let isMounted = true;
     
-    // Connect to socket
+    const handleTablesUpdate = (updatedTables) => {
+      if (isMounted) setTables(updatedTables);
+    };
+
+    const fetchDataSafe = async () => {
+      if (!isMounted) return;
+      try {
+        const [tablesRes, ordersRes] = await Promise.all([
+          tablesAPI.getAll(),
+          ordersAPI.getOpen(),
+        ]);
+
+        if (isMounted) {
+          setTables(tablesRes.data);
+          const ordersMap = {};
+          ordersRes.data.forEach(order => {
+            ordersMap[order.table_id] = order;
+          });
+          setOrders(ordersMap);
+        }
+      } catch (error) {
+        if (isMounted) toast.error('Erro ao carregar mesas');
+      } finally {
+        if (isMounted) setLoading(false);
+      }
+    };
+
+    fetchDataSafe();
     socketService.connect();
-    socketService.on('tables_updated', (updatedTables) => {
-      setTables(updatedTables);
-    });
+    socketService.on('tables_updated', handleTablesUpdate);
 
     return () => {
+      isMounted = false;
       socketService.off('tables_updated');
     };
   }, []);
-
-  const fetchData = async () => {
-    try {
-      const [tablesRes, ordersRes] = await Promise.all([
-        tablesAPI.getAll(),
-        ordersAPI.getOpen(),
-      ]);
-
-      setTables(tablesRes.data);
-      
-      // Map orders by table_id
-      const ordersMap = {};
-      ordersRes.data.forEach(order => {
-        ordersMap[order.table_id] = order;
-      });
-      setOrders(ordersMap);
-    } catch (error) {
-      toast.error('Erro ao carregar mesas');
-    } finally {
-      setLoading(false);
-    }
-  };
 
   const handleTableClick = (table) => {
     navigate(`/order/${table.id}`, { state: { table } });
