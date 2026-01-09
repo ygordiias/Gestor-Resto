@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, useLocation, useNavigate } from 'react-router-dom';
 import Layout from '../components/Layout';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
@@ -11,6 +11,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs'
 import { productsAPI, categoriesAPI, ordersAPI, tablesAPI } from '../lib/api';
 import { cn, formatCurrency, getStatusLabel, getStatusColor } from '../lib/utils';
 import { useAuth } from '../contexts/AuthContext';
+import socketService, { playNotificationSound } from '../lib/socket';
 import { toast } from 'sonner';
 import { 
   Plus, 
@@ -21,7 +22,9 @@ import {
   ArrowLeft,
   Search,
   UtensilsCrossed,
-  Wine
+  Wine,
+  Bell,
+  Sparkles
 } from 'lucide-react';
 
 export default function OrderPage() {
@@ -29,6 +32,7 @@ export default function OrderPage() {
   const location = useLocation();
   const navigate = useNavigate();
   const { user } = useAuth();
+  const isMountedRef = useRef(true);
   
   const [table, setTable] = useState(location.state?.table || null);
   const [products, setProducts] = useState([]);
@@ -40,11 +44,8 @@ export default function OrderPage() {
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
 
-  useEffect(() => {
-    fetchData();
-  }, [tableId]);
-
-  const fetchData = async () => {
+  const fetchData = useCallback(async () => {
+    if (!isMountedRef.current) return;
     try {
       const [productsRes, categoriesRes, tableRes] = await Promise.all([
         productsAPI.getAll(),
@@ -52,31 +53,67 @@ export default function OrderPage() {
         !table ? tablesAPI.getAll() : Promise.resolve({ data: [table] }),
       ]);
 
-      setProducts(productsRes.data.filter(p => p.is_available));
-      setCategories(categoriesRes.data);
-      
-      if (!table) {
-        const foundTable = tableRes.data.find(t => t.id === tableId);
-        setTable(foundTable);
-      }
-
-      // Get current order if exists
-      try {
-        const orderRes = await ordersAPI.getByTable(tableId);
-        if (orderRes.data) {
-          setCurrentOrder(orderRes.data);
+      if (isMountedRef.current) {
+        setProducts(productsRes.data.filter(p => p.is_available));
+        setCategories(categoriesRes.data);
+        
+        if (!table) {
+          const foundTable = tableRes.data.find(t => t.id === tableId);
+          setTable(foundTable);
         }
-      } catch (e) {
-        // No current order
+
+        // Get current order if exists
+        try {
+          const orderRes = await ordersAPI.getByTable(tableId);
+          if (orderRes.data && isMountedRef.current) {
+            setCurrentOrder(orderRes.data);
+          }
+        } catch (e) {
+          // No current order
+        }
+        
+        setLoading(false);
       }
     } catch (error) {
-      toast.error('Erro ao carregar dados');
-    } finally {
-      setLoading(false);
+      if (isMountedRef.current) {
+        toast.error('Erro ao carregar dados');
+        setLoading(false);
+      }
     }
-  };
+  }, [tableId, table]);
 
-  const addToCart = (product) => {
+  useEffect(() => {
+    isMountedRef.current = true;
+    
+    // Handler para notificação de item pronto
+    const handleWaiterNotification = (data) => {
+      if (!isMountedRef.current) return;
+      if (data.tableNumber === table?.number) {
+        playNotificationSound();
+        toast.success(`${data.productName} está PRONTO!`, {
+          icon: <Bell className="h-4 w-4" />,
+          duration: 5000,
+        });
+      }
+    };
+
+    fetchData();
+    socketService.connect();
+    socketService.on('waiter_notification', handleWaiterNotification);
+    socketService.on('order_updated', (order) => {
+      if (isMountedRef.current && order.table_id === tableId) {
+        setCurrentOrder(order);
+      }
+    });
+
+    return () => {
+      isMountedRef.current = false;
+      socketService.off('waiter_notification');
+      socketService.off('order_updated');
+    };
+  }, [fetchData, tableId, table?.number]);
+
+  const addToCart = useCallback((product) => {
     setCart(prev => {
       const existing = prev.find(item => item.product_id === product.id);
       if (existing) {
@@ -87,6 +124,7 @@ export default function OrderPage() {
         );
       }
       return [...prev, {
+        id: `cart-${product.id}-${Date.now()}`,
         product_id: product.id,
         product_name: product.name,
         quantity: 1,
@@ -96,9 +134,9 @@ export default function OrderPage() {
       }];
     });
     toast.success(`${product.name} adicionado`);
-  };
+  }, []);
 
-  const updateCartQuantity = (productId, delta) => {
+  const updateCartQuantity = useCallback((productId, delta) => {
     setCart(prev => {
       return prev.map(item => {
         if (item.product_id === productId) {
@@ -109,19 +147,19 @@ export default function OrderPage() {
         return item;
       }).filter(Boolean);
     });
-  };
+  }, []);
 
-  const updateCartNotes = (productId, notes) => {
+  const updateCartNotes = useCallback((productId, notes) => {
     setCart(prev =>
       prev.map(item =>
         item.product_id === productId ? { ...item, notes } : item
       )
     );
-  };
+  }, []);
 
-  const removeFromCart = (productId) => {
+  const removeFromCart = useCallback((productId) => {
     setCart(prev => prev.filter(item => item.product_id !== productId));
-  };
+  }, []);
 
   const handleSendOrder = async () => {
     if (cart.length === 0) {
@@ -129,16 +167,29 @@ export default function OrderPage() {
       return;
     }
 
+    // Verifica se mesa está reservada
+    if (table?.status === 'reserved') {
+      // Mesa reservada pode abrir comanda
+    }
+
     setSending(true);
     try {
-      await ordersAPI.create({
+      const orderData = {
         table_id: tableId,
         table_number: table.number,
-        items: cart,
+        items: cart.map(item => ({
+          product_id: item.product_id,
+          product_name: item.product_name,
+          quantity: item.quantity,
+          unit_price: item.unit_price,
+          type: item.type,
+          notes: item.notes,
+        })),
         waiter_id: user.id,
         waiter_name: user.name,
-      });
+      };
 
+      await ordersAPI.create(orderData);
       toast.success('Pedido enviado com sucesso!');
       setCart([]);
       fetchData();
@@ -146,6 +197,16 @@ export default function OrderPage() {
       toast.error('Erro ao enviar pedido');
     } finally {
       setSending(false);
+    }
+  };
+
+  const handleRequestCleaning = async () => {
+    try {
+      await tablesAPI.update(tableId, { status: 'cleaning' });
+      toast.success('Limpeza solicitada!');
+      navigate('/tables');
+    } catch (error) {
+      toast.error('Erro ao solicitar limpeza');
     }
   };
 
@@ -174,63 +235,82 @@ export default function OrderPage() {
 
   return (
     <Layout title={`Mesa ${table?.number || ''}`}>
-      <div className="space-y-4" data-testid="order-page">
-        {/* Back Button */}
-        <Button
-          variant="ghost"
-          onClick={() => navigate('/tables')}
-          className="gap-2"
-          data-testid="back-btn"
-        >
-          <ArrowLeft className="h-4 w-4" />
-          Voltar para Mesas
-        </Button>
+      <div className="space-y-3 sm:space-y-4" data-testid="order-page">
+        {/* Header com botões */}
+        <div className="flex flex-wrap gap-2 items-center justify-between">
+          <Button
+            variant="ghost"
+            onClick={() => navigate('/tables')}
+            className="gap-2"
+            data-testid="back-btn"
+          >
+            <ArrowLeft className="h-4 w-4" />
+            <span className="hidden sm:inline">Voltar</span>
+          </Button>
+          
+          {/* Botão de solicitar limpeza (para tablet do cliente) */}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleRequestCleaning}
+            className="gap-2"
+            data-testid="request-cleaning-btn"
+          >
+            <Sparkles className="h-4 w-4" />
+            <span className="hidden sm:inline">Solicitar Limpeza</span>
+          </Button>
+        </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Products Section */}
-          <div className="lg:col-span-2 space-y-4">
-            {/* Search and Filter */}
-            <div className="flex flex-col sm:flex-row gap-4">
-              <div className="relative flex-1">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                <Input
-                  placeholder="Buscar produto..."
-                  value={searchTerm}
-                  onChange={(e) => setSearchTerm(e.target.value)}
-                  className="pl-10"
-                  data-testid="search-input"
-                />
-              </div>
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 sm:gap-6">
+          {/* Produtos */}
+          <div className="lg:col-span-2 space-y-3 sm:space-y-4">
+            {/* Busca */}
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+              <Input
+                placeholder="Buscar..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                className="pl-10"
+                data-testid="search-input"
+              />
             </div>
 
-            {/* Category Tabs */}
-            <Tabs defaultValue="all" onValueChange={setSelectedCategory}>
-              <TabsList className="w-full flex-wrap h-auto gap-2 bg-transparent p-0">
-                <TabsTrigger value="all" className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground">
+            {/* Categorias */}
+            <ScrollArea className="w-full">
+              <div className="flex gap-2 pb-2">
+                <Button
+                  variant={selectedCategory === 'all' ? 'default' : 'outline'}
+                  size="sm"
+                  onClick={() => setSelectedCategory('all')}
+                  className="shrink-0"
+                >
                   Todos
-                </TabsTrigger>
+                </Button>
                 {categories.map(cat => (
-                  <TabsTrigger 
-                    key={cat.id} 
-                    value={cat.id}
-                    className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground"
+                  <Button
+                    key={cat.id}
+                    variant={selectedCategory === cat.id ? 'default' : 'outline'}
+                    size="sm"
+                    onClick={() => setSelectedCategory(cat.id)}
+                    className="shrink-0"
                   >
                     {cat.icon} {cat.name}
-                  </TabsTrigger>
+                  </Button>
                 ))}
-              </TabsList>
-            </Tabs>
+              </div>
+            </ScrollArea>
 
-            {/* Products by Type */}
-            <div className="space-y-6">
-              {/* Food */}
+            {/* Produtos por tipo */}
+            <div className="space-y-4 sm:space-y-6">
+              {/* Comidas */}
               {foodProducts.length > 0 && (
                 <div>
-                  <h3 className="font-heading text-lg flex items-center gap-2 mb-4">
-                    <UtensilsCrossed className="h-5 w-5 text-primary" />
+                  <h3 className="font-heading text-base sm:text-lg flex items-center gap-2 mb-3 sm:mb-4">
+                    <UtensilsCrossed className="h-4 w-4 sm:h-5 sm:w-5 text-primary" />
                     Comidas
                   </h3>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 sm:gap-4">
                     {foodProducts.map(product => (
                       <Card 
                         key={product.id} 
@@ -238,24 +318,24 @@ export default function OrderPage() {
                         onClick={() => addToCart(product)}
                         data-testid={`product-${product.id}`}
                       >
-                        <CardContent className="p-4 flex gap-4">
+                        <CardContent className="p-3 sm:p-4 flex gap-3 sm:gap-4">
                           {product.image_url && (
                             <img
                               src={product.image_url}
                               alt={product.name}
-                              className="w-20 h-20 object-cover rounded-lg sepia-[.15]"
+                              className="w-16 h-16 sm:w-20 sm:h-20 object-cover rounded-lg"
                             />
                           )}
-                          <div className="flex-1">
-                            <h4 className="font-medium">{product.name}</h4>
-                            <p className="text-sm text-muted-foreground line-clamp-2">
+                          <div className="flex-1 min-w-0">
+                            <h4 className="font-medium text-sm sm:text-base truncate">{product.name}</h4>
+                            <p className="text-xs sm:text-sm text-muted-foreground line-clamp-1">
                               {product.description}
                             </p>
-                            <p className="text-lg font-bold text-primary mt-1">
+                            <p className="text-base sm:text-lg font-bold text-primary mt-1">
                               {formatCurrency(product.price)}
                             </p>
                           </div>
-                          <Button size="icon" variant="outline" className="shrink-0">
+                          <Button size="icon" variant="outline" className="shrink-0 h-8 w-8 sm:h-10 sm:w-10">
                             <Plus className="h-4 w-4" />
                           </Button>
                         </CardContent>
@@ -265,14 +345,14 @@ export default function OrderPage() {
                 </div>
               )}
 
-              {/* Drinks */}
+              {/* Bebidas */}
               {drinkProducts.length > 0 && (
                 <div>
-                  <h3 className="font-heading text-lg flex items-center gap-2 mb-4">
-                    <Wine className="h-5 w-5 text-primary" />
+                  <h3 className="font-heading text-base sm:text-lg flex items-center gap-2 mb-3 sm:mb-4">
+                    <Wine className="h-4 w-4 sm:h-5 sm:w-5 text-primary" />
                     Bebidas
                   </h3>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 sm:gap-4">
                     {drinkProducts.map(product => (
                       <Card 
                         key={product.id} 
@@ -280,24 +360,24 @@ export default function OrderPage() {
                         onClick={() => addToCart(product)}
                         data-testid={`product-${product.id}`}
                       >
-                        <CardContent className="p-4 flex gap-4">
+                        <CardContent className="p-3 sm:p-4 flex gap-3 sm:gap-4">
                           {product.image_url && (
                             <img
                               src={product.image_url}
                               alt={product.name}
-                              className="w-20 h-20 object-cover rounded-lg sepia-[.15]"
+                              className="w-16 h-16 sm:w-20 sm:h-20 object-cover rounded-lg"
                             />
                           )}
-                          <div className="flex-1">
-                            <h4 className="font-medium">{product.name}</h4>
-                            <p className="text-sm text-muted-foreground line-clamp-2">
+                          <div className="flex-1 min-w-0">
+                            <h4 className="font-medium text-sm sm:text-base truncate">{product.name}</h4>
+                            <p className="text-xs sm:text-sm text-muted-foreground line-clamp-1">
                               {product.description}
                             </p>
-                            <p className="text-lg font-bold text-primary mt-1">
+                            <p className="text-base sm:text-lg font-bold text-primary mt-1">
                               {formatCurrency(product.price)}
                             </p>
                           </div>
-                          <Button size="icon" variant="outline" className="shrink-0">
+                          <Button size="icon" variant="outline" className="shrink-0 h-8 w-8 sm:h-10 sm:w-10">
                             <Plus className="h-4 w-4" />
                           </Button>
                         </CardContent>
@@ -309,91 +389,91 @@ export default function OrderPage() {
             </div>
           </div>
 
-          {/* Cart Section */}
+          {/* Carrinho */}
           <div className="lg:col-span-1">
-            <Card className="sticky top-24">
-              <CardHeader>
-                <CardTitle className="font-heading flex items-center gap-2">
-                  <ShoppingCart className="h-5 w-5" />
+            <Card className="sticky top-20">
+              <CardHeader className="pb-2">
+                <CardTitle className="font-heading flex items-center gap-2 text-base sm:text-lg">
+                  <ShoppingCart className="h-4 w-4 sm:h-5 sm:w-5" />
                   Pedido
                 </CardTitle>
               </CardHeader>
-              <CardContent className="space-y-4">
-                {/* Current Order Items */}
+              <CardContent className="space-y-3 sm:space-y-4">
+                {/* Itens já pedidos */}
                 {currentOrder && currentOrder.items.length > 0 && (
                   <div className="space-y-2">
-                    <h4 className="text-sm font-medium text-muted-foreground">
+                    <h4 className="text-xs sm:text-sm font-medium text-muted-foreground">
                       Itens já pedidos
                     </h4>
-                    <ScrollArea className="h-32 rounded border p-2">
-                      {currentOrder.items.map((item, idx) => (
-                        <div key={idx} className="flex justify-between text-sm py-1">
-                          <span>{item.quantity}x {item.product_name}</span>
-                          <Badge className={getStatusColor(item.status)} variant="outline">
+                    <ScrollArea className="h-24 sm:h-32 rounded border p-2">
+                      {currentOrder.items.map((item) => (
+                        <div key={item.id} className="flex justify-between text-xs sm:text-sm py-1">
+                          <span className="truncate">{item.quantity}x {item.product_name}</span>
+                          <Badge className={cn('text-xs ml-2', getStatusColor(item.status))} variant="outline">
                             {getStatusLabel(item.status)}
                           </Badge>
                         </div>
                       ))}
                     </ScrollArea>
-                    <div className="text-right text-sm">
-                      <span className="text-muted-foreground">Total atual: </span>
+                    <div className="text-right text-xs sm:text-sm">
+                      <span className="text-muted-foreground">Total: </span>
                       <span className="font-bold">{formatCurrency(currentOrder.total)}</span>
                     </div>
                   </div>
                 )}
 
-                {/* New Cart Items */}
+                {/* Novos itens */}
                 <div className="space-y-2">
-                  <h4 className="text-sm font-medium">Novos itens</h4>
+                  <h4 className="text-xs sm:text-sm font-medium">Novos itens</h4>
                   {cart.length === 0 ? (
-                    <p className="text-sm text-muted-foreground text-center py-4">
+                    <p className="text-xs sm:text-sm text-muted-foreground text-center py-4">
                       Selecione itens do cardápio
                     </p>
                   ) : (
-                    <ScrollArea className="h-64">
-                      <div className="space-y-3">
+                    <ScrollArea className="h-48 sm:h-64">
+                      <div className="space-y-2 sm:space-y-3">
                         {cart.map((item) => (
-                          <div key={item.product_id} className="border rounded-lg p-3 space-y-2">
+                          <div key={item.id} className="border rounded-lg p-2 sm:p-3 space-y-2">
                             <div className="flex justify-between items-start">
-                              <div>
-                                <p className="font-medium text-sm">{item.product_name}</p>
-                                <p className="text-primary font-bold">
+                              <div className="min-w-0">
+                                <p className="font-medium text-xs sm:text-sm truncate">{item.product_name}</p>
+                                <p className="text-primary font-bold text-sm">
                                   {formatCurrency(item.unit_price * item.quantity)}
                                 </p>
                               </div>
                               <Button
                                 variant="ghost"
                                 size="icon"
-                                className="h-8 w-8 text-destructive"
+                                className="h-6 w-6 sm:h-8 sm:w-8 text-destructive shrink-0"
                                 onClick={() => removeFromCart(item.product_id)}
                               >
-                                <Trash2 className="h-4 w-4" />
+                                <Trash2 className="h-3 w-3 sm:h-4 sm:w-4" />
                               </Button>
                             </div>
                             <div className="flex items-center gap-2">
                               <Button
                                 variant="outline"
                                 size="icon"
-                                className="h-8 w-8"
+                                className="h-7 w-7 sm:h-8 sm:w-8"
                                 onClick={() => updateCartQuantity(item.product_id, -1)}
                               >
-                                <Minus className="h-4 w-4" />
+                                <Minus className="h-3 w-3 sm:h-4 sm:w-4" />
                               </Button>
-                              <span className="w-8 text-center font-bold">{item.quantity}</span>
+                              <span className="w-6 sm:w-8 text-center font-bold text-sm">{item.quantity}</span>
                               <Button
                                 variant="outline"
                                 size="icon"
-                                className="h-8 w-8"
+                                className="h-7 w-7 sm:h-8 sm:w-8"
                                 onClick={() => updateCartQuantity(item.product_id, 1)}
                               >
-                                <Plus className="h-4 w-4" />
+                                <Plus className="h-3 w-3 sm:h-4 sm:w-4" />
                               </Button>
                             </div>
                             <Textarea
                               placeholder="Observações..."
                               value={item.notes}
                               onChange={(e) => updateCartNotes(item.product_id, e.target.value)}
-                              className="h-16 text-sm"
+                              className="h-12 sm:h-16 text-xs sm:text-sm"
                             />
                           </div>
                         ))}
@@ -402,17 +482,17 @@ export default function OrderPage() {
                   )}
                 </div>
 
-                {/* Cart Total and Send Button */}
+                {/* Total e botão enviar */}
                 {cart.length > 0 && (
-                  <div className="pt-4 border-t space-y-4">
+                  <div className="pt-3 sm:pt-4 border-t space-y-3 sm:space-y-4">
                     <div className="flex justify-between items-center">
-                      <span className="font-medium">Total do pedido:</span>
-                      <span className="text-xl font-heading font-bold text-primary">
+                      <span className="font-medium text-sm">Total:</span>
+                      <span className="text-lg sm:text-xl font-heading font-bold text-primary">
                         {formatCurrency(cartTotal)}
                       </span>
                     </div>
                     <Button
-                      className="w-full font-heading uppercase tracking-widest"
+                      className="w-full font-heading uppercase tracking-widest text-sm"
                       onClick={handleSendOrder}
                       disabled={sending}
                       data-testid="send-order-btn"
