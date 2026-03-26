@@ -43,6 +43,7 @@ Sistema completo de gestão para restaurante com conceito bíblico sutil, comand
 - [x] Módulo NF-e (MOCK preparado)
 - [x] Comunicação em tempo real via Socket.IO
 - [x] Design responsivo para tablets e celulares
+- [x] Configuração ASGI para produção (uvicorn + Socket.IO)
 
 ### Funcionalidades de Mesa
 - [x] Status: Disponível, Ocupada, Reservada, Aguardando Limpeza
@@ -65,48 +66,18 @@ Sistema completo de gestão para restaurante com conceito bíblico sutil, comand
 - [x] Sincronização automática quando voltar online
 - [x] Fallback para dados em cache quando API indisponível
 
-## Rotas da API Validadas
-
-### Públicas
-- `GET /api/` - Health check
-- `POST /api/auth/login` - Login
-- `POST /api/auth/register` - Registro
-- `GET /api/products` - Listar produtos
-- `GET /api/categories` - Listar categorias
-- `GET /api/tables` - Listar mesas
-- `POST /api/setup/seed` - Popular banco com dados iniciais
-
-### Autenticadas (todas validadas ✅)
-- `GET /api/auth/me` - Dados do usuário atual
-- `GET /api/users` - Listar usuários (admin)
-- `POST /api/users` - Criar usuário (admin)
-- `PUT /api/users/{id}` - Atualizar usuário (admin)
-- `DELETE /api/users/{id}` - Excluir usuário (admin)
-- `GET /api/orders` - Listar pedidos
-- `GET /api/orders/open` - Pedidos abertos
-- `GET /api/orders/{id}` - Detalhes do pedido
-- `GET /api/orders/table/{id}` - Pedido da mesa
-- `POST /api/orders` - Criar pedido
-- `PUT /api/orders/{id}/item/{itemId}/status` - Atualizar status do item
-- `POST /api/orders/{id}/close` - Fechar pedido
-- `GET /api/cash-register/current` - Caixa atual
-- `POST /api/cash-register/open` - Abrir caixa
-- `POST /api/cash-register/close` - Fechar caixa
-- `POST /api/cash-register/withdrawal` - Sangria
-- `POST /api/cash-register/deposit` - Reforço
-- `GET /api/stock` - Listar estoque
-- `GET /api/stock/alerts` - Alertas de estoque baixo
-- `GET /api/reports/sales` - Relatório de vendas
-- `GET /api/reports/profit` - Relatório de lucro
-- `GET /api/invoices` - Listar NF-e
-- `POST /api/invoices` - Criar NF-e (mock)
+### Deploy / Produção
+- [x] Configuração ASGI corrigida: `uvicorn backend.server:app --host 0.0.0.0 --port $PORT`
+- [x] Socket.IO wrapping com `other_asgi_app=` explícito
+- [x] Shutdown handler registrado antes do wrapping
+- [x] uvicorn 0.25.0 no requirements.txt
 
 ## Arquitetura de Arquivos
 
 ```
 /app/
 ├── backend/
-│   ├── server.py          # FastAPI + Socket.IO
+│   ├── server.py          # FastAPI + Socket.IO (ASGI)
 │   ├── requirements.txt   # Dependências Python
 │   └── .env               # Variáveis de ambiente
 ├── frontend/
@@ -127,11 +98,11 @@ Sistema completo de gestão para restaurante com conceito bíblico sutil, comand
 │       └── pages/
 │           ├── LoginPage.js
 │           ├── DashboardPage.js
-│           ├── TablesPage.js    # Com reserva/limpeza
-│           ├── OrderPage.js     # Com offline support
-│           ├── KitchenPage.js   # Kanban + beep
-│           ├── BarPage.js       # Kanban + beep
-│           ├── CashierPage.js   # Pagamentos estáveis
+│           ├── TablesPage.js
+│           ├── OrderPage.js
+│           ├── KitchenPage.js
+│           ├── BarPage.js
+│           ├── CashierPage.js
 │           ├── MenuPage.js
 │           ├── StockPage.js
 │           ├── ReportsPage.js
@@ -139,32 +110,8 @@ Sistema completo de gestão para restaurante com conceito bíblico sutil, comand
 │           ├── InvoicesPage.js
 │           └── SettingsPage.js
 └── memory/
-    └── PRD.md             # Este arquivo
+    └── PRD.md
 ```
-
-## Correções Aplicadas (Março 2025)
-
-### Estabilidade
-- ✅ Removido React.StrictMode (evita double-mount)
-- ✅ useRef isMountedRef em todos os componentes com Socket
-- ✅ Cleanup adequado de socket listeners no return do useEffect
-- ✅ useCallback para handlers estáveis
-- ✅ useMemo para cálculos derivados
-- ✅ Keys únicas em listas (não usa index)
-- ✅ Componente PaymentRow separado para evitar re-renders
-
-### Socket.IO
-- ✅ Flag isConnecting para evitar conexões duplicadas
-- ✅ Remoção de listener antigo antes de adicionar novo
-- ✅ offAll para cleanup de múltiplos eventos
-- ✅ Beep via AudioContext (sem biblioteca externa)
-
-### PWA/Offline
-- ✅ Service Worker com cache estratégico
-- ✅ Network-first para API, cache-first para estáticos
-- ✅ localStorage para produtos/categorias/mesas
-- ✅ Fila de pedidos offline com sync automático
-- ✅ Fallback graceful quando API indisponível
 
 ## Backlog
 
@@ -194,4 +141,4 @@ Sistema completo de gestão para restaurante com conceito bíblico sutil, comand
 4. Implementar exportação de relatórios
 
 ---
-*Última atualização: Março 2025*
+*Última atualização: Fevereiro 2026*

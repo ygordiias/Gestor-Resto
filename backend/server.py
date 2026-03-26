@@ -997,12 +997,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Wrap FastAPI with Socket.IO
-socket_app = socketio.ASGIApp(sio, app)
-
+# Shutdown handler (must be registered on FastAPI before wrapping)
 @app.on_event("shutdown")
 async def shutdown_db_client():
     client.close()
 
-# For uvicorn to use the socket app
-app = socket_app
+# Wrap FastAPI with Socket.IO for combined HTTP + WebSocket ASGI app
+# This is the final app object that uvicorn will serve
+app = socketio.ASGIApp(sio, other_asgi_app=app)
