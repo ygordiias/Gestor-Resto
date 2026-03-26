@@ -184,7 +184,7 @@ export default function BarPage() {
           </Card>
         ))}
         {items.length === 0 && (
-          <div className="text-center py-8 sm:py-12 text-muted-foreground">
+          <div className="text-center py-8 sm:py-12 font-semibold" style={{ color: '#94A3B8' }}>
             Nenhum item
           </div>
         )}
@@ -209,22 +209,22 @@ export default function BarPage() {
       <div className="space-y-3 sm:space-y-4" data-testid="bar-page">
         {/* Stats - Responsivo */}
         <div className="grid grid-cols-3 gap-2 sm:gap-4">
-          <Card className="bg-amber-100 dark:bg-amber-900/30 border-amber-400">
-            <CardContent className="p-2 sm:p-4 text-center">
-              <p className="text-2xl sm:text-3xl font-heading font-bold">{pendingItems.length}</p>
-              <p className="text-xs sm:text-sm">Pendentes</p>
+          <Card className="border-0 shadow-lg" style={{ backgroundColor: '#1E293B' }}>
+            <CardContent className="p-3 sm:p-5 text-center">
+              <p className="text-3xl sm:text-4xl font-heading font-bold text-white">{pendingItems.length}</p>
+              <p className="text-sm sm:text-base font-semibold text-slate-300">Pendentes</p>
             </CardContent>
           </Card>
-          <Card className="bg-blue-100 dark:bg-blue-900/30 border-blue-400">
-            <CardContent className="p-2 sm:p-4 text-center">
-              <p className="text-2xl sm:text-3xl font-heading font-bold">{preparingItems.length}</p>
-              <p className="text-xs sm:text-sm">Preparando</p>
+          <Card className="border-0 shadow-lg" style={{ backgroundColor: '#1D4ED8' }}>
+            <CardContent className="p-3 sm:p-5 text-center">
+              <p className="text-3xl sm:text-4xl font-heading font-bold text-white">{preparingItems.length}</p>
+              <p className="text-sm sm:text-base font-semibold text-blue-100">Preparando</p>
             </CardContent>
           </Card>
-          <Card className="bg-green-100 dark:bg-green-900/30 border-green-400">
-            <CardContent className="p-2 sm:p-4 text-center">
-              <p className="text-2xl sm:text-3xl font-heading font-bold">{readyItems.length}</p>
-              <p className="text-xs sm:text-sm">Prontos</p>
+          <Card className="border-0 shadow-lg" style={{ backgroundColor: '#16A34A' }}>
+            <CardContent className="p-3 sm:p-5 text-center">
+              <p className="text-3xl sm:text-4xl font-heading font-bold text-white">{readyItems.length}</p>
+              <p className="text-sm sm:text-base font-semibold text-green-100">Prontos</p>
             </CardContent>
           </Card>
         </div>
