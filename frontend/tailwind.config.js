@@ -18,8 +18,8 @@ module.exports = {
     },
     extend: {
       fontFamily: {
-        heading: ['Cinzel', 'serif'],
-        subheading: ['Cormorant Garamond', 'serif'],
+        heading: ['Plus Jakarta Sans', 'sans-serif'],
+        subheading: ['Plus Jakarta Sans', 'sans-serif'],
         body: ['DM Sans', 'sans-serif'],
         mono: ['JetBrains Mono', 'monospace'],
       },
@@ -58,11 +58,11 @@ module.exports = {
           foreground: "hsl(var(--card-foreground))",
         },
         biblical: {
-          gold: '#D4AF37',
-          bronze: '#CD7F32',
-          parchment: '#F5F1E6',
-          brown: '#3E2723',
-          dark: '#1A120B',
+          gold: '#f59e0b',
+          bronze: '#d97706',
+          parchment: '#1f2937',
+          brown: '#111827',
+          dark: '#0f172a',
         },
         status: {
           pending: '#F59E0B',

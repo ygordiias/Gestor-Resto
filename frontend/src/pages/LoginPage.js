@@ -7,7 +7,8 @@ import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
 import { toast } from 'sonner';
-import { BookOpen, Loader2 } from 'lucide-react';
+import { Loader2 } from 'lucide-react';
+import { Logo } from '../components/Logo';
 
 export default function LoginPage() {
   const [email, setEmail] = useState('');
@@ -75,14 +76,9 @@ export default function LoginPage() {
     <div className="min-h-screen parchment-bg flex items-center justify-center p-4">
       <div className="w-full max-w-md space-y-8 animate-fade-in">
         {/* Logo */}
-        <div className="text-center">
-          <div className="inline-flex items-center justify-center w-20 h-20 rounded-full bg-primary/20 mb-4">
-            <BookOpen className="w-10 h-10 text-primary" />
-          </div>
-          <h1 className="font-heading text-4xl text-foreground tracking-wide">
-            Digital Codex
-          </h1>
-          <p className="text-muted-foreground mt-2 font-subheading text-lg">
+        <div className="text-center flex flex-col items-center">
+          <Logo size="xl" className="mb-4" />
+          <p className="text-muted-foreground mt-2 text-base">
             Sistema de Gestão para Restaurante
           </p>
         </div>

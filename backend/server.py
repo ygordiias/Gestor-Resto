@@ -1,5 +1,5 @@
 """
-The Digital Codex - Sistema de Gestão para Restaurante
+Gestor Restô - Sistema de Gestão para Restaurante
 Backend FastAPI com Socket.IO para comunicação em tempo real
 """
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, status
@@ -44,7 +44,7 @@ sio = socketio.AsyncServer(
 )
 
 # Create FastAPI app
-app = FastAPI(title="The Digital Codex - Restaurant Management System")
+app = FastAPI(title="Gestor Restô - Sistema de Gestão para Restaurante")
 api_router = APIRouter(prefix="/api")
 security = HTTPBearer()
 
@@ -892,7 +892,7 @@ async def request_cleaning(sid, data):
 # ==================== SETUP ====================
 @api_router.get("/")
 async def root():
-    return {"message": "The Digital Codex - Restaurant Management System API"}
+    return {"message": "Gestor Restô - API de Gestão para Restaurante"}
 
 @api_router.post("/setup/seed")
 async def seed_database():

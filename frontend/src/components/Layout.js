@@ -23,6 +23,7 @@ import {
   BookOpen,
   Bell,
 } from 'lucide-react';
+import { Logo } from './Logo';
 
 const navigation = {
   admin: [
@@ -128,7 +129,7 @@ export default function Layout({ children, title }) {
         />
         <div className="fixed inset-y-0 left-0 w-64 sm:w-72 bg-card border-r border-border animate-slide-in">
           <div className="flex items-center justify-between p-3 sm:p-4 border-b border-border">
-            <h1 className="font-heading text-lg sm:text-xl text-primary">Digital Codex</h1>
+            <Logo size="sm" />
             <Button
               variant="ghost"
               size="icon"
@@ -162,9 +163,7 @@ export default function Layout({ children, title }) {
       <div className="hidden lg:fixed lg:inset-y-0 lg:z-40 lg:flex lg:w-64 xl:w-72 lg:flex-col">
         <div className="flex grow flex-col gap-y-5 overflow-y-auto bg-card border-r border-border px-4 xl:px-6 pb-4">
           <div className="flex h-14 xl:h-16 shrink-0 items-center border-b border-border -mx-4 xl:-mx-6 px-4 xl:px-6">
-            <h1 className="font-heading text-xl xl:text-2xl text-primary tracking-wide">
-              Digital Codex
-            </h1>
+            <Logo size="md" />
           </div>
           <nav className="flex flex-1 flex-col">
             <ul className="flex flex-1 flex-col gap-y-1 xl:gap-y-2">

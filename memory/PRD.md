@@ -1,7 +1,7 @@
-# Digital Codex - Sistema de Gestão para Restaurante
+# Gestor Restô - Sistema de Gestão para Restaurante
 
 ## Descrição
-Sistema completo de gestão para restaurante com conceito bíblico sutil, comandas 100% digitais, controle total pelo administrador.
+Sistema completo de gestão para restaurante, moderno e profissional, comandas 100% digitais, controle total pelo administrador.
 
 ## Personas de Usuário
 1. **Administrador** - Acesso total ao sistema (dashboard, relatórios, configurações, usuários)
@@ -18,6 +18,16 @@ Sistema completo de gestão para restaurante com conceito bíblico sutil, comand
 - **Autenticação**: JWT
 - **PWA**: Service Worker + manifest.json
 
+## Identidade Visual
+- **Nome**: Gestor Restô
+- **Cor Principal**: #1f2937 (cinza escuro)
+- **Cor Secundária/Accent**: #f59e0b (laranja/dourado)
+- **Cor de Fundo**: #111827
+- **Texto**: branco
+- **Fonte Heading**: Plus Jakarta Sans (bold)
+- **Fonte Body**: DM Sans
+- **Logo**: Componente reutilizável em `/app/frontend/src/components/Logo.js`
+
 ## Credenciais de Teste
 - Admin: admin@digitalcodex.com / admin123
 - Garçom: garcom@digitalcodex.com / garcom123
@@ -25,7 +35,7 @@ Sistema completo de gestão para restaurante com conceito bíblico sutil, comand
 - Cozinha: cozinha@digitalcodex.com / cozinha123
 - Bar: bar@digitalcodex.com / bar123
 
-## Requisitos Implementados ✅
+## Requisitos Implementados
 
 ### Core
 - [x] Autenticação JWT com 5 perfis de usuário
@@ -44,78 +54,43 @@ Sistema completo de gestão para restaurante com conceito bíblico sutil, comand
 - [x] Comunicação em tempo real via Socket.IO
 - [x] Design responsivo para tablets e celulares
 - [x] Configuração ASGI para produção (uvicorn + Socket.IO)
+- [x] Rebranding completo: "Gestor Restô" com identidade visual moderna
 
 ### Funcionalidades de Mesa
 - [x] Status: Disponível, Ocupada, Reservada, Aguardando Limpeza
-- [x] Reserva de mesa (garçom/caixa)
-- [x] Cancelamento de reserva
-- [x] Solicitar limpeza (tablet do cliente)
-- [x] Marcar mesa como disponível após limpeza
+- [x] Reserva de mesa / Cancelamento de reserva
+- [x] Solicitar limpeza / Marcar como disponível
 
 ### Notificações em Tempo Real
-- [x] Beep sonoro para novos pedidos (cozinha/bar)
-- [x] Toast de notificação
+- [x] Beep sonoro + Toast para novos pedidos (cozinha/bar)
 - [x] Notificação para garçom quando item está pronto
-- [x] Badge de notificações no header
 
 ### Suporte Offline (PWA)
-- [x] Service Worker registrado
-- [x] manifest.json para instalação
-- [x] Cache de produtos/categorias/mesas no localStorage
-- [x] Criação de pedidos offline (salvos localmente)
-- [x] Sincronização automática quando voltar online
-- [x] Fallback para dados em cache quando API indisponível
+- [x] Service Worker + manifest.json
+- [x] Cache offline + sincronização automática
 
 ### Deploy / Produção
-- [x] Configuração ASGI corrigida: `uvicorn backend.server:app --host 0.0.0.0 --port $PORT`
-- [x] Socket.IO wrapping com `other_asgi_app=` explícito
-- [x] Shutdown handler registrado antes do wrapping
-- [x] uvicorn 0.25.0 no requirements.txt
+- [x] `uvicorn backend.server:app --host 0.0.0.0 --port $PORT`
 
 ## Arquitetura de Arquivos
 
 ```
 /app/
 ├── backend/
-│   ├── server.py          # FastAPI + Socket.IO (ASGI)
-│   ├── requirements.txt   # Dependências Python
-│   └── .env               # Variáveis de ambiente
+│   ├── server.py
+│   ├── requirements.txt
+│   └── .env
 ├── frontend/
-│   ├── public/
-│   │   ├── index.html     # HTML com meta tags PWA
-│   │   ├── manifest.json  # Manifest PWA
-│   │   └── sw.js          # Service Worker
+│   ├── public/ (index.html, manifest.json, sw.js)
 │   └── src/
-│       ├── lib/
-│       │   ├── api.js     # API com suporte offline
-│       │   ├── socket.js  # Socket.IO com notificações
-│       │   └── utils.js   # Utilitários
-│       ├── contexts/
-│       │   └── AuthContext.js
-│       ├── components/
-│       │   ├── Layout.js  # Layout com notificações
-│       │   └── ui/        # Shadcn components
-│       └── pages/
-│           ├── LoginPage.js
-│           ├── DashboardPage.js
-│           ├── TablesPage.js
-│           ├── OrderPage.js
-│           ├── KitchenPage.js
-│           ├── BarPage.js
-│           ├── CashierPage.js
-│           ├── MenuPage.js
-│           ├── StockPage.js
-│           ├── ReportsPage.js
-│           ├── UsersPage.js
-│           ├── InvoicesPage.js
-│           └── SettingsPage.js
-└── memory/
-    └── PRD.md
+│       ├── components/ (Layout.js, Logo.js, ui/)
+│       ├── contexts/ (AuthContext.js)
+│       ├── lib/ (api.js, socket.js, utils.js)
+│       └── pages/ (Login, Dashboard, Tables, Order, Kitchen, Bar, Cashier, Menu, Stock, Reports, Users, Invoices, Settings)
+└── memory/ (PRD.md)
 ```
 
 ## Backlog
-
-### P0 (Crítico) - Nenhum pendente ✅
 
 ### P1 (Alta Prioridade)
 - [ ] Transferência de mesa
@@ -126,7 +101,6 @@ Sistema completo de gestão para restaurante com conceito bíblico sutil, comand
 - [ ] Integração real com API de NF-e
 - [ ] Exportação de relatórios (PDF/Excel)
 - [ ] Histórico de reservas
-- [ ] Impressão de comanda (opcional)
 
 ### P3 (Baixa Prioridade)
 - [ ] Delivery integrado
@@ -134,11 +108,5 @@ Sistema completo de gestão para restaurante com conceito bíblico sutil, comand
 - [ ] Dashboard personalizado
 - [ ] Programa de fidelidade
 
-## Próximas Tarefas
-1. Implementar transferência/junção de mesas
-2. Adicionar divisão de conta por pessoa
-3. Integrar API de NF-e real
-4. Implementar exportação de relatórios
-
 ---
-*Última atualização: Fevereiro 2026*
+*Última atualização: Março 2026*
