@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Dict, List, Any
 
 class RestaurantAPITester:
-    def __init__(self, base_url="https://sacredserve.preview.emergentagent.com"):
+    def __init__(self, base_url="https://digital-orders-3.preview.emergentagent.com"):
         self.base_url = base_url
         self.token = None
         self.admin_user = None
