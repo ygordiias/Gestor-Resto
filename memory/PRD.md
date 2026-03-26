@@ -26,8 +26,20 @@ Sistema completo de gestão para restaurante, moderno e profissional, comandas 1
 - [x] PWA offline com sync automático
 - [x] Rebranding "Gestor Restô" com tema escuro profissional
 - [x] ASGI produção: `uvicorn backend.server:app`
-- [x] Baixa automática de estoque ao entregar item
 - [x] Correção de contraste nos painéis Cozinha/Bar
+- [x] **Controle completo de estoque (validação, baixa, alerta)**
+- [x] **Cancelamento inteligente de pedidos**
+- [x] **Alerta de risco de estoque via Socket.IO + WhatsApp (preparado)**
+
+### Rotas Novas
+- `POST /api/orders/{order_id}/cancel` — Cancela pedido (só se todos itens pending)
+- `GET /api/stock/risk-alerts` — Detecta risco de falta baseado em consumo médio diário
+
+### Funções Auxiliares
+- `validate_stock(items)` — Bloqueia criação de pedido sem estoque
+- `deduct_stock(product_id, qty)` — Baixa atômica com $inc
+- `check_stock_alert(product_id)` — Emite alerta se qty < min_quantity
+- `send_whatsapp_message(phone, msg)` — Preparado para API WhatsApp (atualmente loga)
 
 ## Backlog
 ### P1
@@ -38,6 +50,7 @@ Sistema completo de gestão para restaurante, moderno e profissional, comandas 1
 ### P2
 - [ ] Integração real API NF-e
 - [ ] Exportação relatórios (PDF/Excel)
+- [ ] Integração real API WhatsApp (Twilio/Z-API)
 - [ ] Histórico de reservas
 
 ### P3

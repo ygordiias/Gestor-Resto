@@ -494,6 +494,9 @@ async def get_order(order_id: str):
 
 @api_router.post("/orders", response_model=dict)
 async def create_order(order_data: OrderCreate):
+    # Validar estoque antes de criar pedido
+    await validate_stock(order_data.items)
+    
     # Check if table already has an open order
     existing_order = await db.orders.find_one({"table_id": order_data.table_id, "is_closed": False})
     
@@ -644,7 +647,100 @@ async def close_order(order_id: str, payment_data: dict):
     
     return {"message": "Order closed successfully"}
 
+@api_router.post("/orders/{order_id}/cancel")
+async def cancel_order(order_id: str):
+    order = await db.orders.find_one({"id": order_id}, {"_id": 0})
+    if not order:
+        raise HTTPException(status_code=404, detail="Pedido não encontrado")
+    if order.get("is_closed"):
+        raise HTTPException(status_code=400, detail="Pedido já está fechado")
+
+    # Verificar se algum item já passou de "pending"
+    for item in order.get("items", []):
+        if item["status"] in ("preparing", "ready", "delivered"):
+            raise HTTPException(
+                status_code=400,
+                detail="Não é possível cancelar, pedido já está em preparo"
+            )
+
+    # Cancelar todos os itens e o pedido
+    cancelled_items = []
+    for item in order["items"]:
+        item["status"] = "cancelled"
+        cancelled_items.append(item)
+
+    await db.orders.update_one(
+        {"id": order_id},
+        {"$set": {
+            "items": cancelled_items,
+            "status": "cancelled",
+            "is_closed": True,
+            "closed_at": datetime.now(timezone.utc).isoformat()
+        }}
+    )
+
+    # Liberar mesa
+    await db.tables.update_one(
+        {"id": order["table_id"]},
+        {"$set": {"status": TableStatus.AVAILABLE.value, "current_order_id": None}}
+    )
+
+    # Emitir atualizações
+    await sio.emit('tables_updated', await get_tables())
+    await sio.emit('order_cancelled', {"order_id": order_id})
+    await sio.emit('kitchen_update', await db.orders.find({"is_closed": False}, {"_id": 0}).to_list(100))
+    await sio.emit('bar_update', await db.orders.find({"is_closed": False}, {"_id": 0}).to_list(100))
+
+    return {"message": "Pedido cancelado com sucesso"}
+
 # ==================== STOCK ROUTES ====================
+
+ADMIN_PHONE = "5516981214154"
+
+async def send_whatsapp_message(phone: str, message: str):
+    """Preparação para envio via WhatsApp. Loga mensagem até API ser configurada."""
+    logger.info(f"[WHATSAPP → {phone}] {message}")
+
+async def check_stock_alert(product_id: str):
+    """Verifica se estoque ficou abaixo do mínimo após baixa e emite alerta."""
+    stock_item = await db.stock.find_one({"product_id": product_id}, {"_id": 0})
+    if not stock_item:
+        return
+    if stock_item["quantity"] <= stock_item.get("min_quantity", 5):
+        product = await db.products.find_one({"id": product_id}, {"_id": 0})
+        product_name = product["name"] if product else product_id
+        msg = (
+            f"⚠️ Estoque baixo\n"
+            f"Produto: {product_name}\n"
+            f"Quantidade atual: {stock_item['quantity']}\n"
+            f"Mínimo configurado: {stock_item.get('min_quantity', 5)}"
+        )
+        await send_whatsapp_message(ADMIN_PHONE, msg)
+        await sio.emit('stock_alert', {
+            "product_id": product_id,
+            "product_name": product_name,
+            "quantity": stock_item["quantity"],
+            "min_quantity": stock_item.get("min_quantity", 5),
+            "message": msg
+        })
+
+async def validate_stock(items):
+    """Valida estoque disponível para todos os itens antes de criar pedido."""
+    errors = []
+    for item in items:
+        pid = item.product_id if hasattr(item, 'product_id') else item["product_id"]
+        qty = item.quantity if hasattr(item, 'quantity') else item["quantity"]
+        pname = item.product_name if hasattr(item, 'product_name') else item.get("product_name", pid)
+
+        stock_item = await db.stock.find_one({"product_id": pid}, {"_id": 0})
+        if not stock_item:
+            continue  # Produto sem controle de estoque — permite
+        if stock_item["quantity"] == 0:
+            errors.append(f"'{pname}' sem estoque")
+        elif qty > stock_item["quantity"]:
+            errors.append(f"'{pname}': solicitado {qty}, disponível {stock_item['quantity']}")
+    if errors:
+        raise HTTPException(status_code=400, detail="Estoque insuficiente: " + "; ".join(errors))
 
 async def deduct_stock(product_id: str, quantity: int):
     """Baixa automática de estoque. Chamada quando item é marcado como delivered."""
@@ -663,6 +759,7 @@ async def deduct_stock(product_id: str, quantity: int):
             "$set": {"last_updated": datetime.now(timezone.utc).isoformat()}
         }
     )
+    await check_stock_alert(product_id)
 
 @api_router.get("/stock", response_model=List[dict])
 async def get_stock():
@@ -691,6 +788,54 @@ async def get_stock_alerts():
     ]
     alerts = await db.stock.aggregate(pipeline).to_list(100)
     return alerts
+
+@api_router.get("/stock/risk-alerts")
+async def get_stock_risk_alerts(current_user: dict = Depends(require_role([UserRole.ADMIN]))):
+    """Detecta produtos com risco de falta baseado no consumo médio diário."""
+    # Calcular consumo dos últimos 7 dias
+    seven_days_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    pipeline = [
+        {"$match": {"is_closed": True, "closed_at": {"$gte": seven_days_ago}}},
+        {"$unwind": "$items"},
+        {"$match": {"items.status": "delivered"}},
+        {"$group": {
+            "_id": "$items.product_id",
+            "product_name": {"$first": "$items.product_name"},
+            "total_consumed": {"$sum": "$items.quantity"}
+        }}
+    ]
+    consumption = await db.orders.aggregate(pipeline).to_list(500)
+    consumption_map = {c["_id"]: c for c in consumption}
+
+    # Comparar com estoque atual
+    stock_items = await db.stock.find({}, {"_id": 0}).to_list(500)
+    risk_alerts = []
+    for s in stock_items:
+        pid = s["product_id"]
+        cons = consumption_map.get(pid)
+        daily_avg = (cons["total_consumed"] / 7) if cons else 0
+        product = await db.products.find_one({"id": pid}, {"_id": 0})
+        product_name = product["name"] if product else (cons["product_name"] if cons else pid)
+
+        if daily_avg > 0 and s["quantity"] < daily_avg:
+            msg = (
+                f"⚠️ Estoque baixo\n"
+                f"Produto: {product_name}\n"
+                f"Quantidade atual: {s['quantity']}\n"
+                f"Consumo médio: {daily_avg:.1f}/dia\n"
+                f"Risco de falta hoje"
+            )
+            risk_alerts.append({
+                "product_id": pid,
+                "product_name": product_name,
+                "current_quantity": s["quantity"],
+                "daily_avg_consumption": round(daily_avg, 1),
+                "days_remaining": round(s["quantity"] / daily_avg, 1) if daily_avg > 0 else None,
+                "message": msg
+            })
+            await send_whatsapp_message(ADMIN_PHONE, msg)
+
+    return risk_alerts
 
 # ==================== CASH REGISTER ROUTES ====================
 @api_router.get("/cash-register/current")
