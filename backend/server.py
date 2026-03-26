@@ -571,10 +571,23 @@ async def update_item_status(order_id: str, item_id: str, status_data: dict):
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
     
+    target_item = None
+    previous_status = None
     for item in order["items"]:
         if item["id"] == item_id:
+            previous_status = item["status"]
             item["status"] = status_data["status"]
+            target_item = item
             break
+    
+    if not target_item:
+        raise HTTPException(status_code=404, detail="Item not found")
+    
+    new_status = status_data["status"]
+    
+    # Baixa automática de estoque: só quando muda para "delivered" pela primeira vez
+    if new_status == "delivered" and previous_status != "delivered":
+        await deduct_stock(target_item["product_id"], target_item["quantity"])
     
     await db.orders.update_one({"id": order_id}, {"$set": {"items": order["items"]}})
     
@@ -583,6 +596,11 @@ async def update_item_status(order_id: str, item_id: str, status_data: dict):
     await sio.emit('kitchen_update', await db.orders.find({"is_closed": False}, {"_id": 0}).to_list(100))
     await sio.emit('bar_update', await db.orders.find({"is_closed": False}, {"_id": 0}).to_list(100))
     await sio.emit('order_updated', updated_order)
+    
+    # Emitir atualização de estoque em tempo real
+    if new_status == "delivered" and previous_status != "delivered":
+        stock_list = await db.stock.find({}, {"_id": 0}).to_list(500)
+        await sio.emit('stock_updated', stock_list)
     
     return {"message": "Item status updated"}
 
@@ -627,6 +645,25 @@ async def close_order(order_id: str, payment_data: dict):
     return {"message": "Order closed successfully"}
 
 # ==================== STOCK ROUTES ====================
+
+async def deduct_stock(product_id: str, quantity: int):
+    """Baixa automática de estoque. Chamada quando item é marcado como delivered."""
+    stock_item = await db.stock.find_one({"product_id": product_id}, {"_id": 0})
+    if not stock_item:
+        return  # Produto sem controle de estoque — ignora
+    if stock_item["quantity"] < quantity:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Estoque insuficiente para '{product_id}'. Disponível: {stock_item['quantity']}, Solicitado: {quantity}"
+        )
+    await db.stock.update_one(
+        {"product_id": product_id},
+        {
+            "$inc": {"quantity": -quantity},
+            "$set": {"last_updated": datetime.now(timezone.utc).isoformat()}
+        }
+    )
+
 @api_router.get("/stock", response_model=List[dict])
 async def get_stock():
     stock = await db.stock.find({}, {"_id": 0}).to_list(500)
