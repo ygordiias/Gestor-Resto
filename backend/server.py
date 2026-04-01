@@ -30,10 +30,22 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 hours
 # Password hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# MongoDB connection
+# MongoDB connection — Atlas (TLS) com validação real
 mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+db_name = os.environ['DB_NAME']
+
+# Configuração para Atlas (mongodb+srv) e local
+_mongo_kwargs = {
+    "serverSelectionTimeoutMS": 10000,
+    "connectTimeoutMS": 10000,
+    "socketTimeoutMS": 20000,
+}
+if mongo_url.startswith("mongodb+srv://") or "mongodb.net" in mongo_url:
+    _mongo_kwargs["tls"] = True
+    _mongo_kwargs["tlsAllowInvalidCertificates"] = False
+
+client = AsyncIOMotorClient(mongo_url, **_mongo_kwargs)
+db = client[db_name]
 
 # Socket.IO setup
 sio = socketio.AsyncServer(
@@ -51,6 +63,61 @@ security = HTTPBearer()
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# ==================== STARTUP: validação real do MongoDB ====================
+@app.on_event("startup")
+async def startup_validate_db():
+    """Valida conexão com MongoDB no startup. Se falhar, para o servidor."""
+    try:
+        result = await client.admin.command("ping")
+        if result.get("ok") != 1.0:
+            raise Exception("MongoDB ping retornou status != ok")
+        logger.info(f"MongoDB conectado com sucesso: {mongo_url[:30]}...")
+
+        # Auto-create admin user se não existir
+        admin = await db.users.find_one({"email": "admin@teste.com"})
+        if not admin:
+            from passlib.context import CryptContext as _PC
+            _pwd = _PC(schemes=["bcrypt"], deprecated="auto")
+            admin_dict = {
+                "id": str(uuid.uuid4()),
+                "name": "Administrador",
+                "email": "admin@teste.com",
+                "role": "admin",
+                "password": _pwd.hash("123456"),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            await db.users.insert_one(admin_dict)
+            logger.info("Usuário admin@teste.com criado automaticamente")
+        else:
+            logger.info("Usuário admin@teste.com já existe")
+
+    except Exception as e:
+        logger.critical(f"FALHA na conexão com MongoDB: {e}")
+        logger.critical("O servidor NÃO pode operar sem banco de dados. Verifique MONGO_URL no .env")
+        raise SystemExit(1)
+
+# ==================== HEALTH / PING ====================
+@app.get("/health")
+async def health_check():
+    """Health check — verifica se MongoDB está respondendo."""
+    try:
+        result = await client.admin.command("ping")
+        mongo_ok = result.get("ok") == 1.0
+    except Exception:
+        mongo_ok = False
+    if not mongo_ok:
+        raise HTTPException(status_code=503, detail="MongoDB indisponível")
+    return {"status": "healthy", "database": "connected"}
+
+@api_router.get("/health")
+async def health_check_api():
+    """Health check via /api/health (compatível com proxy reverso)."""
+    return await health_check()
+
+@api_router.get("/ping")
+async def ping():
+    return {"message": "pong", "timestamp": datetime.now(timezone.utc).isoformat()}
 
 # ==================== ENUMS ====================
 class UserRole(str, Enum):
@@ -322,6 +389,15 @@ async def login(login_data: UserLogin):
 @api_router.get("/auth/me")
 async def get_me(current_user: dict = Depends(get_current_user)):
     return {k: v for k, v in current_user.items() if k != "password"}
+
+# Alias diretos: POST /api/login e POST /api/register
+@api_router.post("/login", response_model=Token)
+async def login_alias(login_data: UserLogin):
+    return await login(login_data)
+
+@api_router.post("/register", response_model=Token)
+async def register_alias(user_data: UserCreate):
+    return await register(user_data)
 
 # ==================== USER ROUTES ====================
 @api_router.get("/users", response_model=List[dict])
