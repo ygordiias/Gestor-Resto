@@ -1244,6 +1244,193 @@ async def seed_database():
     
     return {"message": "Database seeded successfully"}
 
+# ==================== PUBLIC ROUTES (Cliente Online) ====================
+# Rotas sem autenticação — acessíveis pelo frontend do cliente
+
+class PublicOrderItem(BaseModel):
+    product_id: str
+    name: str
+    price: float
+    quantity: int
+
+class PublicOrderCreate(BaseModel):
+    customer_name: str
+    customer_phone: str
+    delivery_type: str  # "retirada" | "delivery"
+    address: Optional[str] = None
+    payment_method: str  # "pix" | "card" | "cash"
+    change_for: Optional[float] = None
+    items: List[PublicOrderItem]
+
+async def generate_order_code():
+    """Gera código curto incremental: EM-0001, EM-0002..."""
+    last = await db.order_counters.find_one_and_update(
+        {"_id": "public_order"},
+        {"$inc": {"seq": 1}},
+        upsert=True,
+        return_document=True,
+        projection={"_id": 0}
+    )
+    seq = last.get("seq", 1) if last else 1
+    return f"EM-{seq:04d}"
+
+@api_router.get("/public/config")
+async def get_public_config():
+    """Configurações públicas do restaurante."""
+    config = await db.settings.find_one({"_id": "public_config"}, {"_id": 0})
+    if not config:
+        config = {
+            "restaurant_name": "Gestor Restô",
+            "whatsapp": "5516981214154",
+            "delivery_fee": 5.00,
+            "delivery_enabled": True,
+            "pickup_enabled": True,
+            "min_order": 15.00,
+            "open": True,
+            "hours": "18:00 - 23:00",
+        }
+    return config
+
+@api_router.get("/public/cardapio/categorias")
+async def get_public_categories():
+    """Lista categorias públicas."""
+    categories = await db.categories.find({}, {"_id": 0}).to_list(100)
+    return categories
+
+@api_router.get("/public/cardapio")
+async def get_public_menu():
+    """Retorna cardápio público (sem custo/margem)."""
+    products = await db.products.find(
+        {"is_available": True},
+        {"_id": 0, "cost": 0}
+    ).to_list(500)
+    categories = await db.categories.find({}, {"_id": 0}).to_list(100)
+    return {"products": products, "categories": categories}
+
+@api_router.post("/public/pedido")
+async def create_public_order(order_data: PublicOrderCreate):
+    """Cria pedido online — integra com sistema existente."""
+    if not order_data.items:
+        raise HTTPException(status_code=400, detail="Pedido deve ter pelo menos 1 item")
+
+    if order_data.delivery_type == "delivery" and not order_data.address:
+        raise HTTPException(status_code=400, detail="Endereço obrigatório para delivery")
+
+    # Validar estoque usando items como dicts compatíveis com validate_stock
+    stock_items = []
+    for item in order_data.items:
+        stock_items.append(type('obj', (object,), {
+            'product_id': item.product_id,
+            'quantity': item.quantity,
+            'product_name': item.name,
+        })())
+    await validate_stock(stock_items)
+
+    # Gerar código do pedido
+    order_code = await generate_order_code()
+
+    # Montar items no formato do sistema existente
+    order_items = []
+    for item in order_data.items:
+        product = await db.products.find_one({"id": item.product_id}, {"_id": 0})
+        item_type = product.get("type", "food") if product else "food"
+        order_items.append({
+            "id": str(uuid.uuid4()),
+            "product_id": item.product_id,
+            "product_name": item.name,
+            "quantity": item.quantity,
+            "unit_price": item.price,
+            "type": item_type,
+            "status": "pending",
+            "notes": None,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        })
+
+    subtotal = sum(i["unit_price"] * i["quantity"] for i in order_items)
+
+    # Buscar taxa de entrega
+    config = await db.settings.find_one({"_id": "public_config"})
+    delivery_fee = 0.0
+    if order_data.delivery_type == "delivery":
+        delivery_fee = config.get("delivery_fee", 5.0) if config else 5.0
+
+    total = subtotal + delivery_fee
+
+    order_dict = {
+        "id": str(uuid.uuid4()),
+        "order_code": order_code,
+        "source": "online",
+        "origin": "web",
+        "table_id": None,
+        "table_number": None,
+        "waiter_id": None,
+        "waiter_name": None,
+        "items": order_items,
+        "status": "pending",
+        "subtotal": subtotal,
+        "delivery_fee": delivery_fee,
+        "service_fee": 0,
+        "service_fee_percentage": 0,
+        "total": total,
+        "is_closed": False,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "closed_at": None,
+        "customer_name": order_data.customer_name,
+        "customer_phone": order_data.customer_phone,
+        "delivery_type": order_data.delivery_type,
+        "address": order_data.address,
+        "payment_method": order_data.payment_method,
+        "payment_status": "pending",
+        "change_for": order_data.change_for,
+    }
+
+    await db.orders.insert_one(order_dict)
+
+    # Emitir para cozinha/bar via Socket.IO
+    await emit_order_updates(order_items)
+    await sio.emit('new_online_order', {
+        "order_code": order_code,
+        "customer_name": order_data.customer_name,
+        "delivery_type": order_data.delivery_type,
+        "total": total,
+        "items_count": len(order_items),
+    })
+
+    return {
+        "order_code": order_code,
+        "order_id": order_dict["id"],
+        "total": total,
+        "subtotal": subtotal,
+        "delivery_fee": delivery_fee,
+        "status": "pending",
+        "payment_status": "pending",
+    }
+
+@api_router.get("/public/pedido/{codigo}")
+async def get_public_order_status(codigo: str):
+    """Consulta status do pedido pelo código."""
+    order = await db.orders.find_one({"order_code": codigo}, {"_id": 0})
+    if not order:
+        raise HTTPException(status_code=404, detail="Pedido não encontrado")
+
+    items_status = []
+    for item in order.get("items", []):
+        items_status.append({
+            "name": item["product_name"],
+            "quantity": item["quantity"],
+            "status": item["status"],
+        })
+
+    return {
+        "order_code": order["order_code"],
+        "status": order["status"],
+        "payment_status": order.get("payment_status", "pending"),
+        "items": items_status,
+        "total": order["total"],
+        "delivery_type": order.get("delivery_type"),
+        "created_at": order.get("created_at"),
+    }
+
 # Include router and middleware
 app.include_router(api_router)
 

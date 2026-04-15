@@ -17,6 +17,7 @@ import ReportsPage from './pages/ReportsPage';
 import UsersPage from './pages/UsersPage';
 import InvoicesPage from './pages/InvoicesPage';
 import SettingsPage from './pages/SettingsPage';
+import ClienteApp from './cliente/ClienteApp';
 
 // Protected Route Component
 function ProtectedRoute({ children, allowedRoles }) {
@@ -69,6 +70,9 @@ function AppRoutes() {
 
   return (
     <Routes>
+      {/* Frontend Cliente — público, sem auth */}
+      <Route path="/cliente/*" element={<ClienteApp />} />
+
       <Route path="/login" element={<LoginPage />} />
       
       <Route
