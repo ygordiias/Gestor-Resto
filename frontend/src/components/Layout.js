@@ -26,6 +26,19 @@ import {
 import { Logo } from './Logo';
 
 const navigation = {
+  superadmin: [
+    { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
+    { name: 'Mesas', href: '/tables', icon: UtensilsCrossed },
+    { name: 'Cozinha', href: '/kitchen', icon: ChefHat },
+    { name: 'Bar', href: '/bar', icon: Wine },
+    { name: 'Caixa', href: '/cashier', icon: CreditCard },
+    { name: 'Cardápio', href: '/menu', icon: BookOpen },
+    { name: 'Estoque', href: '/stock', icon: Package },
+    { name: 'Relatórios', href: '/reports', icon: BarChart3 },
+    { name: 'Usuários', href: '/users', icon: Users },
+    { name: 'Notas Fiscais', href: '/invoices', icon: FileText },
+    { name: 'Configurações', href: '/settings', icon: Settings },
+  ],
   admin: [
     { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
     { name: 'Mesas', href: '/tables', icon: UtensilsCrossed },

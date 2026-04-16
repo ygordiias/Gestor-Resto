@@ -49,6 +49,7 @@ export function AuthProvider({ children }) {
 
   const hasRole = (roles) => {
     if (!user) return false;
+    if (user.role === 'superadmin') return true;
     if (typeof roles === 'string') return user.role === roles;
     return roles.includes(user.role);
   };

@@ -74,6 +74,24 @@ async def startup_validate_db():
             raise Exception("MongoDB ping retornou status != ok")
         logger.info(f"MongoDB conectado com sucesso: {mongo_url[:30]}...")
 
+        # Auto-create superadmin
+        superadmin = await db.users.find_one({"email": "ygor@gestorresto.com"})
+        if not superadmin:
+            from passlib.context import CryptContext as _PC
+            _pwd = _PC(schemes=["bcrypt"], deprecated="auto")
+            sa_dict = {
+                "id": str(uuid.uuid4()),
+                "name": "Ygor - Super Admin",
+                "email": "ygor@gestorresto.com",
+                "role": "superadmin",
+                "password": _pwd.hash("87yOY4f@"),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            await db.users.insert_one(sa_dict)
+            logger.info("Superadmin ygor@gestorresto.com criado")
+        else:
+            logger.info("Superadmin ygor@gestorresto.com ja existe")
+
         # Auto-create admin user se não existir
         admin = await db.users.find_one({"email": "admin@teste.com"})
         if not admin:
@@ -121,6 +139,7 @@ async def ping():
 
 # ==================== ENUMS ====================
 class UserRole(str, Enum):
+    SUPERADMIN = "superadmin"
     ADMIN = "admin"
     WAITER = "waiter"
     CASHIER = "cashier"
@@ -346,7 +365,11 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
 
 def require_role(allowed_roles: List[UserRole]):
     async def role_checker(current_user: dict = Depends(get_current_user)):
-        if current_user["role"] not in [r.value for r in allowed_roles]:
+        user_role = current_user["role"]
+        # Superadmin sempre tem acesso total
+        if user_role == UserRole.SUPERADMIN.value:
+            return current_user
+        if user_role not in [r.value for r in allowed_roles]:
             raise HTTPException(status_code=403, detail="Insufficient permissions")
         return current_user
     return role_checker
@@ -407,6 +430,10 @@ async def get_users(current_user: dict = Depends(require_role([UserRole.ADMIN]))
 
 @api_router.post("/users", response_model=dict)
 async def create_user(user_data: UserCreate, current_user: dict = Depends(require_role([UserRole.ADMIN]))):
+    # Admin não pode criar superadmin
+    if user_data.role == UserRole.SUPERADMIN and current_user["role"] != UserRole.SUPERADMIN.value:
+        raise HTTPException(status_code=403, detail="Apenas superadmin pode criar outros superadmins")
+    
     existing = await db.users.find_one({"email": user_data.email})
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
@@ -422,6 +449,9 @@ async def create_user(user_data: UserCreate, current_user: dict = Depends(requir
 
 @api_router.put("/users/{user_id}")
 async def update_user(user_id: str, user_data: dict, current_user: dict = Depends(require_role([UserRole.ADMIN]))):
+    # Admin não pode promover para superadmin
+    if user_data.get("role") == "superadmin" and current_user["role"] != "superadmin":
+        raise HTTPException(status_code=403, detail="Apenas superadmin pode definir role superadmin")
     if "password" in user_data:
         user_data["password"] = get_password_hash(user_data["password"])
     await db.users.update_one({"id": user_id}, {"$set": user_data})

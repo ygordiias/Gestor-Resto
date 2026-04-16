@@ -69,6 +69,7 @@ export function getTableStatusLabel(status) {
 
 export function getRoleLabel(role) {
   const labels = {
+    superadmin: 'Super Admin',
     admin: 'Administrador',
     waiter: 'Garçom',
     cashier: 'Caixa',
