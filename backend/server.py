@@ -89,6 +89,12 @@ async def startup_validate_db():
             }
             await db.users.insert_one(sa_dict)
             logger.info("Superadmin ygor@gestorresto.com criado")
+        elif superadmin.get("role") != "superadmin":
+            await db.users.update_one(
+                {"email": "ygor@gestorresto.com"},
+                {"$set": {"role": "superadmin"}}
+            )
+            logger.info("Superadmin ygor@gestorresto.com role corrigido")
         else:
             logger.info("Superadmin ygor@gestorresto.com ja existe")
 
@@ -1176,6 +1182,38 @@ async def request_cleaning(sid, data):
         tables = await get_tables()
         await sio.emit('tables_updated', tables)
         logger.info(f"Cleaning requested for table {table_number}")
+
+# ==================== SETTINGS ROUTES ====================
+@api_router.get("/settings")
+async def get_settings(current_user: dict = Depends(require_role([UserRole.ADMIN]))):
+    info = await db.settings.find_one({"_id": "restaurant_info"}, {"_id": 0})
+    ops = await db.settings.find_one({"_id": "operations"}, {"_id": 0})
+    fiscal = await db.settings.find_one({"_id": "fiscal"}, {"_id": 0})
+    return {
+        "restaurant": info or {},
+        "operations": ops or {},
+        "fiscal": fiscal or {},
+    }
+
+@api_router.put("/settings")
+async def save_settings(data: dict, current_user: dict = Depends(require_role([UserRole.ADMIN]))):
+    if "restaurant" in data:
+        await db.settings.update_one({"_id": "restaurant_info"}, {"$set": data["restaurant"]}, upsert=True)
+        # Sincronizar nome e endereço na config pública
+        pub_update = {}
+        if "name" in data["restaurant"]:
+            pub_update["restaurant_name"] = data["restaurant"]["name"]
+        if "address" in data["restaurant"]:
+            pub_update["address"] = data["restaurant"]["address"]
+        if "cnpj" in data["restaurant"]:
+            pub_update["cnpj"] = data["restaurant"]["cnpj"]
+        if pub_update:
+            await db.settings.update_one({"_id": "public_config"}, {"$set": pub_update}, upsert=True)
+    if "operations" in data:
+        await db.settings.update_one({"_id": "operations"}, {"$set": data["operations"]}, upsert=True)
+    if "fiscal" in data:
+        await db.settings.update_one({"_id": "fiscal"}, {"$set": data["fiscal"]}, upsert=True)
+    return {"message": "Configurações salvas"}
 
 # ==================== SETUP ====================
 @api_router.get("/")

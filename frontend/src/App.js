@@ -37,9 +37,10 @@ function ProtectedRoute({ children, allowedRoles }) {
     return <Navigate to="/login" replace />;
   }
 
-  if (allowedRoles && !allowedRoles.includes(user.role)) {
+  if (allowedRoles && !allowedRoles.includes(user.role) && user.role !== 'superadmin') {
     // Redirect to appropriate page based on role
     const roleRoutes = {
+      superadmin: '/dashboard',
       admin: '/dashboard',
       waiter: '/tables',
       cashier: '/cashier',
@@ -59,6 +60,7 @@ function AppRoutes() {
   const getDefaultRoute = () => {
     if (!user) return '/login';
     const roleRoutes = {
+      superadmin: '/dashboard',
       admin: '/dashboard',
       waiter: '/tables',
       cashier: '/cashier',
