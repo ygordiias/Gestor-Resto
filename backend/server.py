@@ -1183,6 +1183,63 @@ async def request_cleaning(sid, data):
         await sio.emit('tables_updated', tables)
         logger.info(f"Cleaning requested for table {table_number}")
 
+# ==================== TECHNICAL SHEETS ROUTES ====================
+@api_router.get("/technical-sheets")
+async def get_technical_sheets(current_user: dict = Depends(get_current_user)):
+    sheets = await db.technical_sheets.find({}, {"_id": 0}).to_list(500)
+    return sheets
+
+@api_router.get("/technical-sheets/by-product/{product_id}")
+async def get_sheet_by_product(product_id: str, current_user: dict = Depends(get_current_user)):
+    sheet = await db.technical_sheets.find_one({"product_id": product_id}, {"_id": 0})
+    if not sheet:
+        raise HTTPException(status_code=404, detail="Ficha técnica não encontrada")
+    return sheet
+
+@api_router.get("/technical-sheets/{sheet_id}")
+async def get_technical_sheet(sheet_id: str, current_user: dict = Depends(get_current_user)):
+    sheet = await db.technical_sheets.find_one({"id": sheet_id}, {"_id": 0})
+    if not sheet:
+        raise HTTPException(status_code=404, detail="Ficha técnica não encontrada")
+    return sheet
+
+@api_router.post("/technical-sheets")
+async def create_technical_sheet(data: dict, current_user: dict = Depends(require_role([UserRole.ADMIN]))):
+    existing = await db.technical_sheets.find_one({"product_id": data["product_id"]})
+    if existing:
+        raise HTTPException(status_code=400, detail="Já existe ficha técnica para este produto")
+    sheet = {
+        "id": str(uuid.uuid4()),
+        "product_id": data["product_id"],
+        "product_name": data.get("product_name", ""),
+        "image_url": data.get("image_url", ""),
+        "ingredients": data.get("ingredients", []),
+        "assembly_steps": data.get("assembly_steps", []),
+        "notes": data.get("notes", ""),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.technical_sheets.insert_one(sheet)
+    sheet.pop("_id", None)
+    return sheet
+
+@api_router.put("/technical-sheets/{sheet_id}")
+async def update_technical_sheet(sheet_id: str, data: dict, current_user: dict = Depends(require_role([UserRole.ADMIN]))):
+    update = {k: v for k, v in data.items() if k not in ("id", "_id", "created_at")}
+    update["updated_at"] = datetime.now(timezone.utc).isoformat()
+    result = await db.technical_sheets.update_one({"id": sheet_id}, {"$set": update})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Ficha técnica não encontrada")
+    sheet = await db.technical_sheets.find_one({"id": sheet_id}, {"_id": 0})
+    return sheet
+
+@api_router.delete("/technical-sheets/{sheet_id}")
+async def delete_technical_sheet(sheet_id: str, current_user: dict = Depends(require_role([UserRole.ADMIN]))):
+    result = await db.technical_sheets.delete_one({"id": sheet_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Ficha técnica não encontrada")
+    return {"message": "Ficha técnica excluída"}
+
 # ==================== SETTINGS ROUTES ====================
 @api_router.get("/settings")
 async def get_settings(current_user: dict = Depends(require_role([UserRole.ADMIN]))):

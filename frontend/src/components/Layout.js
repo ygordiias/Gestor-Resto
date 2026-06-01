@@ -22,6 +22,7 @@ import {
   X,
   BookOpen,
   Bell,
+  ClipboardList,
 } from 'lucide-react';
 import { Logo } from './Logo';
 
@@ -37,6 +38,7 @@ const navigation = {
     { name: 'Relatórios', href: '/reports', icon: BarChart3 },
     { name: 'Usuários', href: '/users', icon: Users },
     { name: 'Notas Fiscais', href: '/invoices', icon: FileText },
+    { name: 'Fichas Tecnicas', href: '/technical-sheets', icon: ClipboardList },
     { name: 'Configurações', href: '/settings', icon: Settings },
   ],
   admin: [
@@ -50,21 +52,26 @@ const navigation = {
     { name: 'Relatórios', href: '/reports', icon: BarChart3 },
     { name: 'Usuários', href: '/users', icon: Users },
     { name: 'Notas Fiscais', href: '/invoices', icon: FileText },
+    { name: 'Fichas Tecnicas', href: '/technical-sheets', icon: ClipboardList },
     { name: 'Configurações', href: '/settings', icon: Settings },
   ],
   waiter: [
     { name: 'Mesas', href: '/tables', icon: UtensilsCrossed },
+    { name: 'Fichas Tecnicas', href: '/technical-sheets', icon: ClipboardList },
   ],
   cashier: [
     { name: 'Caixa', href: '/cashier', icon: CreditCard },
     { name: 'Mesas', href: '/tables', icon: UtensilsCrossed },
     { name: 'Notas Fiscais', href: '/invoices', icon: FileText },
+    { name: 'Fichas Tecnicas', href: '/technical-sheets', icon: ClipboardList },
   ],
   kitchen: [
     { name: 'Cozinha', href: '/kitchen', icon: ChefHat },
+    { name: 'Fichas Tecnicas', href: '/technical-sheets', icon: ClipboardList },
   ],
   bar: [
     { name: 'Bar', href: '/bar', icon: Wine },
+    { name: 'Fichas Tecnicas', href: '/technical-sheets', icon: ClipboardList },
   ],
 };
 

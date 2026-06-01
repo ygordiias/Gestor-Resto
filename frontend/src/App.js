@@ -17,6 +17,9 @@ import ReportsPage from './pages/ReportsPage';
 import UsersPage from './pages/UsersPage';
 import InvoicesPage from './pages/InvoicesPage';
 import SettingsPage from './pages/SettingsPage';
+import TechnicalSheetsPage from './pages/TechnicalSheetsPage';
+import TechnicalSheetFormPage from './pages/TechnicalSheetFormPage';
+import TechnicalSheetViewPage from './pages/TechnicalSheetViewPage';
 import ClienteApp from './cliente/ClienteApp';
 
 // Protected Route Component
@@ -181,6 +184,38 @@ function AppRoutes() {
         element={
           <ProtectedRoute allowedRoles={['admin']}>
             <SettingsPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/technical-sheets"
+        element={
+          <ProtectedRoute allowedRoles={['admin', 'waiter', 'cashier', 'kitchen', 'bar']}>
+            <TechnicalSheetsPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/technical-sheets/new"
+        element={
+          <ProtectedRoute allowedRoles={['admin']}>
+            <TechnicalSheetFormPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/technical-sheets/:id"
+        element={
+          <ProtectedRoute allowedRoles={['admin', 'waiter', 'cashier', 'kitchen', 'bar']}>
+            <TechnicalSheetViewPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/technical-sheets/:id/edit"
+        element={
+          <ProtectedRoute allowedRoles={['admin']}>
+            <TechnicalSheetFormPage />
           </ProtectedRoute>
         }
       />
