@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import Layout from '../components/Layout';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { Button } from '../components/ui/button';
@@ -21,10 +22,14 @@ import {
   UtensilsCrossed,
   Wine,
   Image,
-  DollarSign
+  DollarSign,
+  FileText
 } from 'lucide-react';
 
+const API = process.env.REACT_APP_BACKEND_URL;
+
 export default function MenuPage() {
+  const navigate = useNavigate();
   const [products, setProducts] = useState([]);
   const [categories, setCategories] = useState([]);
   const [searchTerm, setSearchTerm] = useState('');
@@ -218,6 +223,27 @@ export default function MenuPage() {
     return ((price - cost) / price * 100).toFixed(1);
   };
 
+  // Abre ficha tecnica existente ou cria uma nova ja vinculada ao produto
+  const openTechnicalSheet = async (product) => {
+    try {
+      const token = localStorage.getItem('token');
+      const res = await fetch(`${API}/api/technical-sheets/by-product/${product.id}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const sheet = await res.json();
+        navigate(`/technical-sheets/${sheet.id}`);
+      } else if (res.status === 404) {
+        toast.info('Criando nova ficha tecnica para ' + product.name);
+        navigate(`/technical-sheets/new?product_id=${product.id}`);
+      } else {
+        toast.error('Erro ao verificar ficha tecnica');
+      }
+    } catch (e) {
+      toast.error('Erro de conexao');
+    }
+  };
+
   if (loading) {
     return (
       <Layout title="Cardápio">
@@ -329,6 +355,17 @@ export default function MenuPage() {
                       >
                         <Pencil className="h-4 w-4 mr-2" />
                         Editar
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="flex-1 border-primary/40 text-primary hover:bg-primary/10"
+                        onClick={() => openTechnicalSheet(product)}
+                        data-testid={`technical-sheet-${product.id}`}
+                        title="Abrir ou criar ficha tecnica"
+                      >
+                        <FileText className="h-4 w-4 mr-2" />
+                        Ficha Tecnica
                       </Button>
                       <Button
                         variant="outline"

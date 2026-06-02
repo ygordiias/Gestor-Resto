@@ -163,12 +163,60 @@
   color: hsl(var(--foreground));
 }
 
-/* Print styles */
+/* Print styles - Otimizado para impressao A4 da Ficha Tecnica */
 @media print {
+  @page {
+    size: A4;
+    margin: 12mm 14mm;
+  }
+
+  html, body {
+    background: #fff !important;
+    color: #000 !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  /* Esconde tudo por padrao */
+  body * {
+    visibility: hidden;
+  }
+  /* Mostra somente a area imprimivel */
+  .print-area, .print-area * {
+    visibility: visible;
+  }
+  .print-area {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    padding: 0;
+    margin: 0;
+    background: #fff !important;
+    color: #000 !important;
+  }
+
   .no-print {
     display: none !important;
   }
-  body { background: #fff !important; color: #000 !important; }
+
   .print\:block { display: block !important; }
+  .print\:hidden { display: none !important; }
   .print\:h-40 { height: 10rem !important; }
+
+  /* Evita quebras feias no meio de blocos */
+  .print-avoid-break {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  /* Forca cores em titulos da ficha */
+  .print-area h1, .print-area h2, .print-area h3 {
+    color: #000 !important;
+  }
+  .print-area table { width: 100%; border-collapse: collapse; }
+  .print-area td, .print-area th {
+    border-bottom: 1px solid #ccc;
+    padding: 4px 6px;
+  }
 }
