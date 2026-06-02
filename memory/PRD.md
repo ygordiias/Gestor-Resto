@@ -58,6 +58,34 @@
 }
 ```
 
+### Fichas Técnicas (módulo completo — Fev/2026)
+- [x] Backend CRUD `/api/technical-sheets` (list, get, create, update, delete)
+- [x] Endpoint smart: `GET /api/technical-sheets/by-product/{product_id}` (404 → criar nova)
+- [x] Página lista `/technical-sheets` com busca e cards
+- [x] Formulário `/technical-sheets/new` e `/technical-sheets/:id/edit`
+- [x] Upload de imagem em base64 (até 2MB) + URL externa
+- [x] Pré-preenchimento via query param `?product_id=...`
+- [x] Botão **"Ficha Técnica"** em cada card do Cardápio (abre existente ou cria nova)
+- [x] Visualização `/technical-sheets/:id` com print-area otimizada A4
+- [x] Impressão via `window.print()`: logo, foto, nome, ingredientes (tabela), passos (lista), observações, data, rodapé
+- [x] Permissão: visualização para todos os logados; criação/edição para admin/superadmin
+- [x] Testes Pytest: `/app/backend/tests/test_technical_sheets.py` (10/10 verde)
+
+### Modelo Ficha Técnica
+```json
+{
+  "id": "uuid",
+  "product_id": "uuid",
+  "product_name": "...",
+  "image_url": "https://... ou data:image/...",
+  "ingredients": [{"name": "Pão", "quantity": "1 un"}],
+  "assembly_steps": ["Montar...", "Servir..."],
+  "notes": "...",
+  "created_at": "iso8601",
+  "updated_at": "iso8601"
+}
+```
+
 ### Integração
 - Pedidos online → mesma collection `orders` → aparece na Cozinha/Bar/Caixa
 - Usa `validate_stock()` existente antes de criar pedido
