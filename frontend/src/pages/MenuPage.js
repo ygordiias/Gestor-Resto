@@ -30,6 +30,43 @@ import {
 
 const API = process.env.REACT_APP_BACKEND_URL;
 
+function RecipeSummary({ recipeItems, stockOptions, salePrice }) {
+  let cost = 0;
+  for (const item of recipeItems) {
+    const stock = stockOptions.find(s => s.id === item.stock_item_id);
+    const qty = parseFloat(item.quantity) || 0;
+    if (stock && qty > 0) cost += qty * stock.unit_cost;
+  }
+  const profit = salePrice - cost;
+  const margin = salePrice > 0 ? (profit / salePrice) * 100 : 0;
+  return (
+    <div className="grid grid-cols-4 gap-2 p-3 rounded-lg bg-muted/40 border border-border" data-testid="recipe-summary">
+      <div className="text-center">
+        <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Venda</p>
+        <p className="text-sm font-bold">{formatCurrency(salePrice)}</p>
+      </div>
+      <div className="text-center">
+        <p className="text-[10px] text-muted-foreground uppercase tracking-wider">CMV</p>
+        <p className="text-sm font-bold text-foreground" data-testid="recipe-cost">{formatCurrency(cost)}</p>
+      </div>
+      <div className="text-center">
+        <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Lucro</p>
+        <p className={cn("text-sm font-bold", profit >= 0 ? "text-emerald-500" : "text-destructive")} data-testid="recipe-profit">
+          {formatCurrency(profit)}
+        </p>
+      </div>
+      <div className="text-center">
+        <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Margem</p>
+        <p className={cn("text-sm font-bold",
+          margin >= 50 ? "text-emerald-500" : margin >= 20 ? "text-amber-400" : "text-destructive"
+        )} data-testid="recipe-margin">
+          {margin.toFixed(1)}%
+        </p>
+      </div>
+    </div>
+  );
+}
+
 export default function MenuPage() {
   const navigate = useNavigate();
   const [products, setProducts] = useState([]);
@@ -63,9 +100,33 @@ export default function MenuPage() {
     icon: '',
   });
 
+  // Recipe / CMV State
+  const [isRecipeDialogOpen, setIsRecipeDialogOpen] = useState(false);
+  const [recipeProduct, setRecipeProduct] = useState(null);
+  const [recipeId, setRecipeId] = useState(null);
+  const [recipeItems, setRecipeItems] = useState([]); // [{stock_item_id, quantity}]
+  const [stockOptions, setStockOptions] = useState([]); // [{id, product_id, unit, unit_cost, name}]
+  const [recipeLoading, setRecipeLoading] = useState(false);
+  const [recipeSaving, setRecipeSaving] = useState(false);
+  // Map de CMV por product_id: {cost, profit, margin, has_recipe}
+  const [cmvMap, setCmvMap] = useState({});
+
   useEffect(() => {
     fetchData();
   }, []);
+
+  // Recarrega CMV report quando produtos sao carregados
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!products || products.length === 0) return;
+    cmvAPI.getReport()
+      .then(res => {
+        const m = {};
+        res.data.forEach(row => { m[row.product_id] = row; });
+        setCmvMap(m);
+      })
+      .catch(() => {});
+  }, [products.length]);
 
   const fetchData = async () => {
     try {
@@ -246,6 +307,83 @@ export default function MenuPage() {
     }
   };
 
+  // ============ RECEITA TECNICA / CMV ============
+  const openRecipeDialog = async (product) => {
+    setRecipeProduct(product);
+    setRecipeId(null);
+    setRecipeItems([]);
+    setIsRecipeDialogOpen(true);
+    setRecipeLoading(true);
+    try {
+      // Carrega itens de estoque (precisam ter unit_cost > 0 idealmente)
+      const stockRes = await stockAPI.getAll();
+      const allProds = products.length ? products : (await productsAPI.getAll()).data;
+      const prodById = Object.fromEntries(allProds.map(p => [p.id, p]));
+      const opts = stockRes.data.map(s => ({
+        id: s.id,
+        product_id: s.product_id,
+        unit: s.unit,
+        unit_cost: Number(s.unit_cost || 0),
+        name: prodById[s.product_id]?.name || s.product_id,
+      })).sort((a, b) => a.name.localeCompare(b.name));
+      setStockOptions(opts);
+
+      // Tenta carregar receita existente
+      try {
+        const recipeRes = await recipesAPI.getByProduct(product.id);
+        setRecipeId(recipeRes.data.id);
+        setRecipeItems(recipeRes.data.ingredients || []);
+      } catch (e) {
+        // 404 = nao existe ainda
+        setRecipeItems([{ stock_item_id: '', quantity: '' }]);
+      }
+    } catch (e) {
+      toast.error('Erro ao carregar receita');
+    } finally {
+      setRecipeLoading(false);
+    }
+  };
+
+  const addRecipeItem = () => setRecipeItems(items => [...items, { stock_item_id: '', quantity: '' }]);
+  const removeRecipeItem = (idx) => setRecipeItems(items => items.filter((_, i) => i !== idx));
+  const updateRecipeItem = (idx, field, value) => {
+    setRecipeItems(items => items.map((it, i) => i === idx ? { ...it, [field]: value } : it));
+  };
+
+  // Calculo em tempo real é feito pelo componente RecipeSummary
+
+  const handleSaveRecipe = async () => {
+    if (!recipeProduct) return;
+    const cleanItems = recipeItems
+      .filter(i => i.stock_item_id && parseFloat(i.quantity) > 0)
+      .map(i => ({ stock_item_id: i.stock_item_id, quantity: parseFloat(i.quantity) }));
+
+    setRecipeSaving(true);
+    try {
+      if (recipeId) {
+        await recipesAPI.update(recipeId, { ingredients: cleanItems });
+      } else {
+        const created = await recipesAPI.create({
+          product_id: recipeProduct.id,
+          ingredients: cleanItems,
+        });
+        setRecipeId(created.data.id);
+      }
+      toast.success('Receita salva!');
+      // Atualiza CMV map para refletir nos cards
+      const reportRes = await cmvAPI.getReport();
+      const map = {};
+      for (const row of reportRes.data) map[row.product_id] = row;
+      setCmvMap(map);
+      setIsRecipeDialogOpen(false);
+    } catch (err) {
+      toast.error(err.response?.data?.detail || 'Erro ao salvar receita');
+    } finally {
+      setRecipeSaving(false);
+    }
+  };
+  // ================================================
+
   if (loading) {
     return (
       <Layout title="Cardápio">
@@ -347,6 +485,42 @@ export default function MenuPage() {
                         </div>
                       </div>
                     </div>
+
+                    {/* CMV / Lucro / Margem */}
+                    {cmvMap[product.id] && (
+                      <div className="mt-3 grid grid-cols-3 gap-2 text-center" data-testid={`cmv-summary-${product.id}`}>
+                        <div className="rounded-md border border-border bg-muted/40 p-2">
+                          <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Custo</p>
+                          <p className="text-sm font-bold text-foreground">
+                            {formatCurrency(cmvMap[product.id].cost)}
+                          </p>
+                        </div>
+                        <div className="rounded-md border border-border bg-muted/40 p-2">
+                          <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Lucro</p>
+                          <p className={cn(
+                            "text-sm font-bold",
+                            cmvMap[product.id].profit >= 0 ? "text-emerald-500" : "text-destructive"
+                          )}>
+                            {formatCurrency(cmvMap[product.id].profit)}
+                          </p>
+                        </div>
+                        <div className="rounded-md border border-border bg-muted/40 p-2">
+                          <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Margem</p>
+                          <p className={cn(
+                            "text-sm font-bold",
+                            cmvMap[product.id].margin >= 50 ? "text-emerald-500" :
+                            cmvMap[product.id].margin >= 20 ? "text-amber-400" : "text-destructive"
+                          )}>
+                            {cmvMap[product.id].margin.toFixed(1)}%
+                          </p>
+                        </div>
+                      </div>
+                    )}
+                    {!cmvMap[product.id]?.has_recipe && (
+                      <p className="mt-2 text-[10px] text-muted-foreground italic" data-testid={`no-recipe-${product.id}`}>
+                        Sem receita técnica · CMV não calculado
+                      </p>
+                    )}
                     <div className="flex gap-2 mt-4 pt-4 border-t">
                       <Button
                         variant="outline"
@@ -368,6 +542,17 @@ export default function MenuPage() {
                       >
                         <FileText className="h-4 w-4 mr-2" />
                         Ficha Tecnica
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="flex-1 border-emerald-500/40 text-emerald-500 hover:bg-emerald-500/10"
+                        onClick={() => openRecipeDialog(product)}
+                        data-testid={`recipe-btn-${product.id}`}
+                        title="Receita tecnica para calculo de CMV"
+                      >
+                        <Calculator className="h-4 w-4 mr-2" />
+                        Receita
                       </Button>
                       <Button
                         variant="outline"
@@ -610,6 +795,125 @@ export default function MenuPage() {
               </Button>
               <Button onClick={handleSaveCategory} data-testid="save-category-btn">
                 Salvar
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        {/* Recipe / CMV Dialog */}
+        <Dialog open={isRecipeDialogOpen} onOpenChange={setIsRecipeDialogOpen}>
+          <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto" data-testid="recipe-dialog">
+            <DialogHeader>
+              <DialogTitle className="font-heading flex items-center gap-2">
+                <Calculator className="h-5 w-5 text-emerald-500" />
+                Receita Técnica · {recipeProduct?.name}
+              </DialogTitle>
+            </DialogHeader>
+
+            {recipeLoading ? (
+              <div className="py-12 text-center text-muted-foreground">Carregando...</div>
+            ) : (
+              <div className="space-y-4">
+                {/* Painel de calculo em tempo real */}
+                {recipeProduct && (
+                  <RecipeSummary
+                    recipeItems={recipeItems}
+                    stockOptions={stockOptions}
+                    salePrice={Number(recipeProduct.price || 0)}
+                  />
+                )}
+
+                {/* Ingredientes */}
+                <div className="space-y-2">
+                  <Label className="flex items-center justify-between">
+                    <span>Ingredientes (itens do estoque)</span>
+                    {stockOptions.length === 0 && (
+                      <span className="text-xs text-amber-500">Nenhum item de estoque cadastrado</span>
+                    )}
+                  </Label>
+
+                  {recipeItems.length === 0 ? (
+                    <p className="text-sm text-muted-foreground py-4 text-center">
+                      Clique em &quot;Adicionar Ingrediente&quot; para iniciar.
+                    </p>
+                  ) : (
+                    recipeItems.map((item, idx) => {
+                      const stock = stockOptions.find(s => s.id === item.stock_item_id);
+                      const qty = parseFloat(item.quantity) || 0;
+                      const line = stock ? qty * stock.unit_cost : 0;
+                      return (
+                        <div key={idx} className="flex gap-2 items-center" data-testid={`recipe-item-${idx}`}>
+                          <Select
+                            value={item.stock_item_id}
+                            onValueChange={v => updateRecipeItem(idx, 'stock_item_id', v)}
+                          >
+                            <SelectTrigger className="flex-1" data-testid={`recipe-stock-select-${idx}`}>
+                              <SelectValue placeholder="Selecione o item do estoque" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {stockOptions.map(s => (
+                                <SelectItem key={s.id} value={s.id}>
+                                  {s.name} · R$ {s.unit_cost.toFixed(2)}/{s.unit}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                          <Input
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            placeholder="Qtd"
+                            value={item.quantity}
+                            onChange={e => updateRecipeItem(idx, 'quantity', e.target.value)}
+                            className="w-24"
+                            data-testid={`recipe-qty-${idx}`}
+                          />
+                          <div className="w-24 text-right text-xs text-muted-foreground">
+                            {stock ? `= ${formatCurrency(line)}` : ''}
+                          </div>
+                          <Button
+                            type="button"
+                            size="icon"
+                            variant="ghost"
+                            onClick={() => removeRecipeItem(idx)}
+                            data-testid={`recipe-remove-${idx}`}
+                          >
+                            <Trash2 className="h-4 w-4 text-destructive" />
+                          </Button>
+                        </div>
+                      );
+                    })
+                  )}
+
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={addRecipeItem}
+                    className="w-full"
+                    disabled={stockOptions.length === 0}
+                    data-testid="recipe-add-item-btn"
+                  >
+                    <Plus className="h-4 w-4 mr-2" /> Adicionar Ingrediente
+                  </Button>
+                </div>
+
+                <p className="text-xs text-muted-foreground">
+                  <TrendingUp className="h-3 w-3 inline mr-1" />
+                  O cálculo usa o custo unitário (R$/unidade) cadastrado em cada item do estoque.
+                </p>
+              </div>
+            )}
+
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setIsRecipeDialogOpen(false)} data-testid="recipe-cancel-btn">
+                Cancelar
+              </Button>
+              <Button
+                onClick={handleSaveRecipe}
+                disabled={recipeSaving || recipeLoading}
+                data-testid="recipe-save-btn"
+              >
+                {recipeSaving ? 'Salvando...' : (recipeId ? 'Atualizar Receita' : 'Criar Receita')}
               </Button>
             </DialogFooter>
           </DialogContent>
