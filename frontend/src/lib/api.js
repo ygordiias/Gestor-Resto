@@ -262,6 +262,22 @@ export const reportsAPI = {
   getProfit: (period) => api.get('/reports/profit', { params: { period } }),
 };
 
+// Recipes (CMV)
+export const recipesAPI = {
+  getAll: () => api.get('/recipes'),
+  getByProduct: (productId) => api.get(`/recipes/by-product/${productId}`),
+  get: (id) => api.get(`/recipes/${id}`),
+  create: (data) => api.post('/recipes', data),
+  update: (id, data) => api.put(`/recipes/${id}`, data),
+  delete: (id) => api.delete(`/recipes/${id}`),
+};
+
+// CMV
+export const cmvAPI = {
+  getProductCmv: (productId) => api.get(`/products/${productId}/cmv`),
+  getReport: () => api.get('/cmv/report'),
+};
+
 // Setup
 export const setupAPI = {
   seed: () => api.post('/setup/seed'),

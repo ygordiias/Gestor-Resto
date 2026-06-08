@@ -238,6 +238,7 @@ class StockItemBase(BaseModel):
     unit: StockUnit
     min_quantity: float = 5
     max_quantity: float = 100
+    unit_cost: float = 0  # CMV: custo unitario do item de estoque (R$ por unidade de medida)
 
 class StockItem(StockItemBase):
     model_config = ConfigDict(extra="ignore")
@@ -1239,6 +1240,148 @@ async def delete_technical_sheet(sheet_id: str, current_user: dict = Depends(req
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Ficha técnica não encontrada")
     return {"message": "Ficha técnica excluída"}
+
+# ==================== RECIPES (CMV) ROUTES ====================
+async def _compute_recipe_cost(recipe: dict) -> dict:
+    """Calcula custo total da receita usando unit_cost dos itens de estoque."""
+    total = 0.0
+    enriched = []
+    for ing in recipe.get("ingredients", []):
+        stock = await db.stock.find_one({"id": ing["stock_item_id"]}, {"_id": 0})
+        unit_cost = float(stock.get("unit_cost", 0) or 0) if stock else 0
+        qty = float(ing.get("quantity", 0) or 0)
+        line = qty * unit_cost
+        total += line
+        # Nome do ingrediente vem do produto vinculado ao item de estoque
+        ing_name = ""
+        unit = ""
+        if stock:
+            prod = await db.products.find_one({"id": stock["product_id"]}, {"_id": 0})
+            ing_name = prod["name"] if prod else stock.get("product_id", "")
+            unit = stock.get("unit", "")
+        enriched.append({
+            "stock_item_id": ing["stock_item_id"],
+            "quantity": qty,
+            "unit_cost": unit_cost,
+            "line_cost": round(line, 2),
+            "ingredient_name": ing_name,
+            "unit": unit,
+        })
+    return {"total_cost": round(total, 2), "ingredients_detail": enriched}
+
+@api_router.get("/recipes")
+async def list_recipes(current_user: dict = Depends(get_current_user)):
+    recipes = await db.recipes.find({}, {"_id": 0}).to_list(1000)
+    return recipes
+
+@api_router.get("/recipes/by-product/{product_id}")
+async def get_recipe_by_product(product_id: str, current_user: dict = Depends(get_current_user)):
+    recipe = await db.recipes.find_one({"product_id": product_id}, {"_id": 0})
+    if not recipe:
+        raise HTTPException(status_code=404, detail="Receita não encontrada")
+    detail = await _compute_recipe_cost(recipe)
+    return {**recipe, **detail}
+
+@api_router.get("/recipes/{recipe_id}")
+async def get_recipe(recipe_id: str, current_user: dict = Depends(get_current_user)):
+    recipe = await db.recipes.find_one({"id": recipe_id}, {"_id": 0})
+    if not recipe:
+        raise HTTPException(status_code=404, detail="Receita não encontrada")
+    detail = await _compute_recipe_cost(recipe)
+    return {**recipe, **detail}
+
+@api_router.post("/recipes")
+async def create_recipe(data: dict, current_user: dict = Depends(require_role([UserRole.ADMIN]))):
+    if not data.get("product_id"):
+        raise HTTPException(status_code=400, detail="product_id é obrigatório")
+    existing = await db.recipes.find_one({"product_id": data["product_id"]})
+    if existing:
+        raise HTTPException(status_code=400, detail="Já existe receita para este produto. Use PUT para atualizar.")
+    recipe = {
+        "id": str(uuid.uuid4()),
+        "product_id": data["product_id"],
+        "ingredients": data.get("ingredients", []),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.recipes.insert_one(recipe)
+    recipe.pop("_id", None)
+    detail = await _compute_recipe_cost(recipe)
+    return {**recipe, **detail}
+
+@api_router.put("/recipes/{recipe_id}")
+async def update_recipe(recipe_id: str, data: dict, current_user: dict = Depends(require_role([UserRole.ADMIN]))):
+    update = {
+        "ingredients": data.get("ingredients", []),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    result = await db.recipes.update_one({"id": recipe_id}, {"$set": update})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Receita não encontrada")
+    recipe = await db.recipes.find_one({"id": recipe_id}, {"_id": 0})
+    detail = await _compute_recipe_cost(recipe)
+    return {**recipe, **detail}
+
+@api_router.delete("/recipes/{recipe_id}")
+async def delete_recipe(recipe_id: str, current_user: dict = Depends(require_role([UserRole.ADMIN]))):
+    result = await db.recipes.delete_one({"id": recipe_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Receita não encontrada")
+    return {"message": "Receita excluída"}
+
+@api_router.get("/products/{product_id}/cmv")
+async def get_product_cmv(product_id: str, current_user: dict = Depends(get_current_user)):
+    product = await db.products.find_one({"id": product_id}, {"_id": 0})
+    if not product:
+        raise HTTPException(status_code=404, detail="Produto não encontrado")
+    recipe = await db.recipes.find_one({"product_id": product_id}, {"_id": 0})
+    cost = 0.0
+    ingredients_detail = []
+    if recipe:
+        detail = await _compute_recipe_cost(recipe)
+        cost = detail["total_cost"]
+        ingredients_detail = detail["ingredients_detail"]
+    sale_price = float(product.get("price", 0) or 0)
+    profit = round(sale_price - cost, 2)
+    margin = round((profit / sale_price * 100), 2) if sale_price > 0 else 0
+    return {
+        "product_id": product_id,
+        "product_name": product.get("name", ""),
+        "sale_price": sale_price,
+        "cost": cost,
+        "profit": profit,
+        "margin": margin,
+        "has_recipe": bool(recipe),
+        "ingredients_detail": ingredients_detail,
+    }
+
+@api_router.get("/cmv/report")
+async def cmv_report(current_user: dict = Depends(require_role([UserRole.ADMIN]))):
+    """Relatorio agregado de CMV para todos os produtos com preco > 0."""
+    products = await db.products.find({}, {"_id": 0}).to_list(1000)
+    recipes = await db.recipes.find({}, {"_id": 0}).to_list(1000)
+    recipe_map = {r["product_id"]: r for r in recipes}
+    rows = []
+    for p in products:
+        sale_price = float(p.get("price", 0) or 0)
+        recipe = recipe_map.get(p["id"])
+        cost = 0.0
+        if recipe:
+            detail = await _compute_recipe_cost(recipe)
+            cost = detail["total_cost"]
+        profit = round(sale_price - cost, 2)
+        margin = round((profit / sale_price * 100), 2) if sale_price > 0 else 0
+        rows.append({
+            "product_id": p["id"],
+            "product_name": p["name"],
+            "category_id": p.get("category_id"),
+            "sale_price": sale_price,
+            "cost": cost,
+            "profit": profit,
+            "margin": margin,
+            "has_recipe": bool(recipe),
+        })
+    return rows
 
 # ==================== SETTINGS ROUTES ====================
 @api_router.get("/settings")

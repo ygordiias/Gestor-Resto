@@ -34,6 +34,7 @@ export default function StockPage() {
     unit: 'unit',
     min_quantity: '5',
     max_quantity: '100',
+    unit_cost: '0',
   });
 
   useEffect(() => {
@@ -66,6 +67,7 @@ export default function StockPage() {
         unit: stockItem.unit,
         min_quantity: stockItem.min_quantity.toString(),
         max_quantity: stockItem.max_quantity.toString(),
+        unit_cost: (stockItem.unit_cost ?? 0).toString(),
       });
     } else {
       setEditingStock(null);
@@ -75,6 +77,7 @@ export default function StockPage() {
         unit: 'unit',
         min_quantity: '5',
         max_quantity: '100',
+        unit_cost: '0',
       });
     }
     setIsDialogOpen(true);
@@ -92,6 +95,7 @@ export default function StockPage() {
       unit: form.unit,
       min_quantity: parseFloat(form.min_quantity),
       max_quantity: parseFloat(form.max_quantity),
+      unit_cost: parseFloat(form.unit_cost) || 0,
     };
 
     try {
@@ -232,6 +236,15 @@ export default function StockPage() {
                       <span>Máx: {item.max_quantity}</span>
                     </div>
 
+                    {item.unit_cost > 0 && (
+                      <div className="flex justify-between items-center text-xs px-2 py-1.5 rounded-md bg-primary/10 border border-primary/20" data-testid={`stock-cost-${item.id}`}>
+                        <span className="text-muted-foreground">Custo unitário</span>
+                        <span className="font-semibold text-primary">
+                          R$ {Number(item.unit_cost).toFixed(2).replace('.', ',')} / {getUnitLabel(item.unit).toLowerCase()}
+                        </span>
+                      </div>
+                    )}
+
                     <Button
                       variant="outline"
                       size="sm"
@@ -330,6 +343,23 @@ export default function StockPage() {
                     onChange={(e) => setForm({ ...form, max_quantity: e.target.value })}
                   />
                 </div>
+              </div>
+              <div className="space-y-2 border-t pt-4">
+                <Label className="flex items-center gap-2">
+                  Custo Unitário (R$) <span className="text-xs text-muted-foreground">— usado no cálculo de CMV</span>
+                </Label>
+                <Input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={form.unit_cost}
+                  onChange={(e) => setForm({ ...form, unit_cost: e.target.value })}
+                  placeholder="0,00"
+                  data-testid="stock-unit-cost-input"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Valor pago por 1 {getUnitLabel(form.unit).toLowerCase()} deste item.
+                </p>
               </div>
             </div>
             <DialogFooter>

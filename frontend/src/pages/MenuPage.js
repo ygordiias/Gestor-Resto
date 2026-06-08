@@ -11,7 +11,7 @@ import { Switch } from '../components/ui/switch';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from '../components/ui/dialog';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
-import { productsAPI, categoriesAPI } from '../lib/api';
+import { productsAPI, categoriesAPI, recipesAPI, cmvAPI, stockAPI } from '../lib/api';
 import { cn, formatCurrency } from '../lib/utils';
 import { toast } from 'sonner';
 import { 
@@ -23,7 +23,9 @@ import {
   Wine,
   Image,
   DollarSign,
-  FileText
+  FileText,
+  Calculator,
+  TrendingUp
 } from 'lucide-react';
 
 const API = process.env.REACT_APP_BACKEND_URL;
