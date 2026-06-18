@@ -855,15 +855,67 @@ async def validate_stock(items):
     if errors:
         raise HTTPException(status_code=400, detail="Estoque insuficiente: " + "; ".join(errors))
 
-async def deduct_stock(product_id: str, quantity: int):
-    """Baixa automática de estoque. Chamada quando item é marcado como delivered."""
+async def deduct_stock(product_id: str, quantity: int, order_code: str = ""):
+    """Baixa automatica de estoque baseada em Receita Tecnica (CMV).
+    Comportamento:
+      1) Se o produto possui receita tecnica -> abate cada ingrediente do estoque.
+      2) Caso contrario -> fallback para o comportamento legado (abate o proprio produto).
+    Valida saldo ANTES de descontar (transacional logico). Levanta HTTPException 400 se faltar.
+    """
+    # 1) Tenta usar a receita tecnica
+    recipe = await db.recipes.find_one({"product_id": product_id}, {"_id": 0})
+    if recipe and recipe.get("ingredients"):
+        # Calcula total necessario por stock_item_id (consolida duplicatas)
+        needed = {}
+        names = {}
+        for ing in recipe["ingredients"]:
+            sid = ing.get("stock_item_id")
+            qty = float(ing.get("quantity", 0) or 0) * float(quantity)
+            if not sid or qty <= 0:
+                continue
+            needed[sid] = needed.get(sid, 0) + qty
+
+        # Valida saldo de TODOS os ingredientes antes de descontar
+        shortages = []
+        for sid, need_qty in needed.items():
+            stock_item = await db.stock.find_one({"id": sid}, {"_id": 0})
+            if not stock_item:
+                shortages.append(f"ingrediente nao encontrado no estoque (id {sid})")
+                continue
+            prod = await db.products.find_one({"id": stock_item.get("product_id")}, {"_id": 0})
+            name = prod["name"] if prod else sid
+            names[sid] = name
+            available = float(stock_item.get("quantity", 0) or 0)
+            if available < need_qty:
+                shortages.append(f"{name}: solicitado {need_qty}, disponivel {available}")
+        if shortages:
+            raise HTTPException(status_code=400, detail="Estoque insuficiente: " + "; ".join(shortages))
+
+        # Realiza a baixa
+        log_lines = []
+        for sid, need_qty in needed.items():
+            await db.stock.update_one(
+                {"id": sid},
+                {
+                    "$inc": {"quantity": -need_qty},
+                    "$set": {"last_updated": datetime.now(timezone.utc).isoformat()}
+                }
+            )
+            stock_item = await db.stock.find_one({"id": sid}, {"_id": 0})
+            if stock_item:
+                await check_stock_alert(stock_item["product_id"])
+            log_lines.append(f"-{need_qty} {names.get(sid, sid)}")
+        logger.info(f"[CMV] Baixa por receita - Pedido {order_code or '-'} produto={product_id} x{quantity}: " + ", ".join(log_lines))
+        return
+
+    # 2) Fallback legado: abate o proprio produto se houver entrada de estoque para ele
     stock_item = await db.stock.find_one({"product_id": product_id}, {"_id": 0})
     if not stock_item:
-        return  # Produto sem controle de estoque — ignora
-    if stock_item["quantity"] < quantity:
+        return  # Produto sem controle de estoque - ignora
+    if float(stock_item.get("quantity", 0) or 0) < quantity:
         raise HTTPException(
             status_code=400,
-            detail=f"Estoque insuficiente para '{product_id}'. Disponível: {stock_item['quantity']}, Solicitado: {quantity}"
+            detail=f"Estoque insuficiente para '{product_id}'. Disponivel: {stock_item['quantity']}, Solicitado: {quantity}"
         )
     await db.stock.update_one(
         {"product_id": product_id},
@@ -873,6 +925,7 @@ async def deduct_stock(product_id: str, quantity: int):
         }
     )
     await check_stock_alert(product_id)
+    logger.info(f"[STOCK] Baixa direta - Pedido {order_code or '-'} produto={product_id} x{quantity}")
 
 @api_router.get("/stock", response_model=List[dict])
 async def get_stock():
