@@ -122,5 +122,15 @@
 - [x] Sidebar item "CMV" (admin/superadmin)
 - [x] Baixa automática por receita ao mudar item para `delivered` (fallback legado quando produto não tem receita)
 
+## Produção (Jun/2026)
+- [x] Collection nova: `productions`
+- [x] `POST /api/productions` (admin/superadmin) — valida saldo, baixa ingredientes, soma quantidade ao item produzido, recalcula custo médio ponderado, audita usuário
+- [x] `GET /api/productions` lista histórico
+- [x] `GET /api/productions/dashboard` retorna {rows[produzido/consumido/estoque/custo], total_productions, total_produced_cost}
+- [x] Página `/production` (ProductionPage): cards de stats + tabela Resumo (Produzido × Consumido × Estoque atual) + tabela Histórico + Dialog Nova Produção com cálculo em tempo real
+- [x] Sidebar item "Produção" (admin + superadmin)
+- [x] Integração total com CMV: consumo via pedidos `delivered` é deduzido em tempo real
+- [x] Superadmin: pequenas correções em TablesPage.js e Layout.js para também incluir role superadmin nos blocos que estavam restritos a `'waiter' || 'admin'`
+
 ---
 *Última atualização: Junho 2026*

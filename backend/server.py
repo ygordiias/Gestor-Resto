@@ -1436,6 +1436,177 @@ async def cmv_report(current_user: dict = Depends(require_role([UserRole.ADMIN])
         })
     return rows
 
+# ==================== PRODUCTION ROUTES ====================
+# Reaproveita: stock (item produzido recebe quantity++), recipes (CMV), products (catalogo)
+# Nova collection: productions (registro auditavel de cada producao)
+#
+# Fluxo:
+#   1. Selecione o stock_item de SAIDA (o produto que sera produzido, ex: "Hamburguer 100g")
+#   2. Liste os ingredientes consumidos (stock_item_id + quantidade)
+#   3. Sistema valida saldo, baixa ingredientes, soma quantidade ao item produzido,
+#      recalcula unit_cost (custo medio ponderado) e registra a producao.
+@api_router.post("/productions")
+async def create_production(data: dict, current_user: dict = Depends(require_role([UserRole.ADMIN]))):
+    produced_id = data.get("produced_stock_item_id")
+    quantity = float(data.get("quantity", 0) or 0)
+    consumed = data.get("ingredients", [])  # [{stock_item_id, quantity}]
+    notes = data.get("notes", "")
+
+    if not produced_id or quantity <= 0:
+        raise HTTPException(status_code=400, detail="produced_stock_item_id e quantity > 0 sao obrigatorios")
+    if not consumed:
+        raise HTTPException(status_code=400, detail="Informe pelo menos um ingrediente consumido")
+
+    produced_stock = await db.stock.find_one({"id": produced_id}, {"_id": 0})
+    if not produced_stock:
+        raise HTTPException(status_code=404, detail="Item de estoque (saida) nao encontrado")
+
+    # Valida e calcula custo total dos ingredientes consumidos
+    total_cost = 0.0
+    shortages = []
+    detail = []
+    for ing in consumed:
+        sid = ing.get("stock_item_id")
+        qty = float(ing.get("quantity", 0) or 0)
+        if not sid or qty <= 0:
+            continue
+        stock = await db.stock.find_one({"id": sid}, {"_id": 0})
+        if not stock:
+            shortages.append(f"ingrediente desconhecido (id {sid})")
+            continue
+        prod = await db.products.find_one({"id": stock.get("product_id")}, {"_id": 0})
+        name = prod["name"] if prod else sid
+        available = float(stock.get("quantity", 0) or 0)
+        unit_cost = float(stock.get("unit_cost", 0) or 0)
+        if available < qty:
+            shortages.append(f"{name}: solicitado {qty}, disponivel {available}")
+            continue
+        line_cost = qty * unit_cost
+        total_cost += line_cost
+        detail.append({
+            "stock_item_id": sid,
+            "name": name,
+            "quantity": qty,
+            "unit_cost": unit_cost,
+            "line_cost": round(line_cost, 2),
+        })
+
+    if shortages:
+        raise HTTPException(status_code=400, detail="Estoque insuficiente: " + "; ".join(shortages))
+
+    # Baixa ingredientes
+    now_iso = datetime.now(timezone.utc).isoformat()
+    for d in detail:
+        await db.stock.update_one(
+            {"id": d["stock_item_id"]},
+            {"$inc": {"quantity": -d["quantity"]}, "$set": {"last_updated": now_iso}}
+        )
+
+    # Atualiza estoque do item produzido (quantidade + custo medio ponderado)
+    old_qty = float(produced_stock.get("quantity", 0) or 0)
+    old_cost = float(produced_stock.get("unit_cost", 0) or 0)
+    new_qty = old_qty + quantity
+    new_unit_cost = round(total_cost / quantity, 4) if quantity > 0 else 0
+    weighted = round(((old_qty * old_cost) + total_cost) / new_qty, 4) if new_qty > 0 else new_unit_cost
+    await db.stock.update_one(
+        {"id": produced_id},
+        {"$set": {"quantity": new_qty, "unit_cost": weighted, "last_updated": now_iso}}
+    )
+
+    # Nome do produto produzido (para exibicao)
+    produced_product = await db.products.find_one({"id": produced_stock.get("product_id")}, {"_id": 0})
+    produced_name = produced_product["name"] if produced_product else produced_stock.get("product_id", "")
+
+    production = {
+        "id": str(uuid.uuid4()),
+        "produced_stock_item_id": produced_id,
+        "produced_product_id": produced_stock.get("product_id"),
+        "produced_product_name": produced_name,
+        "quantity": quantity,
+        "ingredients_consumed": detail,
+        "total_cost": round(total_cost, 2),
+        "unit_cost": new_unit_cost,
+        "weighted_unit_cost": weighted,
+        "notes": notes,
+        "user_id": current_user.get("id"),
+        "user_name": current_user.get("name", ""),
+        "created_at": now_iso,
+    }
+    await db.productions.insert_one(production)
+    production.pop("_id", None)
+
+    # Emite atualizacao de estoque em tempo real
+    stock_list = await db.stock.find({}, {"_id": 0}).to_list(500)
+    await sio.emit('stock_updated', stock_list)
+
+    logger.info(f"[PRODUCTION] {current_user.get('name','-')} produziu {quantity}x {produced_name} (custo R$ {total_cost:.2f})")
+    return production
+
+@api_router.get("/productions")
+async def list_productions(current_user: dict = Depends(require_role([UserRole.ADMIN]))):
+    productions = await db.productions.find({}, {"_id": 0}).sort("created_at", -1).to_list(500)
+    return productions
+
+@api_router.get("/productions/dashboard")
+async def production_dashboard(current_user: dict = Depends(require_role([UserRole.ADMIN]))):
+    """Resumo: produzido x vendido x estoque restante x custo total."""
+    productions = await db.productions.find({}, {"_id": 0}).to_list(2000)
+    # Agrega producao por stock_item_id
+    produced_map = {}  # stock_item_id -> {qty, cost, name}
+    for p in productions:
+        sid = p.get("produced_stock_item_id")
+        if not sid:
+            continue
+        agg = produced_map.setdefault(sid, {"qty": 0, "cost": 0, "name": p.get("produced_product_name", "")})
+        agg["qty"] += float(p.get("quantity", 0) or 0)
+        agg["cost"] += float(p.get("total_cost", 0) or 0)
+
+    # Estoque atual + consumo via pedidos delivered (apenas items que tem receita usando esses stock_items)
+    stock_items = await db.stock.find({}, {"_id": 0}).to_list(1000)
+    stock_by_id = {s["id"]: s for s in stock_items}
+
+    # Consumo: percorre pedidos entregues (delivered) e somatoria receitas
+    recipes = await db.recipes.find({}, {"_id": 0}).to_list(1000)
+    recipe_by_product = {r["product_id"]: r for r in recipes}
+    consumption = {}  # stock_item_id -> qty consumida
+    orders = await db.orders.find({"items.status": "delivered"}, {"_id": 0}).to_list(5000)
+    for o in orders:
+        for it in o.get("items", []):
+            if it.get("status") != "delivered":
+                continue
+            recipe = recipe_by_product.get(it.get("product_id"))
+            if not recipe:
+                continue
+            sold_qty = float(it.get("quantity", 0) or 0)
+            for ing in recipe.get("ingredients", []):
+                sid = ing.get("stock_item_id")
+                qty = float(ing.get("quantity", 0) or 0) * sold_qty
+                if sid:
+                    consumption[sid] = consumption.get(sid, 0) + qty
+
+    rows = []
+    total_produced_cost = 0
+    for sid, agg in produced_map.items():
+        s = stock_by_id.get(sid, {})
+        consumed = consumption.get(sid, 0)
+        current = float(s.get("quantity", 0) or 0)
+        total_produced_cost += agg["cost"]
+        rows.append({
+            "stock_item_id": sid,
+            "name": agg["name"] or s.get("product_id", sid),
+            "produced": round(agg["qty"], 2),
+            "consumed": round(consumed, 2),
+            "current_stock": round(current, 2),
+            "total_cost": round(agg["cost"], 2),
+            "unit_cost": float(s.get("unit_cost", 0) or 0),
+        })
+
+    return {
+        "rows": rows,
+        "total_productions": len(productions),
+        "total_produced_cost": round(total_produced_cost, 2),
+    }
+
 # ==================== SETTINGS ROUTES ====================
 @api_router.get("/settings")
 async def get_settings(current_user: dict = Depends(require_role([UserRole.ADMIN]))):

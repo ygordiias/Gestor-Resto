@@ -24,6 +24,7 @@ import {
   Bell,
   ClipboardList,
   Calculator,
+  Factory,
 } from 'lucide-react';
 import { Logo } from './Logo';
 
@@ -36,6 +37,7 @@ const navigation = {
     { name: 'Caixa', href: '/cashier', icon: CreditCard },
     { name: 'Cardápio', href: '/menu', icon: BookOpen },
     { name: 'Estoque', href: '/stock', icon: Package },
+    { name: 'Produção', href: '/production', icon: Factory },
     { name: 'CMV', href: '/cmv', icon: Calculator },
     { name: 'Relatórios', href: '/reports', icon: BarChart3 },
     { name: 'Usuários', href: '/users', icon: Users },
@@ -51,6 +53,7 @@ const navigation = {
     { name: 'Caixa', href: '/cashier', icon: CreditCard },
     { name: 'Cardápio', href: '/menu', icon: BookOpen },
     { name: 'Estoque', href: '/stock', icon: Package },
+    { name: 'Produção', href: '/production', icon: Factory },
     { name: 'CMV', href: '/cmv', icon: Calculator },
     { name: 'Relatórios', href: '/reports', icon: BarChart3 },
     { name: 'Usuários', href: '/users', icon: Users },
@@ -96,7 +99,7 @@ export default function Layout({ children, title }) {
       if (!isMountedRef.current) return;
       
       // Só notifica garçons e admin
-      if (user?.role === 'waiter' || user?.role === 'admin') {
+      if (user?.role === 'waiter' || user?.role === 'admin' || user?.role === 'superadmin') {
         playNotificationSound();
         
         // Adiciona notificação
@@ -254,7 +257,7 @@ export default function Layout({ children, title }) {
           </div>
           
           {/* Notificações para garçons */}
-          {(user?.role === 'waiter' || user?.role === 'admin') && notifications.length > 0 && (
+          {(user?.role === 'waiter' || user?.role === 'admin' || user?.role === 'superadmin') && notifications.length > 0 && (
             <div className="relative">
               <Button
                 variant="ghost"

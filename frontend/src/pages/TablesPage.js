@@ -203,7 +203,7 @@ export default function TablesPage() {
                     )}
 
                     {/* Botão de solicitar limpeza para mesas disponíveis */}
-                    {table.status === 'available' && (user?.role === 'waiter' || user?.role === 'admin') && (
+                    {table.status === 'available' && (user?.role === 'waiter' || user?.role === 'admin' || user?.role === 'superadmin') && (
                       <Button
                         variant="outline"
                         size="sm"

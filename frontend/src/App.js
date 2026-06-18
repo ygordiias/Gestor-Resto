@@ -21,6 +21,7 @@ import TechnicalSheetsPage from './pages/TechnicalSheetsPage';
 import TechnicalSheetFormPage from './pages/TechnicalSheetFormPage';
 import TechnicalSheetViewPage from './pages/TechnicalSheetViewPage';
 import CMVReportPage from './pages/CMVReportPage';
+import ProductionPage from './pages/ProductionPage';
 import ClienteApp from './cliente/ClienteApp';
 
 // Protected Route Component
@@ -225,6 +226,14 @@ function AppRoutes() {
         element={
           <ProtectedRoute allowedRoles={['admin']}>
             <CMVReportPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/production"
+        element={
+          <ProtectedRoute allowedRoles={['admin']}>
+            <ProductionPage />
           </ProtectedRoute>
         }
       />

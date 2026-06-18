@@ -278,6 +278,13 @@ export const cmvAPI = {
   getReport: () => api.get('/cmv/report'),
 };
 
+// Productions
+export const productionsAPI = {
+  getAll: () => api.get('/productions'),
+  create: (data) => api.post('/productions', data),
+  getDashboard: () => api.get('/productions/dashboard'),
+};
+
 // Setup
 export const setupAPI = {
   seed: () => api.post('/setup/seed'),
