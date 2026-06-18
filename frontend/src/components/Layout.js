@@ -23,6 +23,7 @@ import {
   BookOpen,
   Bell,
   ClipboardList,
+  Calculator,
 } from 'lucide-react';
 import { Logo } from './Logo';
 
@@ -35,6 +36,7 @@ const navigation = {
     { name: 'Caixa', href: '/cashier', icon: CreditCard },
     { name: 'Cardápio', href: '/menu', icon: BookOpen },
     { name: 'Estoque', href: '/stock', icon: Package },
+    { name: 'CMV', href: '/cmv', icon: Calculator },
     { name: 'Relatórios', href: '/reports', icon: BarChart3 },
     { name: 'Usuários', href: '/users', icon: Users },
     { name: 'Notas Fiscais', href: '/invoices', icon: FileText },
@@ -49,6 +51,7 @@ const navigation = {
     { name: 'Caixa', href: '/cashier', icon: CreditCard },
     { name: 'Cardápio', href: '/menu', icon: BookOpen },
     { name: 'Estoque', href: '/stock', icon: Package },
+    { name: 'CMV', href: '/cmv', icon: Calculator },
     { name: 'Relatórios', href: '/reports', icon: BarChart3 },
     { name: 'Usuários', href: '/users', icon: Users },
     { name: 'Notas Fiscais', href: '/invoices', icon: FileText },

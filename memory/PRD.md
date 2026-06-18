@@ -112,5 +112,15 @@
 ### P3
 - [ ] Delivery, app mobile, programa fidelidade
 
+## CMV / Receitas (Fev/2026)
+- [x] Campo `unit_cost` em `stock`
+- [x] Collection `recipes` + CRUD `/api/recipes`
+- [x] `GET /api/products/{id}/cmv` + `GET /api/cmv/report`
+- [x] StockPage: input `unit_cost` + badge no card
+- [x] MenuPage: botão "Receita" + dialog em tempo real + CMV/Lucro/Margem em cada card
+- [x] Página `/cmv` (CMVReportPage): stats + tabela + ordenação por lucro/margem
+- [x] Sidebar item "CMV" (admin/superadmin)
+- [x] Baixa automática por receita ao mudar item para `delivered` (fallback legado quando produto não tem receita)
+
 ---
-*Última atualização: Abril 2026*
+*Última atualização: Junho 2026*
