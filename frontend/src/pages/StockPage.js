@@ -28,8 +28,12 @@ export default function StockPage() {
   
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [editingStock, setEditingStock] = useState(null);
+  const [activeType, setActiveType] = useState('all'); // all | raw_material | semi_finished | finished_product
   const [form, setForm] = useState({
     product_id: '',
+    name: '',
+    category: '',
+    stock_type: 'raw_material',
     quantity: '',
     unit: 'unit',
     min_quantity: '5',
@@ -62,7 +66,10 @@ export default function StockPage() {
     if (stockItem) {
       setEditingStock(stockItem);
       setForm({
-        product_id: stockItem.product_id,
+        product_id: stockItem.product_id || '',
+        name: stockItem.name || '',
+        category: stockItem.category || '',
+        stock_type: stockItem.stock_type || 'finished_product',
         quantity: stockItem.quantity.toString(),
         unit: stockItem.unit,
         min_quantity: stockItem.min_quantity.toString(),
@@ -73,6 +80,9 @@ export default function StockPage() {
       setEditingStock(null);
       setForm({
         product_id: '',
+        name: '',
+        category: '',
+        stock_type: 'raw_material',
         quantity: '',
         unit: 'unit',
         min_quantity: '5',
@@ -84,13 +94,21 @@ export default function StockPage() {
   };
 
   const handleSave = async () => {
-    if (!form.product_id || !form.quantity) {
-      toast.error('Preencha os campos obrigatórios');
+    // Validacao: precisa de nome OU product_id
+    if (!form.product_id && !form.name?.trim()) {
+      toast.error('Informe um nome para o item ou selecione um produto do cardápio');
+      return;
+    }
+    if (!form.quantity && form.quantity !== '0') {
+      toast.error('Informe a quantidade');
       return;
     }
 
     const data = {
-      product_id: form.product_id,
+      product_id: form.product_id || null,
+      name: form.name?.trim() || null,
+      category: form.category?.trim() || null,
+      stock_type: form.stock_type || 'finished_product',
       quantity: parseFloat(form.quantity),
       unit: form.unit,
       min_quantity: parseFloat(form.min_quantity),
@@ -109,8 +127,15 @@ export default function StockPage() {
       setIsDialogOpen(false);
       fetchData();
     } catch (error) {
-      toast.error('Erro ao salvar');
+      toast.error(error.response?.data?.detail || 'Erro ao salvar');
     }
+  };
+
+  // Resolve nome do item: prioriza stock.name, senão busca em products
+  const getItemName = (stockItem) => {
+    if (stockItem.name) return stockItem.name;
+    const product = products.find(p => p.id === stockItem.product_id);
+    return product?.name || 'Sem nome';
   };
 
   const getProductName = (productId) => {
@@ -166,7 +191,7 @@ export default function StockPage() {
               <div className="flex flex-wrap gap-2">
                 {alerts.map(alert => (
                   <Badge key={alert.id} variant="outline" className="border-amber-400 text-amber-700">
-                    {getProductName(alert.product_id)}: {alert.quantity} {getUnitLabel(alert.unit)}
+                    {getItemName(alert)}: {alert.quantity} {getUnitLabel(alert.unit)}
                   </Badge>
                 ))}
               </div>
@@ -174,8 +199,30 @@ export default function StockPage() {
           </Card>
         )}
 
-        {/* Actions */}
-        <div className="flex justify-end">
+        {/* Actions + Filtro por tipo */}
+        <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+          <div className="flex flex-wrap gap-2 flex-1" data-testid="stock-type-filters">
+            {[
+              { v: 'all', l: 'Todos', icon: Package },
+              { v: 'raw_material', l: 'Matéria-prima', icon: Scale },
+              { v: 'semi_finished', l: 'Semi-acabado', icon: Droplet },
+              { v: 'finished_product', l: 'Produto acabado', icon: Package },
+            ].map(t => {
+              const Ico = t.icon;
+              const active = activeType === t.v;
+              return (
+                <Button
+                  key={t.v}
+                  size="sm"
+                  variant={active ? 'default' : 'outline'}
+                  onClick={() => setActiveType(t.v)}
+                  data-testid={`filter-${t.v}`}
+                >
+                  <Ico className="h-3.5 w-3.5 mr-1.5" /> {t.l}
+                </Button>
+              );
+            })}
+          </div>
           <Button onClick={() => openDialog()} data-testid="add-stock-btn">
             <Plus className="h-4 w-4 mr-2" />
             Novo Item
@@ -184,21 +231,39 @@ export default function StockPage() {
 
         {/* Stock List */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {stock.map(item => {
+          {stock
+            .filter(it => activeType === 'all' || (it.stock_type || 'finished_product') === activeType)
+            .map(item => {
             const status = getStockStatus(item);
             const level = getStockLevel(item);
-            
+            const typeLabel = {
+              raw_material: 'Matéria-prima',
+              semi_finished: 'Semi-acabado',
+              finished_product: 'Produto acabado',
+            }[item.stock_type] || 'Produto acabado';
+            const typeColor = {
+              raw_material: 'border-amber-500/40 text-amber-500 bg-amber-500/10',
+              semi_finished: 'border-blue-500/40 text-blue-500 bg-blue-500/10',
+              finished_product: 'border-emerald-500/40 text-emerald-500 bg-emerald-500/10',
+            }[item.stock_type] || 'border-emerald-500/40 text-emerald-500 bg-emerald-500/10';
+
             return (
               <Card key={item.id} className="card-hover" data-testid={`stock-item-${item.id}`}>
                 <CardContent className="p-4">
-                  <div className="flex items-start justify-between mb-4">
-                    <div>
-                      <h3 className="font-medium">{getProductName(item.product_id)}</h3>
-                      <p className="text-sm text-muted-foreground">
+                  <div className="flex items-start justify-between mb-3">
+                    <div className="min-w-0 flex-1">
+                      <h3 className="font-medium truncate">{getItemName(item)}</h3>
+                      <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+                        <Badge variant="outline" className={`text-[10px] ${typeColor}`}>{typeLabel}</Badge>
+                        {item.category && (
+                          <Badge variant="outline" className="text-[10px]">{item.category}</Badge>
+                        )}
+                      </div>
+                      <p className="text-[10px] text-muted-foreground mt-1">
                         Atualizado em {formatDate(item.last_updated)}
                       </p>
                     </div>
-                    <div className={`p-2 rounded-full ${
+                    <div className={`p-2 rounded-full shrink-0 ${
                       status === 'critical' ? 'bg-red-100 text-red-600' :
                       status === 'warning' ? 'bg-amber-100 text-amber-600' :
                       'bg-green-100 text-green-600'
@@ -279,16 +344,58 @@ export default function StockPage() {
             </DialogHeader>
             <div className="space-y-4">
               <div className="space-y-2">
-                <Label>Produto *</Label>
+                <Label>Tipo *</Label>
                 <Select
-                  value={form.product_id}
-                  onValueChange={(v) => setForm({ ...form, product_id: v })}
+                  value={form.stock_type}
+                  onValueChange={(v) => setForm({ ...form, stock_type: v })}
+                  disabled={!!editingStock}
+                >
+                  <SelectTrigger data-testid="stock-type-select">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="raw_material">Matéria-prima (não aparece no cardápio)</SelectItem>
+                    <SelectItem value="semi_finished">Semi-acabado (item produzido)</SelectItem>
+                    <SelectItem value="finished_product">Produto acabado (revenda direta)</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="space-y-2">
+                <Label>Nome {form.product_id ? '' : '*'}</Label>
+                <Input
+                  value={form.name}
+                  onChange={(e) => setForm({ ...form, name: e.target.value })}
+                  placeholder="Ex: Carne Bovina, Hambúrguer 100g..."
+                  data-testid="stock-name-input"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Preencha o nome para itens independentes do cardápio (matéria-prima, semi-acabado).
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <Label>Categoria</Label>
+                <Input
+                  value={form.category}
+                  onChange={(e) => setForm({ ...form, category: e.target.value })}
+                  placeholder="Ex: Carnes, Hortifruti, Bebidas..."
+                  data-testid="stock-category-input"
+                />
+              </div>
+
+              <div className="space-y-2">
+                <Label>Produto do Cardápio (opcional)</Label>
+                <Select
+                  value={form.product_id || '__none__'}
+                  onValueChange={(v) => setForm({ ...form, product_id: v === '__none__' ? '' : v })}
                   disabled={!!editingStock}
                 >
                   <SelectTrigger data-testid="stock-product-select">
-                    <SelectValue placeholder="Selecione o produto" />
+                    <SelectValue placeholder="(nenhum)" />
                   </SelectTrigger>
                   <SelectContent>
+                    <SelectItem value="__none__">— Sem vínculo com cardápio —</SelectItem>
                     {products.map(product => (
                       <SelectItem key={product.id} value={product.id}>
                         {product.name}
@@ -296,6 +403,9 @@ export default function StockPage() {
                     ))}
                   </SelectContent>
                 </Select>
+                <p className="text-xs text-muted-foreground">
+                  Use só quando o item TAMBÉM é vendido no cardápio (ex: refrigerante, água).
+                </p>
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">

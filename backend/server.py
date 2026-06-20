@@ -233,7 +233,10 @@ class Product(ProductBase):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 class StockItemBase(BaseModel):
-    product_id: str
+    product_id: Optional[str] = None  # opcional: vincula a produto do cardapio (legado)
+    name: Optional[str] = None  # nome direto (para matéria-prima sem produto)
+    category: Optional[str] = None  # ex: Carnes, Hortifruti, Bebidas
+    stock_type: str = "finished_product"  # raw_material | semi_finished | finished_product
     quantity: float
     unit: StockUnit
     min_quantity: float = 5
@@ -882,8 +885,13 @@ async def deduct_stock(product_id: str, quantity: int, order_code: str = ""):
             if not stock_item:
                 shortages.append(f"ingrediente nao encontrado no estoque (id {sid})")
                 continue
-            prod = await db.products.find_one({"id": stock_item.get("product_id")}, {"_id": 0})
-            name = prod["name"] if prod else sid
+            # Resolve nome: prioriza stock.name (matéria-prima independente), senão pega de products
+            name = stock_item.get("name") or ""
+            if not name and stock_item.get("product_id"):
+                prod = await db.products.find_one({"id": stock_item.get("product_id")}, {"_id": 0})
+                name = prod["name"] if prod else sid
+            if not name:
+                name = sid
             names[sid] = name
             available = float(stock_item.get("quantity", 0) or 0)
             if available < need_qty:
@@ -928,12 +936,18 @@ async def deduct_stock(product_id: str, quantity: int, order_code: str = ""):
     logger.info(f"[STOCK] Baixa direta - Pedido {order_code or '-'} produto={product_id} x{quantity}")
 
 @api_router.get("/stock", response_model=List[dict])
-async def get_stock():
-    stock = await db.stock.find({}, {"_id": 0}).to_list(500)
+async def get_stock(stock_type: Optional[str] = None):
+    query = {}
+    if stock_type:
+        query["stock_type"] = stock_type
+    stock = await db.stock.find(query, {"_id": 0}).to_list(500)
     return stock
 
 @api_router.post("/stock", response_model=dict)
 async def create_stock_item(stock_data: StockItemBase, current_user: dict = Depends(require_role([UserRole.ADMIN]))):
+    # Validacao: deve ter product_id (legado) OU name (matéria-prima independente)
+    if not stock_data.product_id and not (stock_data.name and stock_data.name.strip()):
+        raise HTTPException(status_code=400, detail="Informe um produto (cardápio) ou um nome para o item de estoque")
     stock_item = StockItem(**stock_data.model_dump())
     stock_dict = stock_item.model_dump()
     stock_dict["last_updated"] = stock_dict["last_updated"].isoformat()
@@ -1305,12 +1319,16 @@ async def _compute_recipe_cost(recipe: dict) -> dict:
         qty = float(ing.get("quantity", 0) or 0)
         line = qty * unit_cost
         total += line
-        # Nome do ingrediente vem do produto vinculado ao item de estoque
+        # Nome do ingrediente: prioriza stock.name (matéria-prima), senão busca em products
         ing_name = ""
         unit = ""
         if stock:
-            prod = await db.products.find_one({"id": stock["product_id"]}, {"_id": 0})
-            ing_name = prod["name"] if prod else stock.get("product_id", "")
+            ing_name = stock.get("name") or ""
+            if not ing_name and stock.get("product_id"):
+                prod = await db.products.find_one({"id": stock["product_id"]}, {"_id": 0})
+                ing_name = prod["name"] if prod else stock.get("product_id", "")
+            if not ing_name:
+                ing_name = stock.get("id", "")
             unit = stock.get("unit", "")
         enriched.append({
             "stock_item_id": ing["stock_item_id"],
@@ -1447,10 +1465,27 @@ async def cmv_report(current_user: dict = Depends(require_role([UserRole.ADMIN])
 #      recalcula unit_cost (custo medio ponderado) e registra a producao.
 @api_router.post("/productions")
 async def create_production(data: dict, current_user: dict = Depends(require_role([UserRole.ADMIN]))):
-    produced_id = data.get("produced_stock_item_id")
-    quantity = float(data.get("quantity", 0) or 0)
-    consumed = data.get("ingredients", [])  # [{stock_item_id, quantity}]
-    notes = data.get("notes", "")
+    # Modo 1 (NOVO): produzir via fórmula -> production_recipe_id + batches
+    recipe_id = data.get("production_recipe_id")
+    batches = float(data.get("batches", 0) or 0)
+    if recipe_id and batches > 0:
+        recipe = await db.production_recipes.find_one({"id": recipe_id}, {"_id": 0})
+        if not recipe:
+            raise HTTPException(status_code=404, detail="Receita de produção não encontrada")
+        produced_id = recipe["produced_stock_item_id"]
+        yield_qty = float(recipe.get("yield_quantity", 1) or 1)
+        quantity = yield_qty * batches
+        consumed = [
+            {"stock_item_id": ing["stock_item_id"], "quantity": float(ing.get("quantity", 0) or 0) * batches}
+            for ing in recipe.get("ingredients", [])
+        ]
+        notes = data.get("notes", "") or f"Produção via fórmula (×{batches} lote{'s' if batches != 1 else ''})"
+    else:
+        # Modo 2 (legado): payload direto com ingredients
+        produced_id = data.get("produced_stock_item_id")
+        quantity = float(data.get("quantity", 0) or 0)
+        consumed = data.get("ingredients", [])
+        notes = data.get("notes", "")
 
     if not produced_id or quantity <= 0:
         raise HTTPException(status_code=400, detail="produced_stock_item_id e quantity > 0 sao obrigatorios")
@@ -1474,8 +1509,13 @@ async def create_production(data: dict, current_user: dict = Depends(require_rol
         if not stock:
             shortages.append(f"ingrediente desconhecido (id {sid})")
             continue
-        prod = await db.products.find_one({"id": stock.get("product_id")}, {"_id": 0})
-        name = prod["name"] if prod else sid
+        # Nome: prioriza stock.name (materia-prima), senao busca em products
+        name = stock.get("name") or ""
+        if not name and stock.get("product_id"):
+            prod = await db.products.find_one({"id": stock.get("product_id")}, {"_id": 0})
+            name = prod["name"] if prod else sid
+        if not name:
+            name = sid
         available = float(stock.get("quantity", 0) or 0)
         unit_cost = float(stock.get("unit_cost", 0) or 0)
         if available < qty:
@@ -1514,8 +1554,13 @@ async def create_production(data: dict, current_user: dict = Depends(require_rol
     )
 
     # Nome do produto produzido (para exibicao)
-    produced_product = await db.products.find_one({"id": produced_stock.get("product_id")}, {"_id": 0})
-    produced_name = produced_product["name"] if produced_product else produced_stock.get("product_id", "")
+    # Nome do produto produzido: prioriza stock.name (materia-prima/semi-acabado independente)
+    produced_name = produced_stock.get("name") or ""
+    if not produced_name and produced_stock.get("product_id"):
+        produced_product = await db.products.find_one({"id": produced_stock.get("product_id")}, {"_id": 0})
+        produced_name = produced_product["name"] if produced_product else produced_stock.get("product_id", "")
+    if not produced_name:
+        produced_name = produced_id
 
     production = {
         "id": str(uuid.uuid4()),
@@ -1606,6 +1651,74 @@ async def production_dashboard(current_user: dict = Depends(require_role([UserRo
         "total_productions": len(productions),
         "total_produced_cost": round(total_produced_cost, 2),
     }
+
+# ==================== PRODUCTION RECIPES CRUD ====================
+@api_router.get("/production-recipes")
+async def list_production_recipes(current_user: dict = Depends(get_current_user)):
+    recipes = await db.production_recipes.find({}, {"_id": 0}).to_list(500)
+    return recipes
+
+@api_router.get("/production-recipes/by-stock/{stock_id}")
+async def get_production_recipe_by_stock(stock_id: str, current_user: dict = Depends(get_current_user)):
+    recipe = await db.production_recipes.find_one({"produced_stock_item_id": stock_id}, {"_id": 0})
+    if not recipe:
+        raise HTTPException(status_code=404, detail="Receita de produção não encontrada")
+    return recipe
+
+@api_router.get("/production-recipes/{recipe_id}")
+async def get_production_recipe(recipe_id: str, current_user: dict = Depends(get_current_user)):
+    recipe = await db.production_recipes.find_one({"id": recipe_id}, {"_id": 0})
+    if not recipe:
+        raise HTTPException(status_code=404, detail="Receita não encontrada")
+    return recipe
+
+@api_router.post("/production-recipes")
+async def create_production_recipe(data: dict, current_user: dict = Depends(require_role([UserRole.ADMIN]))):
+    produced_id = data.get("produced_stock_item_id")
+    if not produced_id:
+        raise HTTPException(status_code=400, detail="produced_stock_item_id é obrigatório")
+    if not data.get("ingredients"):
+        raise HTTPException(status_code=400, detail="Adicione ao menos um ingrediente")
+    existing = await db.production_recipes.find_one({"produced_stock_item_id": produced_id})
+    if existing:
+        raise HTTPException(status_code=400, detail="Já existe receita de produção para este item. Use PUT.")
+    produced_stock = await db.stock.find_one({"id": produced_id}, {"_id": 0})
+    produced_name = (produced_stock or {}).get("name", "")
+    if not produced_name and produced_stock and produced_stock.get("product_id"):
+        prod = await db.products.find_one({"id": produced_stock["product_id"]}, {"_id": 0})
+        produced_name = prod["name"] if prod else ""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    recipe = {
+        "id": str(uuid.uuid4()),
+        "produced_stock_item_id": produced_id,
+        "produced_name": produced_name or produced_id,
+        "yield_quantity": float(data.get("yield_quantity", 1) or 1),
+        "ingredients": data.get("ingredients", []),
+        "created_at": now_iso,
+        "updated_at": now_iso,
+    }
+    await db.production_recipes.insert_one(recipe)
+    recipe.pop("_id", None)
+    return recipe
+
+@api_router.put("/production-recipes/{recipe_id}")
+async def update_production_recipe(recipe_id: str, data: dict, current_user: dict = Depends(require_role([UserRole.ADMIN]))):
+    update = {
+        "yield_quantity": float(data.get("yield_quantity", 1) or 1),
+        "ingredients": data.get("ingredients", []),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    result = await db.production_recipes.update_one({"id": recipe_id}, {"$set": update})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Receita não encontrada")
+    return await db.production_recipes.find_one({"id": recipe_id}, {"_id": 0})
+
+@api_router.delete("/production-recipes/{recipe_id}")
+async def delete_production_recipe(recipe_id: str, current_user: dict = Depends(require_role([UserRole.ADMIN]))):
+    result = await db.production_recipes.delete_one({"id": recipe_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Receita não encontrada")
+    return {"message": "Receita excluída"}
 
 # ==================== SETTINGS ROUTES ====================
 @api_router.get("/settings")

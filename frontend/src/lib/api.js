@@ -285,6 +285,16 @@ export const productionsAPI = {
   getDashboard: () => api.get('/productions/dashboard'),
 };
 
+// Production Recipes (fórmulas de produção)
+export const productionRecipesAPI = {
+  getAll: () => api.get('/production-recipes'),
+  getByStock: (stockId) => api.get(`/production-recipes/by-stock/${stockId}`),
+  get: (id) => api.get(`/production-recipes/${id}`),
+  create: (data) => api.post('/production-recipes', data),
+  update: (id, data) => api.put(`/production-recipes/${id}`, data),
+  delete: (id) => api.delete(`/production-recipes/${id}`),
+};
+
 // Setup
 export const setupAPI = {
   seed: () => api.post('/setup/seed'),
