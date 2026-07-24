@@ -10,7 +10,7 @@ import { cn, getTableStatusColor, getTableStatusLabel, formatCurrency } from '..
 import { useAuth } from '../contexts/AuthContext';
 import socketService from '../lib/socket';
 import { toast } from 'sonner';
-import { Users, Clock, Sparkles, CalendarX, CheckCircle } from 'lucide-react';
+import { Users, Clock, Sparkles, CalendarX, CheckCircle, Plus, Trash2 } from 'lucide-react';
 
 export default function TablesPage() {
   const [tables, setTables] = useState([]);
@@ -18,6 +18,10 @@ export default function TablesPage() {
   const [loading, setLoading] = useState(true);
   const [selectedTable, setSelectedTable] = useState(null);
   const [showActionDialog, setShowActionDialog] = useState(false);
+  const [showAddDialog, setShowAddDialog] = useState(false);
+  const [newTableNumber, setNewTableNumber] = useState('');
+  const [newTableCapacity, setNewTableCapacity] = useState(4);
+  const [addingTable, setAddingTable] = useState(false);
   const navigate = useNavigate();
   const { user } = useAuth();
   const isMountedRef = useRef(true);
@@ -126,6 +130,45 @@ export default function TablesPage() {
 
   const getTableOrder = (tableId) => orders[tableId];
 
+  const handleAddTable = async () => {
+  const number = Number(newTableNumber);
+  const capacity = Number(newTableCapacity);
+
+  if (!number || number <= 0) {
+    toast.error('Informe um número de mesa válido');
+    return;
+  }
+
+  if (!capacity || capacity <= 0) {
+    toast.error('Informe uma capacidade válida');
+    return;
+  }
+
+  try {
+    setAddingTable(true);
+
+    await tablesAPI.create({
+      number,
+      capacity,
+      status: 'available',
+    });
+
+    toast.success(`Mesa ${number} criada com sucesso!`);
+
+    setNewTableNumber('');
+    setNewTableCapacity(4);
+    setShowAddDialog(false);
+
+    await fetchData();
+  } catch (error) {
+    const message =
+      error.response?.data?.detail || 'Erro ao criar mesa';
+
+    toast.error(message);
+  } finally {
+    setAddingTable(false);
+  }
+};
   if (loading) {
     return (
       <Layout title="Mesas">
@@ -139,9 +182,30 @@ export default function TablesPage() {
   }
 
   return (
-    <Layout title="Mesas">
-      <div className="space-y-4 sm:space-y-6" data-testid="tables-page">
-        {/* Legend - Responsivo */}
+  <Layout title="Mesas">
+    <div className="space-y-4 sm:space-y-6" data-testid="tables-page">
+
+      {/* Cabeçalho da página */}
+      <div className="flex items-center justify-between gap-4">
+        <div>
+          <h2 className="text-xl sm:text-2xl font-heading font-bold">
+            Mesas
+          </h2>
+          <p className="text-sm text-muted-foreground">
+            Gerencie as mesas do restaurante
+          </p>
+        </div>
+
+        <button
+          onClick={() => setShowAddDialog(true)}
+          className="flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-lg hover:opacity-90 transition"
+        >
+          <Plus size={18} />
+          <span>Adicionar Mesa</span>
+        </button>
+      </div>
+
+      {/* Legend - Responsivo */}
         <div className="flex flex-wrap gap-2 sm:gap-4 text-xs sm:text-sm">
           <div className="flex items-center gap-1 sm:gap-2">
             <div className="w-3 h-3 sm:w-4 sm:h-4 rounded bg-green-500/20 border border-green-500" />
@@ -292,6 +356,65 @@ export default function TablesPage() {
             <DialogFooter>
               <Button variant="ghost" onClick={() => setShowActionDialog(false)}>
                 Fechar
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+         {/* Modal - Adicionar Mesa */}
+        <Dialog open={showAddDialog} onOpenChange={setShowAddDialog}>
+          <DialogContent className="sm:max-w-md">
+            <DialogHeader>
+              <DialogTitle>Adicionar Nova Mesa</DialogTitle>
+              <DialogDescription>
+                Informe os dados da nova mesa.
+              </DialogDescription>
+            </DialogHeader>
+
+            <div className="space-y-4 py-4">
+              {/* Número da Mesa */}
+              <div className="space-y-2">
+                <Label htmlFor="table-number">
+                  Número da Mesa
+                </Label>
+                <Input
+                  id="table-number"
+                  type="number"
+                  min="1"
+                  placeholder="Ex: 10"
+                  value={newTableNumber}
+                  onChange={(e) => setNewTableNumber(e.target.value)}
+                />
+              </div>
+
+              {/* Capacidade */}
+              <div className="space-y-2">
+                <Label htmlFor="table-capacity">
+                  Capacidade de Pessoas
+                </Label>
+                <Input
+                  id="table-capacity"
+                  type="number"
+                  min="1"
+                  value={newTableCapacity}
+                  onChange={(e) => setNewTableCapacity(e.target.value)}
+                />
+              </div>
+            </div>
+
+            <DialogFooter>
+              <Button
+                variant="outline"
+                onClick={() => setShowAddDialog(false)}
+                disabled={addingTable}
+              >
+                Cancelar
+              </Button>
+
+              <Button
+                onClick={handleAddTable}
+                disabled={addingTable}
+              >
+                {addingTable ? 'Adicionando...' : 'Adicionar Mesa'}
               </Button>
             </DialogFooter>
           </DialogContent>
