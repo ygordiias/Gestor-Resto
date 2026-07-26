@@ -5,12 +5,14 @@ import { Card, CardContent } from '../components/ui/card';
 import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '../components/ui/dialog';
+import { Input } from '../components/ui/input';
+import { Label } from '../components/ui/label';
 import { tablesAPI, ordersAPI } from '../lib/api';
 import { cn, getTableStatusColor, getTableStatusLabel, formatCurrency } from '../lib/utils';
 import { useAuth } from '../contexts/AuthContext';
 import socketService from '../lib/socket';
 import { toast } from 'sonner';
-import { Users, Clock, Sparkles, CalendarX, CheckCircle } from 'lucide-react';
+import { Users, Clock, Sparkles, CalendarX, CheckCircle, Plus, Trash2 } from 'lucide-react';
 
 export default function TablesPage() {
   const [tables, setTables] = useState([]);
@@ -18,9 +20,45 @@ export default function TablesPage() {
   const [loading, setLoading] = useState(true);
   const [selectedTable, setSelectedTable] = useState(null);
   const [showActionDialog, setShowActionDialog] = useState(false);
+  const [showAddDialog, setShowAddDialog] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [newTable, setNewTable] = useState({ number: '', seats: '4' });
   const navigate = useNavigate();
   const { user } = useAuth();
   const isMountedRef = useRef(true);
+
+  const canManage = user?.role === 'admin' || user?.role === 'superadmin';
+
+  const handleCreateTable = async () => {
+    const num = parseInt(newTable.number);
+    const seats = parseInt(newTable.seats);
+    if (!num || num <= 0) { toast.error('Número da mesa inválido'); return; }
+    if (!seats || seats <= 0) { toast.error('Número de lugares inválido'); return; }
+    setSaving(true);
+    try {
+      await tablesAPI.create({ number: num, capacity: seats });
+      toast.success(`Mesa ${num} criada`);
+      setShowAddDialog(false);
+      setNewTable({ number: '', seats: '4' });
+      fetchData();
+    } catch (e) {
+      toast.error(e.response?.data?.detail || 'Erro ao criar mesa');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDeleteTable = async (table, e) => {
+    e.stopPropagation();
+    if (!window.confirm(`Excluir a Mesa ${table.number}? Essa ação não pode ser desfeita.`)) return;
+    try {
+      await tablesAPI.delete(table.id);
+      toast.success(`Mesa ${table.number} excluída`);
+      fetchData();
+    } catch (err) {
+      toast.error(err.response?.data?.detail || 'Erro ao excluir mesa');
+    }
+  };
 
   const fetchData = useCallback(async () => {
     if (!isMountedRef.current) return;
@@ -141,24 +179,35 @@ export default function TablesPage() {
   return (
     <Layout title="Mesas">
       <div className="space-y-4 sm:space-y-6" data-testid="tables-page">
-        {/* Legend - Responsivo */}
-        <div className="flex flex-wrap gap-2 sm:gap-4 text-xs sm:text-sm">
-          <div className="flex items-center gap-1 sm:gap-2">
-            <div className="w-3 h-3 sm:w-4 sm:h-4 rounded bg-green-500/20 border border-green-500" />
-            <span>Disponível</span>
+        {/* Toolbar + Legend */}
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+          <div className="flex flex-wrap gap-2 sm:gap-4 text-xs sm:text-sm">
+            <div className="flex items-center gap-1 sm:gap-2">
+              <div className="w-3 h-3 sm:w-4 sm:h-4 rounded bg-green-500/20 border border-green-500" />
+              <span>Disponível</span>
+            </div>
+            <div className="flex items-center gap-1 sm:gap-2">
+              <div className="w-3 h-3 sm:w-4 sm:h-4 rounded bg-red-500/20 border border-red-500" />
+              <span>Ocupada</span>
+            </div>
+            <div className="flex items-center gap-1 sm:gap-2">
+              <div className="w-3 h-3 sm:w-4 sm:h-4 rounded bg-amber-500/20 border border-amber-500" />
+              <span>Reservada</span>
+            </div>
+            <div className="flex items-center gap-1 sm:gap-2">
+              <div className="w-3 h-3 sm:w-4 sm:h-4 rounded bg-blue-500/20 border border-blue-500" />
+              <span>Limpeza</span>
+            </div>
           </div>
-          <div className="flex items-center gap-1 sm:gap-2">
-            <div className="w-3 h-3 sm:w-4 sm:h-4 rounded bg-red-500/20 border border-red-500" />
-            <span>Ocupada</span>
-          </div>
-          <div className="flex items-center gap-1 sm:gap-2">
-            <div className="w-3 h-3 sm:w-4 sm:h-4 rounded bg-amber-500/20 border border-amber-500" />
-            <span>Reservada</span>
-          </div>
-          <div className="flex items-center gap-1 sm:gap-2">
-            <div className="w-3 h-3 sm:w-4 sm:h-4 rounded bg-blue-500/20 border border-blue-500" />
-            <span>Limpeza</span>
-          </div>
+          {canManage && (
+            <Button
+              onClick={() => setShowAddDialog(true)}
+              data-testid="new-table-btn"
+              size="sm"
+            >
+              <Plus className="h-4 w-4 mr-2" /> Nova Mesa
+            </Button>
+          )}
         </div>
 
         {/* Tables Grid - Responsivo */}
@@ -171,12 +220,22 @@ export default function TablesPage() {
               <Card
                 key={table.id}
                 className={cn(
-                  'cursor-pointer transition-all duration-300 hover:scale-105 hover:shadow-lg border-2 touch-target',
+                  'relative cursor-pointer transition-all duration-300 hover:scale-105 hover:shadow-lg border-2 touch-target',
                   statusClass
                 )}
                 onClick={() => handleTableClick(table)}
                 data-testid={`table-${table.number}`}
               >
+                {canManage && table.status === 'available' && (
+                  <button
+                    onClick={(e) => handleDeleteTable(table, e)}
+                    className="absolute -top-2 -right-2 z-10 p-1 rounded-full bg-destructive text-destructive-foreground hover:opacity-90 shadow-md"
+                    title={`Excluir Mesa ${table.number}`}
+                    data-testid={`delete-table-${table.number}`}
+                  >
+                    <Trash2 className="h-3 w-3" />
+                  </button>
+                )}
                 <CardContent className="p-2 sm:p-4">
                   <div className="text-center">
                     <h3 className="font-heading text-lg sm:text-2xl mb-1">
@@ -229,6 +288,49 @@ export default function TablesPage() {
             <p className="text-muted-foreground">Nenhuma mesa cadastrada</p>
           </div>
         )}
+
+        {/* Dialog Nova Mesa */}
+        <Dialog open={showAddDialog} onOpenChange={setShowAddDialog}>
+          <DialogContent className="max-w-sm" data-testid="new-table-dialog">
+            <DialogHeader>
+              <DialogTitle className="font-heading flex items-center gap-2">
+                <Plus className="h-5 w-5 text-primary" /> Nova Mesa
+              </DialogTitle>
+            </DialogHeader>
+            <div className="space-y-4 py-2">
+              <div className="space-y-2">
+                <Label>Número da mesa *</Label>
+                <Input
+                  type="number"
+                  min="1"
+                  placeholder="Ex: 15"
+                  value={newTable.number}
+                  onChange={(e) => setNewTable({ ...newTable, number: e.target.value })}
+                  data-testid="new-table-number-input"
+                  autoFocus
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Lugares *</Label>
+                <Input
+                  type="number"
+                  min="1"
+                  value={newTable.seats}
+                  onChange={(e) => setNewTable({ ...newTable, seats: e.target.value })}
+                  data-testid="new-table-seats-input"
+                />
+              </div>
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setShowAddDialog(false)} disabled={saving}>
+                Cancelar
+              </Button>
+              <Button onClick={handleCreateTable} disabled={saving} data-testid="save-new-table-btn">
+                {saving ? 'Salvando...' : 'Criar Mesa'}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
 
         {/* Dialog de Ações da Mesa */}
         <Dialog open={showActionDialog} onOpenChange={setShowActionDialog}>
