@@ -1,6 +1,6 @@
-const CACHE_NAME = 'digital-codex-v1';
-const STATIC_CACHE = 'static-v1';
-const DYNAMIC_CACHE = 'dynamic-v1';
+const CACHE_NAME = 'gestor-resto-v2';
+const STATIC_CACHE = 'static-v2';
+const DYNAMIC_CACHE = 'dynamic-v2';
 
 // Arquivos para cache estático
 const STATIC_ASSETS = [
@@ -43,6 +43,25 @@ self.addEventListener('fetch', (event) => {
 
   // Skip socket.io requests
   if (url.pathname.includes('socket.io')) return;
+
+  // HTML navigation (index.html) e bundles JS/CSS -> network-first
+  // (evita servir bundle antigo apos deploy)
+  const isNavigation = request.mode === 'navigate' || url.pathname === '/' || url.pathname.endsWith('.html');
+  const isAppBundle = url.pathname.startsWith('/static/js/') || url.pathname.startsWith('/static/css/');
+  if (isNavigation || isAppBundle) {
+    event.respondWith(
+      fetch(request)
+        .then((response) => {
+          if (response.ok) {
+            const clone = response.clone();
+            caches.open(DYNAMIC_CACHE).then((cache) => cache.put(request, clone));
+          }
+          return response;
+        })
+        .catch(() => caches.match(request))
+    );
+    return;
+  }
 
   // API requests - network first
   if (url.pathname.startsWith('/api')) {
