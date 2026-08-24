@@ -252,6 +252,8 @@ class TableBase(BaseModel):
     number: int
     capacity: int
     status: TableStatus = TableStatus.AVAILABLE
+    table_type: Optional[str] = "regular"  # regular | artist | singer | cover | event
+    note: Optional[str] = None  # ex: nome do cantor/artista
 
 class Table(TableBase):
     model_config = ConfigDict(extra="ignore")
@@ -296,6 +298,8 @@ class Order(OrderBase):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     closed_at: Optional[datetime] = None
     is_closed: bool = False
+    is_comp: bool = False  # Cortesia/Permuta — não entra no faturamento
+    comp_reason: Optional[str] = None
 
 class PaymentBase(BaseModel):
     order_id: str
@@ -759,9 +763,9 @@ async def close_order(order_id: str, payment_data: dict):
         {"$set": {"status": TableStatus.AVAILABLE.value, "current_order_id": None}}
     )
     
-    # Update cash register
+    # Update cash register (nao conta cortesia/permuta)
     register = await db.cash_registers.find_one({"is_open": True}, {"_id": 0})
-    if register:
+    if register and not order.get("is_comp"):
         await db.cash_registers.update_one(
             {"id": register["id"]},
             {"$inc": {"total_sales": order["total"]}}
@@ -772,6 +776,58 @@ async def close_order(order_id: str, payment_data: dict):
     await sio.emit('order_closed', {"order_id": order_id})
     
     return {"message": "Order closed successfully"}
+
+@api_router.patch("/orders/{order_id}/comp")
+async def mark_order_comp(order_id: str, data: dict, current_user: dict = Depends(require_role([UserRole.ADMIN, UserRole.CASHIER]))):
+    """Marca pedido como cortesia/permuta. Nao entra no faturamento."""
+    reason = (data.get("comp_reason") or "").strip()
+    is_comp = bool(data.get("is_comp", True))
+    if is_comp and not reason:
+        raise HTTPException(status_code=400, detail="Informe o motivo da cortesia/permuta")
+    result = await db.orders.update_one(
+        {"id": order_id},
+        {"$set": {"is_comp": is_comp, "comp_reason": reason if is_comp else None}}
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Pedido não encontrado")
+    return await db.orders.find_one({"id": order_id}, {"_id": 0})
+
+@api_router.get("/reports/sales-by-table")
+async def sales_by_table(period: str = "daily", current_user: dict = Depends(require_role([UserRole.ADMIN, UserRole.CASHIER]))):
+    """Consumo por mesa no periodo (baseado em orders fechados nao-cortesia)."""
+    now = datetime.now(timezone.utc)
+    if period == "daily":
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    elif period == "weekly":
+        start = now - timedelta(days=7)
+    elif period == "monthly":
+        start = now - timedelta(days=30)
+    else:
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    start_iso = start.isoformat()
+
+    # Busca pedidos fechados no periodo
+    pipeline = [
+        {"$match": {"is_closed": True, "closed_at": {"$gte": start_iso}}},
+        {"$group": {
+            "_id": "$table_number",
+            "total": {"$sum": {"$cond": [{"$eq": ["$is_comp", True]}, 0, "$total"]}},
+            "comp_total": {"$sum": {"$cond": [{"$eq": ["$is_comp", True]}, "$total", 0]}},
+            "orders_count": {"$sum": 1},
+            "items_count": {"$sum": {"$size": {"$ifNull": ["$items", []]}}},
+        }},
+        {"$sort": {"total": -1}},
+    ]
+    rows = []
+    async for row in db.orders.aggregate(pipeline):
+        rows.append({
+            "table_number": row["_id"],
+            "total": round(float(row.get("total", 0) or 0), 2),
+            "comp_total": round(float(row.get("comp_total", 0) or 0), 2),
+            "orders_count": row.get("orders_count", 0),
+            "items_count": row.get("items_count", 0),
+        })
+    return {"period": period, "start": start_iso, "rows": rows}
 
 @api_router.post("/orders/{order_id}/cancel")
 async def cancel_order(order_id: str):
@@ -1143,7 +1199,7 @@ async def get_sales_report(period: str = "daily", current_user: dict = Depends(r
         start_date = today - timedelta(days=1)
     
     pipeline = [
-        {"$match": {"is_closed": True, "closed_at": {"$gte": start_date.isoformat()}}},
+        {"$match": {"is_closed": True, "closed_at": {"$gte": start_date.isoformat()}, "is_comp": {"$ne": True}}},
         {"$group": {
             "_id": None,
             "total_sales": {"$sum": "$total"},
@@ -1156,7 +1212,7 @@ async def get_sales_report(period: str = "daily", current_user: dict = Depends(r
     
     # Get top products
     product_pipeline = [
-        {"$match": {"is_closed": True, "closed_at": {"$gte": start_date.isoformat()}}},
+        {"$match": {"is_closed": True, "closed_at": {"$gte": start_date.isoformat()}, "is_comp": {"$ne": True}}},
         {"$unwind": "$items"},
         {"$group": {
             "_id": "$items.product_name",

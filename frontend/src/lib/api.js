@@ -260,6 +260,7 @@ export const invoicesAPI = {
 export const reportsAPI = {
   getSales: (period) => api.get('/reports/sales', { params: { period } }),
   getProfit: (period) => api.get('/reports/profit', { params: { period } }),
+  getSalesByTable: (period) => api.get('/reports/sales-by-table', { params: { period } }),
 };
 
 // Recipes (CMV)

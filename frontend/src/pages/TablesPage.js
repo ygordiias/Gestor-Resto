@@ -22,7 +22,7 @@ export default function TablesPage() {
   const [showActionDialog, setShowActionDialog] = useState(false);
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [newTable, setNewTable] = useState({ number: '', seats: '4' });
+  const [newTable, setNewTable] = useState({ number: '', seats: '4', table_type: 'regular', note: '' });
   const navigate = useNavigate();
   const { user } = useAuth();
   const isMountedRef = useRef(true);
@@ -36,10 +36,10 @@ export default function TablesPage() {
     if (!seats || seats <= 0) { toast.error('Número de lugares inválido'); return; }
     setSaving(true);
     try {
-      await tablesAPI.create({ number: num, capacity: seats });
+      await tablesAPI.create({ number: num, capacity: seats, table_type: newTable.table_type || 'regular', note: newTable.note?.trim() || null });
       toast.success(`Mesa ${num} criada`);
       setShowAddDialog(false);
-      setNewTable({ number: '', seats: '4' });
+      setNewTable({ number: '', seats: '4', table_type: 'regular', note: '' });
       fetchData();
     } catch (e) {
       toast.error(e.response?.data?.detail || 'Erro ao criar mesa');
@@ -248,6 +248,11 @@ export default function TablesPage() {
                     <Badge variant="outline" className={cn('text-xs sm:text-sm mb-1 sm:mb-2', statusClass)}>
                       {getTableStatusLabel(table.status)}
                     </Badge>
+                    {table.table_type && table.table_type !== 'regular' && (
+                      <Badge variant="outline" className="text-[10px] mb-1 sm:mb-2 ml-1 border-purple-500 text-purple-700 bg-purple-500/10" title={table.note || ''}>
+                        🎤 {table.table_type === 'artist' ? 'Artista' : table.table_type === 'singer' ? 'Cantor' : table.table_type === 'cover' ? 'Cover' : 'Evento'}
+                      </Badge>
+                    )}
                     
                     {order && (
                       <div className="mt-1 sm:mt-2 pt-1 sm:pt-2 border-t border-current/20">
@@ -320,6 +325,32 @@ export default function TablesPage() {
                   data-testid="new-table-seats-input"
                 />
               </div>
+              <div className="space-y-2">
+                <Label>Tipo</Label>
+                <select
+                  value={newTable.table_type}
+                  onChange={(e) => setNewTable({ ...newTable, table_type: e.target.value })}
+                  className="w-full h-10 rounded-md border border-input bg-background px-3 text-sm"
+                  data-testid="new-table-type"
+                >
+                  <option value="regular">Normal</option>
+                  <option value="artist">Artista</option>
+                  <option value="singer">Cantor</option>
+                  <option value="cover">Cover</option>
+                  <option value="event">Evento</option>
+                </select>
+              </div>
+              {newTable.table_type !== 'regular' && (
+                <div className="space-y-2">
+                  <Label>Nome do artista/evento (opcional)</Label>
+                  <Input
+                    value={newTable.note}
+                    onChange={(e) => setNewTable({ ...newTable, note: e.target.value })}
+                    placeholder="Ex: Banda XYZ, Cover do Roupa Nova..."
+                    data-testid="new-table-note"
+                  />
+                </div>
+              )}
             </div>
             <DialogFooter>
               <Button variant="outline" onClick={() => setShowAddDialog(false)} disabled={saving}>
