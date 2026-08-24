@@ -609,7 +609,11 @@ async def get_order(order_id: str):
     return order
 
 @api_router.post("/orders", response_model=dict)
-async def create_order(order_data: OrderCreate):
+async def create_order(order_data: OrderCreate, current_user: dict = Depends(get_current_user)):
+    # Vincula automaticamente o garcom autenticado quando aplicavel
+    if current_user and current_user.get("role") in ("waiter", "admin", "superadmin"):
+        order_data.waiter_id = current_user.get("id")
+        order_data.waiter_name = current_user.get("name")
     # Validar estoque antes de criar pedido
     await validate_stock(order_data.items)
     
@@ -625,15 +629,21 @@ async def create_order(order_data: OrderCreate):
         existing_order["items"].extend(items)
         subtotal = sum(item["unit_price"] * item["quantity"] for item in existing_order["items"])
         service_fee = subtotal * (existing_order.get("service_fee_percentage", 10) / 100)
-        
+
+        # Preserva waiter se pedido ainda nao tem
+        update_set = {
+            "items": existing_order["items"],
+            "subtotal": subtotal,
+            "service_fee": service_fee,
+            "total": subtotal + service_fee,
+        }
+        if not existing_order.get("waiter_id") and order_data.waiter_id:
+            update_set["waiter_id"] = order_data.waiter_id
+            update_set["waiter_name"] = order_data.waiter_name
+
         await db.orders.update_one(
             {"id": existing_order["id"]},
-            {"$set": {
-                "items": existing_order["items"],
-                "subtotal": subtotal,
-                "service_fee": service_fee,
-                "total": subtotal + service_fee
-            }}
+            {"$set": update_set}
         )
         updated_order = await db.orders.find_one({"id": existing_order["id"]}, {"_id": 0})
         

@@ -153,8 +153,8 @@ export default function Layout({ children, title }) {
           className="fixed inset-0 bg-black/50"
           onClick={() => setSidebarOpen(false)}
         />
-        <div className="fixed inset-y-0 left-0 w-64 sm:w-72 bg-card border-r border-border animate-slide-in">
-          <div className="flex items-center justify-between p-3 sm:p-4 border-b border-border">
+        <div className="fixed inset-y-0 left-0 w-64 sm:w-72 bg-card border-r border-border animate-slide-in flex flex-col">
+          <div className="flex items-center justify-between p-3 sm:p-4 border-b border-border shrink-0">
             <Logo size="sm" />
             <Button
               variant="ghost"
@@ -164,7 +164,7 @@ export default function Layout({ children, title }) {
               <X className="h-5 w-5" />
             </Button>
           </div>
-          <nav className="p-3 sm:p-4 space-y-1 sm:space-y-2">
+          <nav className="p-3 sm:p-4 space-y-1 sm:space-y-2 flex-1 overflow-y-auto">
             {userNavigation.map((item) => (
               <Link
                 key={item.href}
@@ -182,6 +182,31 @@ export default function Layout({ children, title }) {
               </Link>
             ))}
           </nav>
+          {/* Rodape com usuario + botao Sair - sempre visivel no mobile */}
+          <div className="border-t border-border p-3 sm:p-4 shrink-0 bg-card">
+            <div className="flex items-center gap-3 mb-3">
+              <div className="h-9 w-9 rounded-full bg-primary/20 flex items-center justify-center shrink-0">
+                <span className="font-heading text-primary text-base">
+                  {user?.name?.charAt(0)}
+                </span>
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium truncate">{user?.name}</p>
+                <p className="text-xs text-muted-foreground truncate">
+                  {getRoleLabel(user?.role)}
+                </p>
+              </div>
+            </div>
+            <Button
+              variant="outline"
+              className="w-full justify-start gap-2 text-sm"
+              onClick={() => { setSidebarOpen(false); handleLogout(); }}
+              data-testid="mobile-logout-btn"
+            >
+              <LogOut className="h-4 w-4" />
+              Sair
+            </Button>
+          </div>
         </div>
       </div>
 
