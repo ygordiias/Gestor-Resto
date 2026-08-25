@@ -10,9 +10,22 @@
 - **Senha:** 87yOY4f@
 - **Papel:** superadmin
 
-## Demais perfis (seed)
-- Garçom: garcom@digitalcodex.com / garcom123
-- Caixa: caixa@digitalcodex.com / caixa123
-- Cozinha: cozinha@digitalcodex.com / cozinha123
-- Bar: bar@digitalcodex.com / bar123
-- Admin (legado): admin@digitalcodex.com / admin123
+## Waiter (válido)
+- **E-mail:** yuri@digitalcodex.com
+- **Senha:** 123456
+- **Papel:** waiter
+
+## Cashier
+- **E-mail:** caixa@digitalcodex.com
+- **Senha:** caixa123
+- **Papel:** cashier
+
+## Kitchen
+- **E-mail:** cozinha@digitalcodex.com
+- **Senha:** cozinha123
+- **Papel:** kitchen
+
+## Bar
+- **E-mail:** bar@digitalcodex.com
+- **Senha:** bar123
+- **Papel:** bar

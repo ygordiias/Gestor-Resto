@@ -400,16 +400,16 @@ export default function MenuPage() {
     <Layout title="Cardápio">
       <div className="space-y-6" data-testid="menu-page">
         <Tabs defaultValue="products">
-          <TabsList>
+          <TabsList className="w-full sm:w-auto overflow-x-auto justify-start">
             <TabsTrigger value="products">Produtos</TabsTrigger>
             <TabsTrigger value="categories">Categorias</TabsTrigger>
           </TabsList>
 
           <TabsContent value="products" className="space-y-4">
             {/* Actions */}
-            <div className="flex flex-col sm:flex-row gap-4 justify-between">
-              <div className="flex gap-4 flex-1">
-                <div className="relative flex-1 max-w-md">
+            <div className="flex flex-col sm:flex-row gap-3 sm:gap-4 sm:justify-between">
+              <div className="flex flex-col sm:flex-row gap-3 sm:gap-4 flex-1">
+                <div className="relative flex-1 sm:max-w-md">
                   <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                   <Input
                     placeholder="Buscar produto..."
@@ -420,7 +420,7 @@ export default function MenuPage() {
                   />
                 </div>
                 <Select value={selectedCategory} onValueChange={setSelectedCategory}>
-                  <SelectTrigger className="w-48">
+                  <SelectTrigger className="w-full sm:w-48">
                     <SelectValue placeholder="Categoria" />
                   </SelectTrigger>
                   <SelectContent>
@@ -433,10 +433,35 @@ export default function MenuPage() {
                   </SelectContent>
                 </Select>
               </div>
-              <Button onClick={() => openProductDialog()} data-testid="add-product-btn">
+              <Button onClick={() => openProductDialog()} data-testid="add-product-btn" className="w-full sm:w-auto">
                 <Plus className="h-4 w-4 mr-2" />
                 Novo Produto
               </Button>
+            </div>
+
+            {/* Filtros rápidos por categoria (scroll horizontal em mobile) */}
+            <div className="flex gap-2 overflow-x-auto pb-1 -mx-3 px-3 sm:mx-0 sm:px-0 scrollbar-thin snap-x" data-testid="category-quick-filter">
+              <Button
+                variant={selectedCategory === 'all' ? 'default' : 'outline'}
+                size="sm"
+                onClick={() => setSelectedCategory('all')}
+                className="shrink-0 snap-start"
+              >
+                Todos
+              </Button>
+              {categories.map(cat => (
+                <Button
+                  key={cat.id}
+                  variant={selectedCategory === cat.id ? 'default' : 'outline'}
+                  size="sm"
+                  onClick={() => setSelectedCategory(cat.id)}
+                  className="shrink-0 snap-start"
+                  data-testid={`cat-pill-${cat.id}`}
+                >
+                  <span className="mr-1">{cat.icon}</span>
+                  {cat.name}
+                </Button>
+              ))}
             </div>
 
             {/* Products Grid */}

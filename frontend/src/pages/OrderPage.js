@@ -276,14 +276,15 @@ export default function OrderPage() {
               />
             </div>
 
-            {/* Categorias */}
-            <ScrollArea className="w-full">
-              <div className="flex gap-2 pb-2">
+            {/* Categorias - scroll horizontal touch friendly */}
+            <div className="w-full overflow-x-auto -mx-1 px-1 pb-1" data-testid="order-categories-scroll">
+              <div className="flex gap-2 pb-2 snap-x">
                 <Button
                   variant={selectedCategory === 'all' ? 'default' : 'outline'}
                   size="sm"
                   onClick={() => setSelectedCategory('all')}
-                  className="shrink-0"
+                  className="shrink-0 snap-start"
+                  data-testid="cat-all"
                 >
                   Todos
                 </Button>
@@ -293,13 +294,14 @@ export default function OrderPage() {
                     variant={selectedCategory === cat.id ? 'default' : 'outline'}
                     size="sm"
                     onClick={() => setSelectedCategory(cat.id)}
-                    className="shrink-0"
+                    className="shrink-0 snap-start"
+                    data-testid={`cat-${cat.id}`}
                   >
                     {cat.icon} {cat.name}
                   </Button>
                 ))}
               </div>
-            </ScrollArea>
+            </div>
 
             {/* Produtos por tipo */}
             <div className="space-y-4 sm:space-y-6">
@@ -470,10 +472,12 @@ export default function OrderPage() {
                               </Button>
                             </div>
                             <Textarea
-                              placeholder="Observações..."
+                              placeholder="Observações do item (ex: sem cebola, ponto da carne...)"
                               value={item.notes}
                               onChange={(e) => updateCartNotes(item.product_id, e.target.value)}
-                              className="h-12 sm:h-16 text-xs sm:text-sm"
+                              className="min-h-[80px] sm:min-h-[64px] text-base sm:text-sm resize-y leading-relaxed"
+                              rows={3}
+                              data-testid={`item-notes-${item.product_id}`}
                             />
                           </div>
                         ))}

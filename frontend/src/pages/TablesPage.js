@@ -4,34 +4,15 @@ import Layout from '../components/Layout';
 import { Card, CardContent } from '../components/ui/card';
 import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogFooter
-} from '../components/ui/dialog';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '../components/ui/dialog';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
 import { tablesAPI, ordersAPI } from '../lib/api';
-import {
-  cn,
-  getTableStatusColor,
-  getTableStatusLabel,
-  formatCurrency
-} from '../lib/utils';
+import { cn, getTableStatusColor, getTableStatusLabel, formatCurrency } from '../lib/utils';
 import { useAuth } from '../contexts/AuthContext';
 import socketService from '../lib/socket';
 import { toast } from 'sonner';
-import {
-  Users,
-  Clock,
-  Sparkles,
-  CalendarX,
-  CheckCircle,
-  Plus,
-  Trash2
-} from 'lucide-react';
+import { Users, Clock, Sparkles, CalendarX, CheckCircle, Plus, Trash2 } from 'lucide-react';
 
 export default function TablesPage() {
   const [tables, setTables] = useState([]);
@@ -39,24 +20,48 @@ export default function TablesPage() {
   const [loading, setLoading] = useState(true);
   const [selectedTable, setSelectedTable] = useState(null);
   const [showActionDialog, setShowActionDialog] = useState(false);
-
-  // Cadastro de mesa
   const [showAddDialog, setShowAddDialog] = useState(false);
-  const [newTableNumber, setNewTableNumber] = useState('');
-  const [newTableCapacity, setNewTableCapacity] = useState(4);
-  const [addingTable, setAddingTable] = useState(false);
-
+  const [saving, setSaving] = useState(false);
+  const [newTable, setNewTable] = useState({ number: '', seats: '4', table_type: 'regular', note: '' });
   const navigate = useNavigate();
   const { user } = useAuth();
   const isMountedRef = useRef(true);
 
-  const canManage =
-    user?.role === 'admin' ||
-    user?.role === 'superadmin';
+  const canManage = user?.role === 'admin' || user?.role === 'superadmin';
+
+  const handleCreateTable = async () => {
+    const num = parseInt(newTable.number);
+    const seats = parseInt(newTable.seats);
+    if (!num || num <= 0) { toast.error('Número da mesa inválido'); return; }
+    if (!seats || seats <= 0) { toast.error('Número de lugares inválido'); return; }
+    setSaving(true);
+    try {
+      await tablesAPI.create({ number: num, capacity: seats, table_type: newTable.table_type || 'regular', note: newTable.note?.trim() || null });
+      toast.success(`Mesa ${num} criada`);
+      setShowAddDialog(false);
+      setNewTable({ number: '', seats: '4', table_type: 'regular', note: '' });
+      fetchData();
+    } catch (e) {
+      toast.error(e.response?.data?.detail || 'Erro ao criar mesa');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDeleteTable = async (table, e) => {
+    e.stopPropagation();
+    if (!window.confirm(`Excluir a Mesa ${table.number}? Essa ação não pode ser desfeita.`)) return;
+    try {
+      await tablesAPI.delete(table.id);
+      toast.success(`Mesa ${table.number} excluída`);
+      fetchData();
+    } catch (err) {
+      toast.error(err.response?.data?.detail || 'Erro ao excluir mesa');
+    }
+  };
 
   const fetchData = useCallback(async () => {
     if (!isMountedRef.current) return;
-
     try {
       const [tablesRes, ordersRes] = await Promise.all([
         tablesAPI.getAll(),
@@ -65,13 +70,10 @@ export default function TablesPage() {
 
       if (isMountedRef.current) {
         setTables(tablesRes.data);
-
         const ordersMap = {};
-
-        ordersRes.data.forEach((order) => {
+        ordersRes.data.forEach(order => {
           ordersMap[order.table_id] = order;
         });
-
         setOrders(ordersMap);
         setLoading(false);
       }
@@ -85,7 +87,7 @@ export default function TablesPage() {
 
   useEffect(() => {
     isMountedRef.current = true;
-
+    
     const handleTablesUpdate = (updatedTables) => {
       if (isMountedRef.current) {
         setTables(updatedTables);
@@ -93,7 +95,6 @@ export default function TablesPage() {
     };
 
     fetchData();
-
     socketService.connect();
     socketService.on('tables_updated', handleTablesUpdate);
 
@@ -103,177 +104,65 @@ export default function TablesPage() {
     };
   }, [fetchData]);
 
-  // ==================== CADASTRAR MESA ====================
-
-  const handleAddTable = async () => {
-    const number = parseInt(newTableNumber, 10);
-    const capacity = parseInt(newTableCapacity, 10);
-
-    if (!number || number <= 0) {
-      toast.error('Informe um número de mesa válido');
-      return;
-    }
-
-    if (!capacity || capacity <= 0) {
-      toast.error('Informe uma capacidade válida');
-      return;
-    }
-
-    setAddingTable(true);
-
-    try {
-      await tablesAPI.create({
-        number,
-        capacity,
-      });
-
-      toast.success(`Mesa ${number} adicionada com sucesso`);
-
-      setShowAddDialog(false);
-      setNewTableNumber('');
-      setNewTableCapacity(4);
-
-      await fetchData();
-    } catch (error) {
-      toast.error(
-        error.response?.data?.detail ||
-        'Erro ao adicionar mesa'
-      );
-    } finally {
-      setAddingTable(false);
-    }
-  };
-
-  // ==================== EXCLUIR MESA ====================
-
-  const handleDeleteTable = async (table, event) => {
-    event.stopPropagation();
-
-    if (
-      !window.confirm(
-        `Excluir a Mesa ${table.number}? Essa ação não pode ser desfeita.`
-      )
-    ) {
-      return;
-    }
-
-    try {
-      await tablesAPI.delete(table.id);
-
-      toast.success(`Mesa ${table.number} excluída`);
-
-      await fetchData();
-    } catch (error) {
-      toast.error(
-        error.response?.data?.detail ||
-        'Erro ao excluir mesa'
-      );
-    }
-  };
-
-  // ==================== CLIQUE NA MESA ====================
-
   const handleTableClick = (table) => {
     if (table.status === 'reserved') {
       setSelectedTable(table);
       setShowActionDialog(true);
       return;
     }
-
     if (table.status === 'cleaning') {
       setSelectedTable(table);
       setShowActionDialog(true);
       return;
     }
-
-    // Mesa disponível ou ocupada:
-    // mantém a lógica existente de abrir a comanda
-    navigate(`/order/${table.id}`, {
-      state: { table }
-    });
+    // Mesa disponível ou ocupada: ir para pedido
+    navigate(`/order/${table.id}`, { state: { table } });
   };
-
-  // ==================== AÇÕES DA MESA ====================
 
   const handleTableAction = async (action) => {
     if (!selectedTable) return;
-
+    
     try {
       let newStatus = selectedTable.status;
-
+      
       switch (action) {
         case 'available':
           newStatus = 'available';
           break;
-
         case 'reserve':
           newStatus = 'reserved';
           break;
-
         case 'cleaning':
           newStatus = 'cleaning';
           break;
-
         case 'cancel_reserve':
           newStatus = 'available';
           break;
-
         default:
           break;
       }
-
-      await tablesAPI.update(
-        selectedTable.id,
-        {
-          status: newStatus
-        }
-      );
-
-      toast.success(
-        `Mesa ${selectedTable.number} atualizada para: ${getTableStatusLabel(newStatus)}`
-      );
-
+      
+      await tablesAPI.update(selectedTable.id, { status: newStatus });
+      toast.success(`Mesa ${selectedTable.number} atualizada para: ${getTableStatusLabel(newStatus)}`);
       setShowActionDialog(false);
       setSelectedTable(null);
-
-      await fetchData();
+      fetchData();
     } catch (error) {
-      toast.error(
-        error.response?.data?.detail ||
-        'Erro ao atualizar mesa'
-      );
+      toast.error('Erro ao atualizar mesa');
     }
   };
-
-  // ==================== SOLICITAR LIMPEZA ====================
 
   const requestCleaning = async (table) => {
     try {
-      await tablesAPI.update(
-        table.id,
-        {
-          status: 'cleaning'
-        }
-      );
-
-      toast.success(
-        `Limpeza solicitada para Mesa ${table.number}`
-      );
-
-      await fetchData();
+      await tablesAPI.update(table.id, { status: 'cleaning' });
+      toast.success(`Limpeza solicitada para Mesa ${table.number}`);
+      fetchData();
     } catch (error) {
-      toast.error(
-        error.response?.data?.detail ||
-        'Erro ao solicitar limpeza'
-      );
+      toast.error('Erro ao solicitar limpeza');
     }
   };
 
-  const getTableOrder = (tableId) => {
-    return orders[tableId];
-  };
-
-  // ==================== LOADING ====================
+  const getTableOrder = (tableId) => orders[tableId];
 
   if (loading) {
     return (
@@ -287,77 +176,46 @@ export default function TablesPage() {
     );
   }
 
-  // ==================== TELA PRINCIPAL ====================
-
   return (
     <Layout title="Mesas">
-      <div
-        className="space-y-4 sm:space-y-6"
-        data-testid="tables-page"
-      >
-
-        {/* ==================== CABEÇALHO ==================== */}
-
+      <div className="space-y-4 sm:space-y-6" data-testid="tables-page">
+        {/* Toolbar + Legend */}
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-
-          <div>
-            <h2 className="text-xl sm:text-2xl font-heading font-bold">
-              Mesas
-            </h2>
-
-            <p className="text-sm text-muted-foreground">
-              Gerencie as mesas do restaurante
-            </p>
+          <div className="flex flex-wrap gap-2 sm:gap-4 text-xs sm:text-sm">
+            <div className="flex items-center gap-1 sm:gap-2">
+              <div className="w-3 h-3 sm:w-4 sm:h-4 rounded bg-green-500/20 border border-green-500" />
+              <span>Disponível</span>
+            </div>
+            <div className="flex items-center gap-1 sm:gap-2">
+              <div className="w-3 h-3 sm:w-4 sm:h-4 rounded bg-red-500/20 border border-red-500" />
+              <span>Ocupada</span>
+            </div>
+            <div className="flex items-center gap-1 sm:gap-2">
+              <div className="w-3 h-3 sm:w-4 sm:h-4 rounded bg-amber-500/20 border border-amber-500" />
+              <span>Reservada</span>
+            </div>
+            <div className="flex items-center gap-1 sm:gap-2">
+              <div className="w-3 h-3 sm:w-4 sm:h-4 rounded bg-blue-500/20 border border-blue-500" />
+              <span>Limpeza</span>
+            </div>
           </div>
-
           {canManage && (
             <Button
               onClick={() => setShowAddDialog(true)}
               data-testid="new-table-btn"
               size="sm"
             >
-              <Plus className="h-4 w-4 mr-2" />
-              Nova Mesa
+              <Plus className="h-4 w-4 mr-2" /> Nova Mesa
             </Button>
           )}
-
         </div>
 
-        {/* ==================== LEGENDA ==================== */}
-
-        <div className="flex flex-wrap gap-2 sm:gap-4 text-xs sm:text-sm">
-
-          <div className="flex items-center gap-1 sm:gap-2">
-            <div className="w-3 h-3 sm:w-4 sm:h-4 rounded bg-green-500/20 border border-green-500" />
-            <span>Disponível</span>
-          </div>
-
-          <div className="flex items-center gap-1 sm:gap-2">
-            <div className="w-3 h-3 sm:w-4 sm:h-4 rounded bg-red-500/20 border border-red-500" />
-            <span>Ocupada</span>
-          </div>
-
-          <div className="flex items-center gap-1 sm:gap-2">
-            <div className="w-3 h-3 sm:w-4 sm:h-4 rounded bg-amber-500/20 border border-amber-500" />
-            <span>Reservada</span>
-          </div>
-
-          <div className="flex items-center gap-1 sm:gap-2">
-            <div className="w-3 h-3 sm:w-4 sm:h-4 rounded bg-blue-500/20 border border-blue-500" />
-            <span>Limpeza</span>
-          </div>
-
-        </div>
-
-        {/* ==================== GRID DE MESAS ==================== */}
-
+        {/* Tables Grid - Responsivo */}
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-2 sm:gap-4">
-
           {tables.map((table) => {
-
             const order = getTableOrder(table.id);
             const statusClass = getTableStatusColor(table.status);
-
+            
             return (
               <Card
                 key={table.id}
@@ -368,272 +226,183 @@ export default function TablesPage() {
                 onClick={() => handleTableClick(table)}
                 data-testid={`table-${table.number}`}
               >
-
-                {/* Botão excluir mesa */}
-                {canManage &&
-                  table.status === 'available' && (
-                    <button
-                      onClick={(event) =>
-                        handleDeleteTable(
-                          table,
-                          event
-                        )
-                      }
-                      className="absolute -top-2 -right-2 z-10 p-1 rounded-full bg-destructive text-destructive-foreground hover:opacity-90 shadow-md"
-                      title={`Excluir Mesa ${table.number}`}
-                      data-testid={`delete-table-${table.number}`}
-                    >
-                      <Trash2 className="h-3 w-3" />
-                    </button>
-                  )}
-
+                {canManage && table.status === 'available' && (
+                  <button
+                    onClick={(e) => handleDeleteTable(table, e)}
+                    className="absolute -top-2 -right-2 z-10 p-1 rounded-full bg-destructive text-destructive-foreground hover:opacity-90 shadow-md"
+                    title={`Excluir Mesa ${table.number}`}
+                    data-testid={`delete-table-${table.number}`}
+                  >
+                    <Trash2 className="h-3 w-3" />
+                  </button>
+                )}
                 <CardContent className="p-2 sm:p-4">
-
                   <div className="text-center">
-
                     <h3 className="font-heading text-lg sm:text-2xl mb-1">
                       Mesa {table.number}
                     </h3>
-
                     <div className="flex items-center justify-center gap-1 text-xs sm:text-sm mb-1 sm:mb-2">
                       <Users className="h-3 w-3 sm:h-4 sm:w-4" />
-                      <span>
-                        {table.capacity}
-                      </span>
+                      <span>{table.capacity}</span>
                     </div>
-
-                    <Badge
-                      variant="outline"
-                      className={cn(
-                        'text-xs sm:text-sm mb-1 sm:mb-2',
-                        statusClass
-                      )}
-                    >
-                      {getTableStatusLabel(
-                        table.status
-                      )}
+                    <Badge variant="outline" className={cn('text-xs sm:text-sm mb-1 sm:mb-2', statusClass)}>
+                      {getTableStatusLabel(table.status)}
                     </Badge>
-
-                    {/* Informações da comanda */}
+                    {table.table_type && table.table_type !== 'regular' && (
+                      <Badge variant="outline" className="text-[10px] mb-1 sm:mb-2 ml-1 border-purple-500 text-purple-700 bg-purple-500/10" title={table.note || ''}>
+                        🎤 {table.table_type === 'artist' ? 'Artista' : table.table_type === 'singer' ? 'Cantor' : table.table_type === 'cover' ? 'Cover' : 'Evento'}
+                      </Badge>
+                    )}
+                    
                     {order && (
                       <div className="mt-1 sm:mt-2 pt-1 sm:pt-2 border-t border-current/20">
-
                         <div className="flex items-center justify-center gap-1 text-xs mb-1">
                           <Clock className="h-3 w-3" />
-                          <span>
-                            {order.items?.length || 0} itens
-                          </span>
+                          <span>{order.items?.length || 0} itens</span>
                         </div>
-
                         <p className="font-bold text-xs sm:text-sm">
-                          {formatCurrency(
-                            order.total || 0
-                          )}
+                          {formatCurrency(order.total || 0)}
                         </p>
-
                       </div>
                     )}
 
-                    {/* Solicitar limpeza */}
-                    {table.status === 'available' &&
-                      (
-                        user?.role === 'waiter' ||
-                        user?.role === 'admin' ||
-                        user?.role === 'superadmin'
-                      ) && (
-
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="mt-2 text-xs w-full"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            requestCleaning(table);
-                          }}
-                        >
-                          <Sparkles className="h-3 w-3 mr-1" />
-                          Reservar
-                        </Button>
-
-                      )}
-
+                    {/* Botão de solicitar limpeza para mesas disponíveis */}
+                    {table.status === 'available' && (user?.role === 'waiter' || user?.role === 'admin' || user?.role === 'superadmin') && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="mt-2 text-xs w-full"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          requestCleaning(table);
+                        }}
+                      >
+                        <Sparkles className="h-3 w-3 mr-1" />
+                        Reservar
+                      </Button>
+                    )}
                   </div>
-
                 </CardContent>
-
               </Card>
             );
           })}
-
         </div>
 
-        {/* Nenhuma mesa */}
         {tables.length === 0 && (
           <div className="text-center py-12">
-            <p className="text-muted-foreground">
-              Nenhuma mesa cadastrada
-            </p>
+            <p className="text-muted-foreground">Nenhuma mesa cadastrada</p>
           </div>
         )}
 
-        {/* ==================== DIALOG NOVA MESA ==================== */}
-
-        <Dialog
-          open={showAddDialog}
-          onOpenChange={setShowAddDialog}
-        >
-          <DialogContent
-            className="max-w-sm"
-            data-testid="new-table-dialog"
-          >
-
+        {/* Dialog Nova Mesa */}
+        <Dialog open={showAddDialog} onOpenChange={setShowAddDialog}>
+          <DialogContent className="max-w-sm" data-testid="new-table-dialog">
             <DialogHeader>
               <DialogTitle className="font-heading flex items-center gap-2">
-                <Plus className="h-5 w-5 text-primary" />
-                Nova Mesa
+                <Plus className="h-5 w-5 text-primary" /> Nova Mesa
               </DialogTitle>
             </DialogHeader>
-
             <div className="space-y-4 py-2">
-
               <div className="space-y-2">
-                <Label htmlFor="new-table-number">
-                  Número da mesa *
-                </Label>
-
+                <Label>Número da mesa *</Label>
                 <Input
-                  id="new-table-number"
                   type="number"
                   min="1"
                   placeholder="Ex: 15"
-                  value={newTableNumber}
-                  onChange={(event) =>
-                    setNewTableNumber(
-                      event.target.value
-                    )
-                  }
+                  value={newTable.number}
+                  onChange={(e) => setNewTable({ ...newTable, number: e.target.value })}
                   data-testid="new-table-number-input"
                   autoFocus
                 />
               </div>
-
               <div className="space-y-2">
-                <Label htmlFor="new-table-capacity">
-                  Lugares *
-                </Label>
-
+                <Label>Lugares *</Label>
                 <Input
-                  id="new-table-capacity"
                   type="number"
                   min="1"
-                  value={newTableCapacity}
-                  onChange={(event) =>
-                    setNewTableCapacity(
-                      event.target.value
-                    )
-                  }
-                  data-testid="new-table-capacity-input"
+                  value={newTable.seats}
+                  onChange={(e) => setNewTable({ ...newTable, seats: e.target.value })}
+                  data-testid="new-table-seats-input"
                 />
               </div>
-
+              <div className="space-y-2">
+                <Label>Tipo</Label>
+                <select
+                  value={newTable.table_type}
+                  onChange={(e) => setNewTable({ ...newTable, table_type: e.target.value })}
+                  className="w-full h-10 rounded-md border border-input bg-background px-3 text-sm"
+                  data-testid="new-table-type"
+                >
+                  <option value="regular">Normal</option>
+                  <option value="artist">Artista</option>
+                  <option value="singer">Cantor</option>
+                  <option value="cover">Cover</option>
+                  <option value="event">Evento</option>
+                </select>
+              </div>
+              {newTable.table_type !== 'regular' && (
+                <div className="space-y-2">
+                  <Label>Nome do artista/evento (opcional)</Label>
+                  <Input
+                    value={newTable.note}
+                    onChange={(e) => setNewTable({ ...newTable, note: e.target.value })}
+                    placeholder="Ex: Banda XYZ, Cover do Roupa Nova..."
+                    data-testid="new-table-note"
+                  />
+                </div>
+              )}
             </div>
-
             <DialogFooter>
-
-              <Button
-                variant="outline"
-                onClick={() =>
-                  setShowAddDialog(false)
-                }
-                disabled={addingTable}
-              >
+              <Button variant="outline" onClick={() => setShowAddDialog(false)} disabled={saving}>
                 Cancelar
               </Button>
-
-              <Button
-                onClick={handleAddTable}
-                disabled={addingTable}
-                data-testid="save-new-table-btn"
-              >
-                {addingTable
-                  ? 'Salvando...'
-                  : 'Criar Mesa'}
+              <Button onClick={handleCreateTable} disabled={saving} data-testid="save-new-table-btn">
+                {saving ? 'Salvando...' : 'Criar Mesa'}
               </Button>
-
             </DialogFooter>
-
           </DialogContent>
         </Dialog>
 
-        {/* ==================== DIALOG DE AÇÕES ==================== */}
-
-        <Dialog
-          open={showActionDialog}
-          onOpenChange={setShowActionDialog}
-        >
+        {/* Dialog de Ações da Mesa */}
+        <Dialog open={showActionDialog} onOpenChange={setShowActionDialog}>
           <DialogContent className="max-w-sm">
-
             <DialogHeader>
               <DialogTitle className="font-heading">
                 Mesa {selectedTable?.number}
               </DialogTitle>
             </DialogHeader>
-
             <div className="space-y-3 py-4">
-
               <p className="text-sm text-muted-foreground text-center">
-                Status atual:{' '}
-                <strong>
-                  {getTableStatusLabel(
-                    selectedTable?.status
-                  )}
-                </strong>
+                Status atual: <strong>{getTableStatusLabel(selectedTable?.status)}</strong>
               </p>
-
-              {/* Mesa em limpeza */}
+              
               {selectedTable?.status === 'cleaning' && (
                 <Button
                   className="w-full"
-                  onClick={() =>
-                    handleTableAction('available')
-                  }
+                  onClick={() => handleTableAction('available')}
                   data-testid="mark-available-btn"
                 >
                   <CheckCircle className="h-4 w-4 mr-2" />
                   Marcar como Disponível
                 </Button>
               )}
-
-              {/* Mesa reservada */}
+              
               {selectedTable?.status === 'reserved' && (
                 <>
                   <Button
                     className="w-full"
                     onClick={() => {
                       setShowActionDialog(false);
-
-                      navigate(
-                        `/order/${selectedTable.id}`,
-                        {
-                          state: {
-                            table: selectedTable
-                          }
-                        }
-                      );
+                      navigate(`/order/${selectedTable.id}`, { state: { table: selectedTable } });
                     }}
                     data-testid="open-order-btn"
                   >
                     Abrir Comanda
                   </Button>
-
                   <Button
                     variant="outline"
                     className="w-full text-red-600"
-                    onClick={() =>
-                      handleTableAction(
-                        'cancel_reserve'
-                      )
-                    }
+                    onClick={() => handleTableAction('cancel_reserve')}
                     data-testid="cancel-reserve-btn"
                   >
                     <CalendarX className="h-4 w-4 mr-2" />
@@ -641,37 +410,25 @@ export default function TablesPage() {
                   </Button>
                 </>
               )}
-
-              {/* Mesa disponível */}
+              
               {selectedTable?.status === 'available' && (
                 <Button
                   variant="outline"
                   className="w-full"
-                  onClick={() =>
-                    handleTableAction('reserve')
-                  }
+                  onClick={() => handleTableAction('reserve')}
                   data-testid="reserve-btn"
                 >
                   Reservar Mesa
                 </Button>
               )}
-
             </div>
-
             <DialogFooter>
-              <Button
-                variant="ghost"
-                onClick={() =>
-                  setShowActionDialog(false)
-                }
-              >
+              <Button variant="ghost" onClick={() => setShowActionDialog(false)}>
                 Fechar
               </Button>
             </DialogFooter>
-
           </DialogContent>
         </Dialog>
-
       </div>
     </Layout>
   );

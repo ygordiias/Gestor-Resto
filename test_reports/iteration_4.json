@@ -1,0 +1,23 @@
+{
+  "summary": "Iteração 4 — validados 12/12 tests backend (table_type+note, PATCH /orders/{id}/comp com RBAC waiter/cashier/admin, sales-by-table endpoint, exclusão de is_comp em /reports/sales, regressão de auto-fill waiter e default table_type=regular) e 100% dos data-testids esperados no frontend (new-table-type, new-table-note condicional, sales-by-table-card com colunas Mesa/Total/Pedidos/Itens/Cortesia, mark-comp-btn no cashier após selecionar comanda, badge 🎤 em mesa especial).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_comp_and_tables.py",
+    "/app/test_reports/pytest/iter4.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py já com 2124 linhas — considerar split em routers separados (tables, orders, reports, users) para manutenibilidade.",
+    "Endpoint PATCH /orders/{id}/comp retorna o pedido sem projeção padronizada; ok mas garantir que jamais retorne _id (já usa {'_id':0}).",
+    "sales-by-table agrega por table_number apenas — se houver dois pedidos em mesas com mesmo número em datas diferentes, ainda funciona porque filtra por closed_at, ok."
+  ],
+  "updated_files": ["/app/backend/tests/test_comp_and_tables.py"],
+  "success_rate": {"backend": "100% (12/12)", "frontend": "100% dos testids verificados"},
+  "test_credentials": "admin@teste.com/123456; yuri@digitalcodex.com/123456; caixa@digitalcodex.com/caixa123 (senha pode divergir no ambiente — teste faz reset automático via admin PUT /users/{id})",
+  "seed_data_creation": "Nenhum dado seed permanente; testes criam mesa 9001/9002/9010 e cancelam/deletam ao final",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Cashier caixa@digitalcodex.com/caixa123 pode ter senha divergente no banco; o test suite (backend/tests/test_comp_and_tables.py) já lida com isso resetando via admin PUT /users/{id}. Mesa 999 possui pedido fechado (Yuri, R$58.19) usado em regressão de sales-by-table. Todos data-testids da iteração validados via Playwright.",
+  "rca of the issue": "N/A — nenhum bug encontrado nesta iteração."
+}

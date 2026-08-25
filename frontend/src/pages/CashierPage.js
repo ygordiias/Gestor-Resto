@@ -520,6 +520,38 @@ export default function CashierPage() {
                     <Receipt className="h-4 w-4 mr-2" />
                     Fechar Comanda
                   </Button>
+
+                  {/* Cortesia / Permuta */}
+                  {!selectedOrder.is_comp ? (
+                    <Button
+                      variant="outline"
+                      className="w-full text-xs border-purple-500/40 text-purple-600 hover:bg-purple-500/10"
+                      onClick={async () => {
+                        const reason = window.prompt('Motivo da cortesia/permuta:', '');
+                        if (!reason || !reason.trim()) return;
+                        try {
+                          const r = await fetch(`${process.env.REACT_APP_BACKEND_URL}/api/orders/${selectedOrder.id}/comp`, {
+                            method: 'PATCH',
+                            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('token')}` },
+                            body: JSON.stringify({ is_comp: true, comp_reason: reason.trim() }),
+                          });
+                          if (!r.ok) throw new Error((await r.json()).detail || 'Erro');
+                          toast.success('Pedido marcado como cortesia');
+                          window.location.reload();
+                        } catch (e) {
+                          toast.error(e.message);
+                        }
+                      }}
+                      data-testid="mark-comp-btn"
+                    >
+                      🎁 Marcar como Cortesia/Permuta
+                    </Button>
+                  ) : (
+                    <div className="p-2 rounded border border-purple-500/40 bg-purple-500/10 text-xs" data-testid="comp-info">
+                      <span className="font-bold text-purple-700">🎁 CORTESIA</span>
+                      {selectedOrder.comp_reason && <span className="ml-2 text-muted-foreground">— {selectedOrder.comp_reason}</span>}
+                    </div>
+                  )}
                 </CardContent>
               </Card>
             ) : (

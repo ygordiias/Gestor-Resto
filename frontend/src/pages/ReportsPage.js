@@ -21,6 +21,7 @@ const COLORS = ['#D4AF37', '#CD7F32', '#3E2723', '#8D6E63', '#A1887F', '#6D4C41'
 export default function ReportsPage() {
   const [salesData, setSalesData] = useState({ summary: {}, top_products: [] });
   const [profitData, setProfitData] = useState({});
+  const [salesByTable, setSalesByTable] = useState({ rows: [] });
   const [period, setPeriod] = useState('daily');
   const [loading, setLoading] = useState(true);
 
@@ -31,12 +32,14 @@ export default function ReportsPage() {
   const fetchData = async () => {
     setLoading(true);
     try {
-      const [salesRes, profitRes] = await Promise.all([
+      const [salesRes, profitRes, byTableRes] = await Promise.all([
         reportsAPI.getSales(period),
         reportsAPI.getProfit(period),
+        reportsAPI.getSalesByTable(period).catch(() => ({ data: { rows: [] } })),
       ]);
       setSalesData(salesRes.data);
       setProfitData(profitRes.data);
+      setSalesByTable(byTableRes.data || { rows: [] });
     } catch (error) {
       toast.error('Erro ao carregar relatórios');
     } finally {
@@ -161,6 +164,41 @@ export default function ReportsPage() {
                 </p>
               </div>
             </div>
+          </CardContent>
+        </Card>
+
+        {/* Sales by Table */}
+        <Card data-testid="sales-by-table-card">
+          <CardHeader>
+            <CardTitle className="font-heading">Consumo por Mesa · {getPeriodLabel()}</CardTitle>
+          </CardHeader>
+          <CardContent className="p-0 overflow-x-auto">
+            <table className="w-full text-sm" data-testid="sales-by-table-table">
+              <thead className="bg-muted/40">
+                <tr className="border-b border-border">
+                  <th className="text-left px-4 py-3 font-heading font-semibold">Mesa</th>
+                  <th className="text-right px-4 py-3 font-heading font-semibold">Total consumido</th>
+                  <th className="text-right px-4 py-3 font-heading font-semibold">Pedidos</th>
+                  <th className="text-right px-4 py-3 font-heading font-semibold">Itens</th>
+                  <th className="text-right px-4 py-3 font-heading font-semibold">Cortesia</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(salesByTable.rows || []).length === 0 ? (
+                  <tr><td colSpan={5} className="text-center py-8 text-muted-foreground">Nenhum consumo no período</td></tr>
+                ) : (salesByTable.rows || []).map(r => (
+                  <tr key={r.table_number} className="border-b border-border/50 hover:bg-muted/30" data-testid={`table-row-${r.table_number}`}>
+                    <td className="px-4 py-3 font-medium">Mesa {r.table_number}</td>
+                    <td className="px-4 py-3 text-right font-semibold text-emerald-600">{formatCurrency(r.total)}</td>
+                    <td className="px-4 py-3 text-right">{r.orders_count}</td>
+                    <td className="px-4 py-3 text-right">{r.items_count}</td>
+                    <td className="px-4 py-3 text-right text-purple-600 text-xs">
+                      {r.comp_total > 0 ? formatCurrency(r.comp_total) : '—'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </CardContent>
         </Card>
 
