@@ -552,6 +552,36 @@ export default function CashierPage() {
                       {selectedOrder.comp_reason && <span className="ml-2 text-muted-foreground">— {selectedOrder.comp_reason}</span>}
                     </div>
                   )}
+
+                  {/* Cancelar comanda (exige admin) */}
+                  <Button
+                    variant="outline"
+                    className="w-full text-xs border-destructive/40 text-destructive hover:bg-destructive/10"
+                    onClick={async () => {
+                      const reason = window.prompt('Motivo do cancelamento:', '');
+                      if (!reason || !reason.trim()) return;
+                      const email = window.prompt('E-mail do administrador:', '');
+                      if (!email) return;
+                      const password = window.prompt('Senha do administrador:', '');
+                      if (!password) return;
+                      try {
+                        const r = await fetch(`${process.env.REACT_APP_BACKEND_URL}/api/orders/${selectedOrder.id}/cancel`, {
+                          method: 'PATCH',
+                          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('token')}` },
+                          body: JSON.stringify({ reason: reason.trim(), admin_email: email.trim(), admin_password: password }),
+                        });
+                        if (!r.ok) throw new Error((await r.json()).detail || 'Erro');
+                        const res = await r.json();
+                        toast.success(`Comanda cancelada (autorizado por ${res.cancelled_by})`);
+                        window.location.reload();
+                      } catch (e) {
+                        toast.error(e.message);
+                      }
+                    }}
+                    data-testid="cancel-order-btn"
+                  >
+                    ❌ Cancelar Comanda (exige admin)
+                  </Button>
                 </CardContent>
               </Card>
             ) : (

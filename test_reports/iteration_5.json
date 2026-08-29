@@ -1,0 +1,36 @@
+{
+  "summary": "Iteration 5 (stock deduction idempotency + cancel-with-admin-auth + item courtesy + Bar keyboard nav). Backend: 10/11 tests PASSED — all critical flows verified (stock deducted on delivered, stock guaranteed on close_order without delivered, idempotent double-close, cancel 400/403/200 flows, courtesy per item recalculates totals). Only failure = 'bar@digitalcodex.com/bar123' login returns 401 (seed data not present). Frontend: /cashier shows mark-comp-btn and cancel-order-btn on selected order; /bar renders with bar-keyboard-hint, ring-4 + '▶ SELECIONADO' badge on ArrowDown, and 'Garçom: <name>' present on every card. Regression: /dashboard /kitchen /tables /menu all load OK; admin/waiter/cashier logins fine.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/auth/login (bar@digitalcodex.com)", "issue": "Bar-role seeded user does not exist (401 Invalid credentials). Frontend /bar was validated with admin fallback as instructed, but the dedicated bar user needs to be seeded (role='bar'), otherwise a real bar operator cannot log in."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter5_stock_and_cancel.py",
+    "/app/test_reports/pytest/iter5_results.xml"
+  ],
+  "action_items": [
+    "Seed the 'bar@digitalcodex.com / bar123' user with role='bar' so real bar operators can log in (main-agent fix — one seed insert)."
+  ],
+  "critical_code_review_comments": [
+    "server.py is 2230 lines — consider splitting (orders/stock/auth routers) for maintainability.",
+    "close_order swallows deduct_stock HTTPException with only a warning log (line 855-856). If deduct fails at close, order still closes and inventory is silently inconsistent. Should either surface to caller (return warnings in response) or write to an audit collection so stock discrepancies are traceable.",
+    "cancel_order does NOT reverse stock for items already marked stock_deducted=true. This is intentional-but-unspecified — worth a doc/comment; otherwise cancelling after items were delivered leaves phantom stock loss."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter5_stock_and_cancel.py"
+  ],
+  "success_rate": {"backend": "91% (10/11)", "frontend": "100%"},
+  "test_credentials": "admin@teste.com/123456, yuri@digitalcodex.com/123456, caixa@digitalcodex.com/caixa123 (all working). bar@digitalcodex.com/bar123 → 401.",
+  "seed_data_creation": "Ensured Coca-Cola stock item exists with qty>=100 (created via POST /api/stock as admin if missing). No orphaned test data — every test order was either closed or cancelled.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend test file /app/backend/tests/test_iter5_stock_and_cancel.py is a full regression suite for stock/cancel/courtesy. Bar user seed is the only outstanding item. All other batch-5 acceptance criteria confirmed OK.",
+  "rca of the issue": "Bar user 401: seed_users script never inserted a user with email bar@digitalcodex.com. Reproduction: POST /api/auth/login {email:'bar@digitalcodex.com',password:'bar123'} -> 401 Invalid credentials. Mitigation: add to seed script an idempotent upsert with role='bar' and hashed password, or create via /api/users as admin."
+}

@@ -2,7 +2,7 @@
 Gestor Restô - Sistema de Gestão para Restaurante
 Backend FastAPI com Socket.IO para comunicação em tempo real
 """
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, status
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, status, Query
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -268,6 +268,9 @@ class OrderItemBase(BaseModel):
     notes: Optional[str] = None
     type: OrderItemType
     status: OrderStatus = OrderStatus.PENDING
+    is_courtesy: bool = False  # Item em cortesia — preço zero, mas consome estoque
+    courtesy_reason: Optional[str] = None
+    stock_deducted: bool = False  # Idempotência: garante que a baixa não seja duplicada
 
 class OrderItem(OrderItemBase):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -586,10 +589,10 @@ async def delete_table(table_id: str, current_user: dict = Depends(require_role(
 
 # ==================== ORDER ROUTES ====================
 @api_router.get("/orders", response_model=List[dict])
-async def get_orders(status: Optional[str] = None, is_closed: Optional[bool] = None):
+async def get_orders(status_filter: Optional[str] = Query(None, alias="status"), is_closed: Optional[bool] = None):
     query = {}
-    if status:
-        query["status"] = status
+    if status_filter:
+        query["status"] = status_filter
     if is_closed is not None:
         query["is_closed"] = is_closed
     orders = await db.orders.find(query, {"_id": 0}).to_list(500)
@@ -719,8 +722,9 @@ async def update_item_status(order_id: str, item_id: str, status_data: dict):
     new_status = status_data["status"]
     
     # Baixa automática de estoque: só quando muda para "delivered" pela primeira vez
-    if new_status == "delivered" and previous_status != "delivered":
+    if new_status == "delivered" and previous_status != "delivered" and not target_item.get("stock_deducted"):
         await deduct_stock(target_item["product_id"], target_item["quantity"])
+        target_item["stock_deducted"] = True
     
     await db.orders.update_one({"id": order_id}, {"$set": {"items": order["items"]}})
     
@@ -737,6 +741,93 @@ async def update_item_status(order_id: str, item_id: str, status_data: dict):
     
     return {"message": "Item status updated"}
 
+@api_router.patch("/orders/{order_id}/cancel")
+async def cancel_order(order_id: str, data: dict, current_user: dict = Depends(get_current_user)):
+    """Cancela uma comanda aberta. Exige credenciais de admin/superadmin no payload."""
+    admin_email = (data.get("admin_email") or "").strip().lower()
+    admin_password = data.get("admin_password") or ""
+    reason = (data.get("reason") or "").strip()
+    if not reason:
+        raise HTTPException(status_code=400, detail="Informe o motivo do cancelamento")
+    if not admin_email or not admin_password:
+        raise HTTPException(status_code=400, detail="Credenciais do administrador são obrigatórias")
+
+    admin = await db.users.find_one({"email": admin_email})
+    if not admin or admin.get("role") not in ("admin", "superadmin") or not admin.get("is_active", True):
+        raise HTTPException(status_code=403, detail="Administrador inválido")
+    if not verify_password(admin_password, admin.get("password", "")):
+        raise HTTPException(status_code=403, detail="Senha do administrador inválida")
+
+    order = await db.orders.find_one({"id": order_id})
+    if not order:
+        raise HTTPException(status_code=404, detail="Comanda não encontrada")
+    if order.get("is_closed"):
+        raise HTTPException(status_code=400, detail="Comanda já fechada")
+    if order.get("status") == OrderStatus.CANCELLED.value:
+        raise HTTPException(status_code=400, detail="Comanda já cancelada")
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    await db.orders.update_one(
+        {"id": order_id},
+        {"$set": {
+            "status": OrderStatus.CANCELLED.value,
+            "is_closed": True,
+            "closed_at": now_iso,
+            "cancelled_at": now_iso,
+            "cancelled_by_id": admin.get("id"),
+            "cancelled_by_name": admin.get("name"),
+            "cancelled_by_cashier_id": current_user.get("id"),
+            "cancelled_by_cashier_name": current_user.get("name"),
+            "cancellation_reason": reason,
+        }}
+    )
+    # Libera a mesa
+    await db.tables.update_one(
+        {"id": order["table_id"]},
+        {"$set": {"status": TableStatus.AVAILABLE.value, "current_order_id": None}}
+    )
+    await sio.emit('tables_updated', await get_tables())
+    await sio.emit('order_closed', {"order_id": order_id})
+    logger.info(f"[CANCEL] {current_user.get('name')} cancelou pedido {order_id} autorizado por {admin.get('name')} — {reason}")
+    return {"message": "Comanda cancelada", "cancelled_by": admin.get("name"), "reason": reason}
+
+@api_router.patch("/orders/{order_id}/item/{item_id}/courtesy")
+async def mark_item_courtesy(order_id: str, item_id: str, data: dict, current_user: dict = Depends(require_role([UserRole.ADMIN, UserRole.CASHIER]))):
+    """Marca item individual como cortesia. Zera preco, mantem estoque a deduzir."""
+    reason = (data.get("reason") or "").strip()
+    is_courtesy = bool(data.get("is_courtesy", True))
+    if is_courtesy and not reason:
+        raise HTTPException(status_code=400, detail="Informe o motivo da cortesia")
+    order = await db.orders.find_one({"id": order_id})
+    if not order:
+        raise HTTPException(status_code=404, detail="Comanda não encontrada")
+    if order.get("is_closed"):
+        raise HTTPException(status_code=400, detail="Comanda já fechada")
+    found = False
+    for item in order.get("items", []):
+        if item.get("id") == item_id:
+            item["is_courtesy"] = is_courtesy
+            item["courtesy_reason"] = reason if is_courtesy else None
+            if is_courtesy:
+                item["unit_price"] = 0
+            found = True
+            break
+    if not found:
+        raise HTTPException(status_code=404, detail="Item não encontrado")
+    # Recalcula totais
+    subtotal = sum(i["unit_price"] * i["quantity"] for i in order["items"] if i.get("status") != "cancelled")
+    service_fee = subtotal * (order.get("service_fee_percentage", 10) / 100)
+    await db.orders.update_one(
+        {"id": order_id},
+        {"$set": {
+            "items": order["items"],
+            "subtotal": subtotal,
+            "service_fee": service_fee,
+            "total": subtotal + service_fee,
+        }}
+    )
+    return await db.orders.find_one({"id": order_id}, {"_id": 0})
+
 @api_router.post("/orders/{order_id}/close")
 async def close_order(order_id: str, payment_data: dict):
     order = await db.orders.find_one({"id": order_id}, {"_id": 0})
@@ -750,6 +841,22 @@ async def close_order(order_id: str, payment_data: dict):
         pay_dict["created_at"] = pay_dict["created_at"].isoformat()
         await db.payments.insert_one(pay_dict)
     
+    # Baixa automatica de estoque: itens ainda nao deduzidos (garantia no fechamento).
+    # Cortesia TAMBEM consome estoque (mesmo com preco zero).
+    changed = False
+    for item in order.get("items", []):
+        if item.get("status") == "cancelled":
+            continue
+        if not item.get("stock_deducted"):
+            try:
+                await deduct_stock(item["product_id"], item["quantity"], order_code=order.get("id", ""))
+                item["stock_deducted"] = True
+                changed = True
+            except HTTPException as e:
+                logger.warning(f"[close_order] Baixa falhou para {item.get('product_name')}: {e.detail}")
+    if changed:
+        await db.orders.update_one({"id": order_id}, {"$set": {"items": order["items"]}})
+
     # Close order
     closed_at = datetime.now(timezone.utc).isoformat()
     await db.orders.update_one(
@@ -829,8 +936,8 @@ async def sales_by_table(period: str = "daily", current_user: dict = Depends(req
         })
     return {"period": period, "start": start_iso, "rows": rows}
 
-@api_router.post("/orders/{order_id}/cancel")
-async def cancel_order(order_id: str):
+@api_router.post("/orders/{order_id}/cancel-quick")
+async def quick_cancel_order(order_id: str):
     order = await db.orders.find_one({"id": order_id}, {"_id": 0})
     if not order:
         raise HTTPException(status_code=404, detail="Pedido não encontrado")

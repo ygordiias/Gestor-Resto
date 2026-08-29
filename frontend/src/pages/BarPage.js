@@ -120,6 +120,7 @@ export default function BarPage() {
             tableNumber: order.table_number,
             orderCreatedAt: order.created_at,
             waiterId: order.waiter_id,
+            waiterName: order.waiter_name,
           });
         });
     });
@@ -131,9 +132,40 @@ export default function BarPage() {
   const preparingItems = barItems.filter(i => i.status === 'preparing');
   const readyItems = barItems.filter(i => i.status === 'ready');
 
-  const KanbanColumn = ({ title, items, icon: Icon, color, nextStatus, nextLabel }) => (
+  // Keyboard nav (mesmo modelo do KitchenPage)
+  const columnsRef = useRef([pendingItems, preparingItems, readyItems]);
+  columnsRef.current = [pendingItems, preparingItems, readyItems];
+  const [selectedCol, setSelectedCol] = useState(0);
+  const [selectedIdx, setSelectedIdx] = useState(0);
+  const NEXT_STATUS = ['preparing', 'ready', 'delivered'];
+
+  useEffect(() => {
+    const onKey = (e) => {
+      const t = e.target;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;
+      const cols = columnsRef.current;
+      const curCol = cols[selectedCol] || [];
+      if (e.key === 'ArrowDown') { e.preventDefault(); setSelectedIdx(i => Math.min(i + 1, Math.max(0, curCol.length - 1))); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); setSelectedIdx(i => Math.max(0, i - 1)); }
+      else if (e.key === 'ArrowRight') { e.preventDefault(); setSelectedCol(c => Math.min(c + 1, 2)); setSelectedIdx(0); }
+      else if (e.key === 'ArrowLeft') { e.preventDefault(); setSelectedCol(c => Math.max(c - 1, 0)); setSelectedIdx(0); }
+      else if (e.key === 'Enter' || e.key === ' ') {
+        const item = curCol[selectedIdx];
+        if (item) { e.preventDefault(); updateItemStatus(item.orderId, item.id, NEXT_STATUS[selectedCol], item.tableNumber, item.product_name); }
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [selectedCol, selectedIdx]);
+
+  useEffect(() => {
+    const curCol = [pendingItems, preparingItems, readyItems][selectedCol] || [];
+    if (selectedIdx >= curCol.length) setSelectedIdx(Math.max(0, curCol.length - 1));
+  }, [pendingItems.length, preparingItems.length, readyItems.length, selectedCol]);
+
+  const KanbanColumn = ({ title, items, icon: Icon, color, nextStatus, nextLabel, columnIndex }) => (
     <div className="flex-1 min-w-[280px] sm:min-w-[300px]">
-      <div className={cn('rounded-t-lg p-3 sm:p-4 flex items-center gap-2', color)}>
+      <div className={cn('rounded-t-lg p-3 sm:p-4 flex items-center gap-2', color, selectedCol === columnIndex && 'ring-2 ring-primary')}>
         <Icon className="h-5 w-5 sm:h-6 sm:w-6" />
         <h3 className="font-heading text-lg sm:text-xl">{title}</h3>
         <Badge variant="secondary" className="ml-auto">
@@ -141,18 +173,27 @@ export default function BarPage() {
         </Badge>
       </div>
       <div className="bg-card border border-t-0 rounded-b-lg p-2 sm:p-4 min-h-[50vh] sm:min-h-[60vh] space-y-2 sm:space-y-4">
-        {items.map((item) => (
+        {items.map((item, idx) => {
+          const isSelected = selectedCol === columnIndex && selectedIdx === idx;
+          return (
           <Card 
             key={`${item.orderId}-${item.id}`} 
             className={cn(
-              'border-l-4 animate-fade-in',
+              'border-l-4 animate-fade-in transition-all',
               item.status === 'pending' && 'border-l-amber-500',
               item.status === 'preparing' && 'border-l-blue-500',
-              item.status === 'ready' && 'border-l-green-500'
+              item.status === 'ready' && 'border-l-green-500',
+              isSelected && 'ring-4 ring-primary ring-offset-2 ring-offset-background scale-[1.02] shadow-2xl border-l-primary'
             )}
+            onClick={() => { setSelectedCol(columnIndex); setSelectedIdx(idx); }}
             data-testid={`bar-item-${item.id}`}
           >
             <CardContent className="p-3 sm:p-4">
+              {isSelected && (
+                <div className="mb-2 -mt-1 -mx-1 px-2 py-0.5 rounded bg-primary text-primary-foreground text-xs font-bold tracking-widest uppercase inline-block">
+                  ▶ Selecionado
+                </div>
+              )}
               <div className="flex justify-between items-start mb-2">
                 <Badge variant="outline" className="font-heading text-base sm:text-lg">
                   Mesa {item.tableNumber}
@@ -162,6 +203,9 @@ export default function BarPage() {
                   {formatDate(item.orderCreatedAt)}
                 </span>
               </div>
+              {item.waiterName && (
+                <p className="text-xs text-muted-foreground mb-1">Garçom: <span className="font-semibold text-foreground">{item.waiterName}</span></p>
+              )}
               <div className="mb-3">
                 <p className="text-xl sm:text-2xl font-bold">{item.quantity}x</p>
                 <p className="text-lg sm:text-xl font-medium">{item.product_name}</p>
@@ -173,7 +217,10 @@ export default function BarPage() {
               </div>
               {nextStatus && (
                 <Button
-                  className="w-full touch-target font-heading uppercase tracking-wider text-sm sm:text-base"
+                  className={cn(
+                    "w-full touch-target font-heading uppercase tracking-wider text-sm sm:text-base",
+                    isSelected && "ring-2 ring-primary-foreground"
+                  )}
                   onClick={() => updateItemStatus(item.orderId, item.id, nextStatus, item.tableNumber, item.product_name)}
                   data-testid={`status-btn-${item.id}`}
                 >
@@ -182,7 +229,8 @@ export default function BarPage() {
               )}
             </CardContent>
           </Card>
-        ))}
+          );
+        })}
         {items.length === 0 && (
           <div className="text-center py-8 sm:py-12 font-semibold" style={{ color: '#94A3B8' }}>
             Nenhum item
@@ -229,6 +277,13 @@ export default function BarPage() {
           </Card>
         </div>
 
+        {/* Legenda teclado */}
+        <div className="text-xs text-muted-foreground -mt-2 mb-2 flex flex-wrap gap-x-3 gap-y-1" data-testid="bar-keyboard-hint">
+          <span><kbd className="px-1.5 py-0.5 rounded bg-muted border font-mono text-[10px]">↑↓</kbd> navegar</span>
+          <span><kbd className="px-1.5 py-0.5 rounded bg-muted border font-mono text-[10px]">←→</kbd> mudar coluna</span>
+          <span><kbd className="px-1.5 py-0.5 rounded bg-muted border font-mono text-[10px]">Enter</kbd> avançar status</span>
+        </div>
+
         {/* Kanban Board - Responsivo com scroll horizontal */}
         <div className="flex gap-2 sm:gap-4 overflow-x-auto pb-4 -mx-4 px-4 sm:mx-0 sm:px-0">
           <KanbanColumn
@@ -238,6 +293,7 @@ export default function BarPage() {
             color="bg-amber-500 text-amber-950"
             nextStatus="preparing"
             nextLabel="Iniciar Preparo"
+            columnIndex={0}
           />
           <KanbanColumn
             title="Em Preparo"
@@ -246,6 +302,7 @@ export default function BarPage() {
             color="bg-blue-500 text-white"
             nextStatus="ready"
             nextLabel="Marcar Pronto"
+            columnIndex={1}
           />
           <KanbanColumn
             title="Prontos"
@@ -254,6 +311,7 @@ export default function BarPage() {
             color="bg-green-500 text-white"
             nextStatus="delivered"
             nextLabel="Entregar"
+            columnIndex={2}
           />
         </div>
       </div>
