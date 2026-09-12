@@ -136,8 +136,13 @@ async def health_check():
 
 @api_router.get("/health")
 async def health_check_api():
-    """Health check via /api/health (compatível com proxy reverso)."""
-    return await health_check()
+    """Health check leve via /api/health (liveness probe).
+
+    Retorna sempre 200 se o processo estiver vivo, sem depender do MongoDB.
+    Isso evita falsos negativos por hiccups momentâneos do banco em probes
+    de infra/uptime. Para readiness (com DB), usar GET /health (root).
+    """
+    return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
 
 @api_router.get("/ping")
 async def ping():

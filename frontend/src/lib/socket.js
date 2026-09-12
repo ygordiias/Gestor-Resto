@@ -39,8 +39,10 @@ class SocketService {
     this.socket = io(BACKEND_URL, {
       transports: ['websocket', 'polling'],
       reconnection: true,
-      reconnectionAttempts: 10,
+      reconnectionAttempts: Infinity,
       reconnectionDelay: 1000,
+      reconnectionDelayMax: 5000,
+      randomizationFactor: 0.5,
       timeout: 20000,
     });
 
@@ -49,13 +51,21 @@ class SocketService {
       console.log('Socket connected:', this.socket.id);
     });
 
-    this.socket.on('disconnect', () => {
-      console.log('Socket disconnected');
+    this.socket.on('disconnect', (reason) => {
+      console.log('Socket disconnected:', reason);
+    });
+
+    this.socket.on('reconnect_attempt', (attempt) => {
+      console.log('[socket] reconnect attempt', attempt);
+    });
+
+    this.socket.on('reconnect', (attempt) => {
+      console.log('[socket] reconnected after', attempt, 'attempts');
     });
 
     this.socket.on('connect_error', (error) => {
       this.isConnecting = false;
-      console.error('Socket connection error:', error);
+      console.warn('[socket] connect_error:', error?.message || error);
     });
   }
 

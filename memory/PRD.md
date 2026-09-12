@@ -132,5 +132,15 @@
 - [x] Integração total com CMV: consumo via pedidos `delivered` é deduzido em tempo real
 - [x] Superadmin: pequenas correções em TablesPage.js e Layout.js para também incluir role superadmin nos blocos que estavam restritos a `'waiter' || 'admin'`
 
+## Estabilidade (Fev/2026 - STEP 1)
+- [x] `GET /api/health` transformado em liveness leve (`{"status":"ok"}` sem depender de MongoDB); `GET /health` root mantém readiness com DB check
+- [x] `ErrorBoundary` global (`/app/frontend/src/components/ErrorBoundary.js`) envolvendo o `<App>` — previne tela branca em erros React
+- [x] Interceptor axios (`/app/frontend/src/lib/api.js`) não redireciona mais em falhas de rede/timeout; 401 só desloga fora do `/login` e fora de `/auth/login`
+- [x] `AuthContext.js` mantém sessão local em erro de rede (só desloga em 401/403)
+- [x] Socket.IO com `reconnectionAttempts: Infinity`, `reconnectionDelayMax: 5000`, logs de reconexão
+- [x] Service Worker bump `v2 → v3` para invalidar caches antigos
+- [x] Testes pytest em `/app/backend/tests/test_health.py` (3/3 passing)
+- Nota SPA: refresh direto em qualquer rota (`/kitchen`, `/tables/xyz`, `/cliente/*`) já retorna 200 no ambiente atual — fallback é feito pela camada de ingress da plataforma Emergent, não precisa de config no repositório.
+
 ---
-*Última atualização: Junho 2026*
+*Última atualização: Fevereiro 2026*

@@ -19,8 +19,16 @@ export function AuthProvider({ children }) {
           setUser(response.data);
           localStorage.setItem('user', JSON.stringify(response.data));
         })
-        .catch(() => {
-          logout();
+        .catch((err) => {
+          // Só desloga se o backend respondeu com 401/403 (token inválido).
+          // Em erro de rede/servidor caído, mantém a sessão do localStorage
+          // para evitar tela branca / logout indevido quando a API está fora.
+          const status = err?.response?.status;
+          if (status === 401 || status === 403) {
+            logout();
+          } else {
+            console.warn('[auth] getMe falhou (mantendo sessão local):', err?.message);
+          }
         })
         .finally(() => {
           setLoading(false);
