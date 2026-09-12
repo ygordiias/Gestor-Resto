@@ -7,6 +7,14 @@ import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
 import { ScrollArea } from '../components/ui/scroll-area';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from '../components/ui/dialog';
 import { ordersAPI, cashRegisterAPI, tablesAPI, invoicesAPI } from '../lib/api';
 import { cn, formatCurrency, formatDate } from '../lib/utils';
 import socketService from '../lib/socket';
@@ -87,6 +95,14 @@ export default function CashierPage() {
   const [openRegisterAmount, setOpenRegisterAmount] = useState('');
   const [movementAmount, setMovementAmount] = useState('');
   const [movementReason, setMovementReason] = useState('');
+  // Cancelamento individual de item
+  const [cancelItemState, setCancelItemState] = useState(null); // { item }
+  const [cancelQty, setCancelQty] = useState(1);
+  const [cancelReason, setCancelReason] = useState('');
+  const [cancelAdminEmail, setCancelAdminEmail] = useState('');
+  const [cancelAdminPassword, setCancelAdminPassword] = useState('');
+  const [cancelRestore, setCancelRestore] = useState('no'); // 'yes' | 'no'
+  const [cancelSubmitting, setCancelSubmitting] = useState(false);
   const isMountedRef = useRef(true);
 
   // Encontra o pedido selecionado de forma memoizada
@@ -287,6 +303,56 @@ export default function CashierPage() {
     }
   };
 
+  const openCancelItem = (item) => {
+    setCancelItemState({ item });
+    setCancelQty(item.quantity || 1);
+    setCancelReason('');
+    setCancelAdminEmail('');
+    setCancelAdminPassword('');
+    setCancelRestore(item.stock_deducted ? 'no' : 'no');
+  };
+
+  const closeCancelItem = () => {
+    setCancelItemState(null);
+    setCancelSubmitting(false);
+  };
+
+  const submitCancelItem = async () => {
+    if (!cancelItemState || !selectedOrder) return;
+    const item = cancelItemState.item;
+    const qtyNum = parseInt(cancelQty, 10);
+    if (!qtyNum || qtyNum <= 0 || qtyNum > item.quantity) {
+      toast.error('Quantidade inválida');
+      return;
+    }
+    if (!cancelReason.trim()) {
+      toast.error('Informe o motivo');
+      return;
+    }
+    if (!cancelAdminEmail.trim() || !cancelAdminPassword) {
+      toast.error('Credenciais do administrador são obrigatórias');
+      return;
+    }
+    setCancelSubmitting(true);
+    try {
+      const res = await ordersAPI.cancelItem(selectedOrder.id, item.id, {
+        quantity: qtyNum,
+        reason: cancelReason.trim(),
+        admin_email: cancelAdminEmail.trim(),
+        admin_password: cancelAdminPassword,
+        restore_stock: item.stock_deducted ? (cancelRestore === 'yes') : false,
+      });
+      toast.success(
+        `Item cancelado (${qtyNum}x) — autorizado por ${res.data.authorized_by}${res.data.stock_restored ? ' • estoque devolvido' : ''}`
+      );
+      closeCancelItem();
+      await fetchData();
+    } catch (e) {
+      toast.error(e.response?.data?.detail || e.message || 'Erro ao cancelar item');
+      setCancelSubmitting(false);
+    }
+  };
+
   if (loading) {
     return (
       <Layout title="Caixa">
@@ -448,12 +514,47 @@ export default function CashierPage() {
                 <CardContent className="space-y-3 sm:space-y-4">
                   {/* Itens do Pedido */}
                   <ScrollArea className="h-32 sm:h-48 border rounded p-2">
-                    {selectedOrder.items.map((item) => (
-                      <div key={item.id} className="flex justify-between text-xs sm:text-sm py-1">
-                        <span>{item.quantity}x {item.product_name}</span>
-                        <span>{formatCurrency(item.unit_price * item.quantity)}</span>
-                      </div>
-                    ))}
+                    {selectedOrder.items.map((item) => {
+                      const isCancelled = item.status === 'cancelled';
+                      return (
+                        <div
+                          key={item.id}
+                          className={cn(
+                            'flex justify-between items-center gap-2 text-xs sm:text-sm py-1',
+                            isCancelled && 'opacity-60 line-through'
+                          )}
+                          data-testid={`cashier-item-row-${item.id}`}
+                        >
+                          <span className="flex-1 min-w-0 truncate">
+                            {item.quantity}x {item.product_name}
+                            {isCancelled && (
+                              <Badge
+                                variant="destructive"
+                                className="ml-2 text-[10px]"
+                                data-testid={`item-cancelled-badge-${item.id}`}
+                              >
+                                CANCELADO
+                              </Badge>
+                            )}
+                          </span>
+                          <span className="shrink-0">
+                            {formatCurrency(item.unit_price * item.quantity)}
+                          </span>
+                          {!isCancelled && (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-6 w-6 shrink-0 text-destructive hover:bg-destructive/10"
+                              onClick={() => openCancelItem(item)}
+                              title="Cancelar este item"
+                              data-testid={`cancel-item-btn-${item.id}`}
+                            >
+                              <X className="h-3.5 w-3.5" />
+                            </Button>
+                          )}
+                        </div>
+                      );
+                    })}
                   </ScrollArea>
 
                   {/* Totais */}
@@ -633,6 +734,125 @@ export default function CashierPage() {
           </div>
         </div>
       </div>
+
+      {/* Dialog: Cancelamento individual de item */}
+      <Dialog open={!!cancelItemState} onOpenChange={(o) => { if (!o) closeCancelItem(); }}>
+        <DialogContent className="max-w-md" data-testid="cancel-item-dialog">
+          <DialogHeader>
+            <DialogTitle>Cancelar item</DialogTitle>
+            <DialogDescription>
+              {cancelItemState?.item && (
+                <>
+                  <strong>{cancelItemState.item.product_name}</strong> — atualmente{' '}
+                  {cancelItemState.item.quantity}x{' '}
+                  {formatCurrency(cancelItemState.item.unit_price)}.
+                </>
+              )}
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-3">
+            <div className="space-y-1">
+              <Label>Quantidade a cancelar</Label>
+              <Input
+                type="number"
+                min={1}
+                max={cancelItemState?.item?.quantity || 1}
+                value={cancelQty}
+                onChange={(e) => setCancelQty(e.target.value)}
+                data-testid="cancel-item-qty"
+              />
+              {cancelItemState?.item && (
+                <p className="text-[11px] text-muted-foreground">
+                  Máx.: {cancelItemState.item.quantity}. Restarão{' '}
+                  {Math.max(0, (cancelItemState.item.quantity || 0) - (parseInt(cancelQty, 10) || 0))}x ativos.
+                </p>
+              )}
+            </div>
+
+            <div className="space-y-1">
+              <Label>Motivo do cancelamento</Label>
+              <Input
+                value={cancelReason}
+                onChange={(e) => setCancelReason(e.target.value)}
+                placeholder="Ex.: cliente desistiu"
+                data-testid="cancel-item-reason"
+              />
+            </div>
+
+            {cancelItemState?.item?.stock_deducted && (
+              <div className="space-y-1 rounded border border-amber-500/40 bg-amber-500/10 p-2">
+                <Label className="text-amber-800">
+                  Estoque já foi baixado — Devolver ao estoque?
+                </Label>
+                <div className="flex gap-4 text-sm">
+                  <label className="flex items-center gap-1 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="restore"
+                      checked={cancelRestore === 'yes'}
+                      onChange={() => setCancelRestore('yes')}
+                      data-testid="cancel-item-restore-yes"
+                    />
+                    Sim
+                  </label>
+                  <label className="flex items-center gap-1 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="restore"
+                      checked={cancelRestore === 'no'}
+                      onChange={() => setCancelRestore('no')}
+                      data-testid="cancel-item-restore-no"
+                    />
+                    Não
+                  </label>
+                </div>
+              </div>
+            )}
+
+            <div className="pt-2 border-t space-y-2">
+              <Label className="text-xs uppercase tracking-wide text-muted-foreground">
+                Autorização do administrador
+              </Label>
+              <Input
+                type="email"
+                placeholder="E-mail do admin"
+                value={cancelAdminEmail}
+                onChange={(e) => setCancelAdminEmail(e.target.value)}
+                autoComplete="off"
+                data-testid="cancel-item-admin-email"
+              />
+              <Input
+                type="password"
+                placeholder="Senha do admin"
+                value={cancelAdminPassword}
+                onChange={(e) => setCancelAdminPassword(e.target.value)}
+                autoComplete="new-password"
+                data-testid="cancel-item-admin-password"
+              />
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={closeCancelItem}
+              disabled={cancelSubmitting}
+              data-testid="cancel-item-cancel-btn"
+            >
+              Voltar
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={submitCancelItem}
+              disabled={cancelSubmitting}
+              data-testid="cancel-item-confirm-btn"
+            >
+              {cancelSubmitting ? 'Cancelando...' : 'Confirmar cancelamento'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Layout>
   );
 }

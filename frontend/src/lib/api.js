@@ -248,6 +248,8 @@ export const ordersAPI = {
   },
   updateItemStatus: (orderId, itemId, status) => 
     api.put(`/orders/${orderId}/item/${itemId}/status`, { status }),
+  cancelItem: (orderId, itemId, payload) =>
+    api.patch(`/orders/${orderId}/item/${itemId}/cancel`, payload),
   close: (orderId, payments) => api.post(`/orders/${orderId}/close`, { payments }),
 };
 

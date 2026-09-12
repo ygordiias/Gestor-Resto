@@ -833,6 +833,156 @@ async def mark_item_courtesy(order_id: str, item_id: str, data: dict, current_us
     )
     return await db.orders.find_one({"id": order_id}, {"_id": 0})
 
+@api_router.patch("/orders/{order_id}/item/{item_id}/cancel")
+async def cancel_order_item(order_id: str, item_id: str, data: dict, current_user: dict = Depends(get_current_user)):
+    """Cancela um item individual (total ou parcial) de uma comanda ABERTA.
+
+    Exige credenciais de admin/superadmin no payload (mesmo padrao de /orders/{id}/cancel).
+    Comportamento de estoque:
+      - Se item.stock_deducted = False: apenas marca cancelado; nao sera deduzido.
+      - Se item.stock_deducted = True: usa data.restore_stock (bool). Se True, devolve; se False, mantem baixa.
+
+    Cancelamento parcial: cria uma linha adicional com quantity=cancel_qty e status='cancelled'
+    contendo toda a metadata; a linha original permanece com quantidade reduzida.
+    """
+    # --- Validacao de credenciais admin (mesmo padrao existente) ---
+    admin_email = (data.get("admin_email") or "").strip().lower()
+    admin_password = data.get("admin_password") or ""
+    reason = (data.get("reason") or "").strip()
+    if not reason:
+        raise HTTPException(status_code=400, detail="Informe o motivo do cancelamento")
+    if not admin_email or not admin_password:
+        raise HTTPException(status_code=400, detail="Credenciais do administrador são obrigatórias")
+    admin = await db.users.find_one({"email": admin_email})
+    if not admin or admin.get("role") not in ("admin", "superadmin") or not admin.get("is_active", True):
+        raise HTTPException(status_code=403, detail="Administrador inválido")
+    if not verify_password(admin_password, admin.get("password", "")):
+        raise HTTPException(status_code=403, detail="Senha do administrador inválida")
+
+    # --- Quantidade a cancelar ---
+    try:
+        cancel_qty = int(data.get("quantity") or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Quantidade inválida")
+    if cancel_qty <= 0:
+        raise HTTPException(status_code=400, detail="Quantidade deve ser maior que zero")
+
+    order = await db.orders.find_one({"id": order_id})
+    if not order:
+        raise HTTPException(status_code=404, detail="Comanda não encontrada")
+    if order.get("is_closed"):
+        raise HTTPException(status_code=400, detail="Comanda fechada é somente leitura")
+
+    # --- Localiza o item ---
+    idx = next((i for i, it in enumerate(order.get("items", [])) if it.get("id") == item_id), -1)
+    if idx == -1:
+        raise HTTPException(status_code=404, detail="Item não encontrado")
+    item = order["items"][idx]
+    if item.get("status") == "cancelled":
+        raise HTTPException(status_code=400, detail="Item já cancelado")
+    current_qty = int(item.get("quantity") or 0)
+    if cancel_qty > current_qty:
+        raise HTTPException(status_code=400, detail="Quantidade a cancelar maior que a atual")
+
+    restore_flag = bool(data.get("restore_stock", False))
+    stock_was_deducted = bool(item.get("stock_deducted"))
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    # --- Devolucao de estoque (somente se ja havia sido deduzido E restore_flag True) ---
+    stock_restored = False
+    if stock_was_deducted and restore_flag:
+        try:
+            await restore_stock(item["product_id"], cancel_qty, order_code=order.get("id", ""))
+            stock_restored = True
+        except Exception as e:
+            logger.exception(f"[CANCEL-ITEM] falha ao devolver estoque: {e}")
+            raise HTTPException(status_code=500, detail=f"Falha ao devolver estoque: {e}")
+
+    # Metadata da parte cancelada (audit)
+    cancel_meta = {
+        "cancelled_qty": cancel_qty,
+        "original_unit_price": float(item.get("unit_price", 0) or 0),
+        "cancellation_reason": reason,
+        "cancelled_at": now_iso,
+        "cancelled_by_id": admin.get("id"),
+        "cancelled_by_name": admin.get("name"),
+        "cancelled_by_cashier_id": current_user.get("id"),
+        "cancelled_by_cashier_name": current_user.get("name"),
+        "stock_was_deducted": stock_was_deducted,
+        "stock_restored": stock_restored,
+    }
+
+    if cancel_qty == current_qty:
+        # Cancelamento total do item — marca em lugar
+        item["status"] = "cancelled"
+        item["quantity_cancelled"] = cancel_qty
+        item.update(cancel_meta)
+        # Se estoque foi devolvido, a "conta" deste item deixa de estar deduzida.
+        if stock_restored:
+            item["stock_deducted"] = False
+        order["items"][idx] = item
+    else:
+        # Cancelamento PARCIAL — split preservando historico
+        remaining_qty = current_qty - cancel_qty
+        item["quantity"] = remaining_qty
+        # A parte remanescente mantem status/stock_deducted originais (se ja deduzida,
+        # continua deduzida para essa quantidade — a devolucao acima cobriu a diferenca).
+        order["items"][idx] = item
+
+        cancelled_line = {
+            **item,
+            "id": str(uuid.uuid4()),
+            "quantity": cancel_qty,
+            "status": "cancelled",
+            "quantity_cancelled": cancel_qty,
+            # Se estoque estava deduzido e foi restaurado, marca essa linha como nao-deduzida
+            # (a devolucao ja compensou). Se nao foi restaurado, mantem True para nao rededuzir.
+            "stock_deducted": (stock_was_deducted and not stock_restored),
+            **cancel_meta,
+        }
+        order["items"].append(cancelled_line)
+
+    # --- Recalcula totais (ignora itens cancelados) ---
+    subtotal = sum(
+        (it.get("unit_price") or 0) * (it.get("quantity") or 0)
+        for it in order["items"]
+        if it.get("status") != "cancelled"
+    )
+    fee_pct = order.get("service_fee_percentage", 10)
+    service_fee = subtotal * (fee_pct / 100)
+    total = subtotal + service_fee
+
+    await db.orders.update_one(
+        {"id": order_id},
+        {"$set": {
+            "items": order["items"],
+            "subtotal": subtotal,
+            "service_fee": service_fee,
+            "total": total,
+        }}
+    )
+
+    # Realtime
+    updated = await db.orders.find_one({"id": order_id}, {"_id": 0})
+    await sio.emit('order_updated', updated)
+    if stock_restored:
+        stock_list = await db.stock.find({}, {"_id": 0}).to_list(500)
+        await sio.emit('stock_updated', stock_list)
+
+    logger.info(
+        f"[CANCEL-ITEM] pedido={order_id} item={item_id} qty={cancel_qty} "
+        f"stock_was_deducted={stock_was_deducted} restored={stock_restored} "
+        f"por={current_user.get('name')} autorizado_por={admin.get('name')} — {reason}"
+    )
+
+    return {
+        "message": "Item cancelado",
+        "order": updated,
+        "cancelled_qty": cancel_qty,
+        "stock_restored": stock_restored,
+        "authorized_by": admin.get("name"),
+    }
+
 @api_router.post("/orders/{order_id}/close")
 async def close_order(order_id: str, payment_data: dict):
     order = await db.orders.find_one({"id": order_id}, {"_id": 0})
@@ -1112,6 +1262,64 @@ async def deduct_stock(product_id: str, quantity: int, order_code: str = ""):
     )
     await check_stock_alert(product_id)
     logger.info(f"[STOCK] Baixa direta - Pedido {order_code or '-'} produto={product_id} x{quantity}")
+
+async def restore_stock(product_id: str, quantity: int, order_code: str = ""):
+    """Devolucao de estoque (inversa de deduct_stock).
+
+    Espelha exatamente a logica de deduct_stock:
+      1) Se o produto possui receita tecnica -> devolve cada ingrediente ao estoque.
+      2) Caso contrario -> fallback legado (devolve o proprio produto).
+    Se o produto nao tem controle de estoque, nao inventa estoque (no-op).
+    Nunca levanta HTTPException por saldo (devolucao sempre soma).
+    """
+    if quantity is None or float(quantity) <= 0:
+        return
+    qty_num = float(quantity)
+
+    # 1) Devolucao via receita tecnica
+    recipe = await db.recipes.find_one({"product_id": product_id}, {"_id": 0})
+    if recipe and recipe.get("ingredients"):
+        needed = {}
+        names = {}
+        for ing in recipe["ingredients"]:
+            sid = ing.get("stock_item_id")
+            qty = float(ing.get("quantity", 0) or 0) * qty_num
+            if not sid or qty <= 0:
+                continue
+            needed[sid] = needed.get(sid, 0) + qty
+        log_lines = []
+        for sid, add_qty in needed.items():
+            stock_item = await db.stock.find_one({"id": sid}, {"_id": 0})
+            if not stock_item:
+                logger.warning(f"[STOCK-RESTORE] ingrediente {sid} nao encontrado - ignorado")
+                continue
+            names[sid] = stock_item.get("name") or sid
+            await db.stock.update_one(
+                {"id": sid},
+                {
+                    "$inc": {"quantity": add_qty},
+                    "$set": {"last_updated": datetime.now(timezone.utc).isoformat()}
+                }
+            )
+            if stock_item.get("product_id"):
+                await check_stock_alert(stock_item.get("product_id"))
+            log_lines.append(f"+{add_qty} {names.get(sid, sid)}")
+        logger.info(f"[CMV] Devolucao por receita - Pedido {order_code or '-'} produto={product_id} x{quantity}: " + ", ".join(log_lines))
+        return
+
+    # 2) Fallback legado: soma no proprio produto se houver entrada de estoque
+    stock_item = await db.stock.find_one({"product_id": product_id}, {"_id": 0})
+    if not stock_item:
+        return  # sem controle de estoque - no-op
+    await db.stock.update_one(
+        {"product_id": product_id},
+        {
+            "$inc": {"quantity": qty_num},
+            "$set": {"last_updated": datetime.now(timezone.utc).isoformat()}
+        }
+    )
+    await check_stock_alert(product_id)
+    logger.info(f"[STOCK] Devolucao direta - Pedido {order_code or '-'} produto={product_id} x{quantity}")
 
 @api_router.get("/stock", response_model=List[dict])
 async def get_stock(stock_type: Optional[str] = None):
