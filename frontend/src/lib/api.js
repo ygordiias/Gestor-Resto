@@ -34,10 +34,28 @@ api.interceptors.request.use((config) => {
 api.interceptors.response.use(
   (response) => response,
   (error) => {
+    // Rede indisponível / timeout / servidor offline: apenas propaga o erro
+    // para o chamador tratar (com fallback local quando aplicável). NÃO faz
+    // window.location.href para evitar loops de redirecionamento e telas
+    // brancas quando o backend está temporariamente inacessível.
+    const isNetworkError =
+      !error.response || error.code === 'ECONNABORTED' || error.message === 'Network Error';
+
+    if (isNetworkError) {
+      console.warn('[api] network error:', error.message);
+      return Promise.reject(error);
+    }
+
+    // 401 apenas em rotas autenticadas: limpa sessão e volta ao login.
+    // Evita redirecionar durante a própria tela de login (loop).
     if (error.response?.status === 401) {
-      localStorage.removeItem('token');
-      localStorage.removeItem('user');
-      window.location.href = '/login';
+      const path = window.location.pathname || '';
+      const isAuthEndpoint = (error.config?.url || '').includes('/auth/login');
+      if (!isAuthEndpoint && path !== '/login') {
+        localStorage.removeItem('token');
+        localStorage.removeItem('user');
+        window.location.href = '/login';
+      }
     }
     return Promise.reject(error);
   }
@@ -183,6 +201,7 @@ export const tablesAPI = {
 // Orders - with offline support
 export const ordersAPI = {
   getAll: (params) => api.get('/orders', { params }),
+  createOnline: (data) => api.post('/orders/online', data),
   getOpen: async () => {
     try {
       const response = await api.get('/orders/open');
@@ -230,6 +249,8 @@ export const ordersAPI = {
   },
   updateItemStatus: (orderId, itemId, status) => 
     api.put(`/orders/${orderId}/item/${itemId}/status`, { status }),
+  cancelItem: (orderId, itemId, payload) =>
+    api.patch(`/orders/${orderId}/item/${itemId}/cancel`, payload),
   close: (orderId, payments) => api.post(`/orders/${orderId}/close`, { payments }),
 };
 

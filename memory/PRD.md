@@ -132,5 +132,28 @@
 - [x] Integração total com CMV: consumo via pedidos `delivered` é deduzido em tempo real
 - [x] Superadmin: pequenas correções em TablesPage.js e Layout.js para também incluir role superadmin nos blocos que estavam restritos a `'waiter' || 'admin'`
 
+## Cancelamento de item individual (Fev/2026 - STEP 2)
+- [x] `PATCH /api/orders/{order_id}/item/{item_id}/cancel` (surgical endpoint)
+- [x] Cancelamento total OU parcial (split de linha preservando histórico completo)
+- [x] Autorização obrigatória: admin_email + admin_password (mesmo padrão do cancelamento total). Cashier apenas nao autoriza.
+- [x] Se `stock_deducted=False`: apenas marca cancelado — nunca sera deduzido.
+- [x] Se `stock_deducted=True`: usuario escolhe "Devolver ao estoque?" (SIM/NAO). SIM chama nova função `restore_stock()` (espelho de `deduct_stock`, suporta receita e legado). NAO mantém baixa.
+- [x] Recálculo automático de `subtotal`, `service_fee` (10%), `total` ignorando itens cancelados.
+- [x] Auditoria por item: quantidade cancelada, preço original, motivo, cashier, admin autorizador, timestamp, se estoque foi devolvido.
+- [x] UI do Caixa: botão X por item + dialog com quantidade, motivo, credenciais admin, radio de estoque (se aplicável). Item cancelado mostrado com badge CANCELADO e strike-through. Comanda fechada é read-only.
+- [x] Preserva integridade: `full-order cancellation`, cortesia por item, `stock_deducted` idempotencia, workflow Cozinha/Bar, fechamento e relatorios existentes.
+- [x] Realtime: emite `order_updated` e (quando aplicavel) `stock_updated`.
+- [x] 8 testes pytest em `/app/backend/tests/test_item_cancellation.py` (8/8 passing).
+
+## Estabilidade (Fev/2026 - STEP 1)
+- [x] `GET /api/health` transformado em liveness leve (`{"status":"ok"}` sem depender de MongoDB); `GET /health` root mantém readiness com DB check
+- [x] `ErrorBoundary` global (`/app/frontend/src/components/ErrorBoundary.js`) envolvendo o `<App>` — previne tela branca em erros React
+- [x] Interceptor axios (`/app/frontend/src/lib/api.js`) não redireciona mais em falhas de rede/timeout; 401 só desloga fora do `/login` e fora de `/auth/login`
+- [x] `AuthContext.js` mantém sessão local em erro de rede (só desloga em 401/403)
+- [x] Socket.IO com `reconnectionAttempts: Infinity`, `reconnectionDelayMax: 5000`, logs de reconexão
+- [x] Service Worker bump `v2 → v3` para invalidar caches antigos
+- [x] Testes pytest em `/app/backend/tests/test_health.py` (3/3 passing)
+- Nota SPA: refresh direto em qualquer rota (`/kitchen`, `/tables/xyz`, `/cliente/*`) já retorna 200 no ambiente atual — fallback é feito pela camada de ingress da plataforma Emergent, não precisa de config no repositório.
+
 ---
-*Última atualização: Junho 2026*
+*Última atualização: Fevereiro 2026*

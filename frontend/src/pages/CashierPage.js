@@ -7,10 +7,19 @@ import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
 import { ScrollArea } from '../components/ui/scroll-area';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
-import { ordersAPI, cashRegisterAPI, tablesAPI, invoicesAPI } from '../lib/api';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from '../components/ui/dialog';
+import { ordersAPI, cashRegisterAPI, tablesAPI, invoicesAPI, productsAPI } from '../lib/api';
 import { cn, formatCurrency, formatDate } from '../lib/utils';
 import socketService from '../lib/socket';
 import { toast } from 'sonner';
+import { OnlineOrderBadge, isOnlineOrder } from '../components/OnlineOrderBadge';
 import { 
   CreditCard, 
   Receipt, 
@@ -87,6 +96,22 @@ export default function CashierPage() {
   const [openRegisterAmount, setOpenRegisterAmount] = useState('');
   const [movementAmount, setMovementAmount] = useState('');
   const [movementReason, setMovementReason] = useState('');
+  // Cancelamento individual de item
+  const [cancelItemState, setCancelItemState] = useState(null); // { item }
+  const [cancelQty, setCancelQty] = useState(1);
+  const [cancelReason, setCancelReason] = useState('');
+  const [cancelAdminEmail, setCancelAdminEmail] = useState('');
+  const [cancelAdminPassword, setCancelAdminPassword] = useState('');
+  const [cancelRestore, setCancelRestore] = useState('no'); // 'yes' | 'no'
+  const [cancelSubmitting, setCancelSubmitting] = useState(false);
+  // Pedido online (iFood / 99Food / Outro)
+  const [onlineDialogOpen, setOnlineDialogOpen] = useState(false);
+  const [onlinePlatform, setOnlinePlatform] = useState('ifood');
+  const [onlineExternalNumber, setOnlineExternalNumber] = useState('');
+  const [onlineDeliveryType, setOnlineDeliveryType] = useState('delivery');
+  const [onlineItems, setOnlineItems] = useState([]); // [{product_id, quantity}]
+  const [onlineProducts, setOnlineProducts] = useState([]);
+  const [onlineSubmitting, setOnlineSubmitting] = useState(false);
   const isMountedRef = useRef(true);
 
   // Encontra o pedido selecionado de forma memoizada
@@ -287,6 +312,120 @@ export default function CashierPage() {
     }
   };
 
+  const openCancelItem = (item) => {
+    setCancelItemState({ item });
+    setCancelQty(item.quantity || 1);
+    setCancelReason('');
+    setCancelAdminEmail('');
+    setCancelAdminPassword('');
+    setCancelRestore(item.stock_deducted ? 'no' : 'no');
+  };
+
+  const closeCancelItem = () => {
+    setCancelItemState(null);
+    setCancelSubmitting(false);
+  };
+
+  const submitCancelItem = async () => {
+    if (!cancelItemState || !selectedOrder) return;
+    const item = cancelItemState.item;
+    const qtyNum = parseInt(cancelQty, 10);
+    if (!qtyNum || qtyNum <= 0 || qtyNum > item.quantity) {
+      toast.error('Quantidade inválida');
+      return;
+    }
+    if (!cancelReason.trim()) {
+      toast.error('Informe o motivo');
+      return;
+    }
+    if (!cancelAdminEmail.trim() || !cancelAdminPassword) {
+      toast.error('Credenciais do administrador são obrigatórias');
+      return;
+    }
+    setCancelSubmitting(true);
+    try {
+      const res = await ordersAPI.cancelItem(selectedOrder.id, item.id, {
+        quantity: qtyNum,
+        reason: cancelReason.trim(),
+        admin_email: cancelAdminEmail.trim(),
+        admin_password: cancelAdminPassword,
+        restore_stock: item.stock_deducted ? (cancelRestore === 'yes') : false,
+      });
+      toast.success(
+        `Item cancelado (${qtyNum}x) — autorizado por ${res.data.authorized_by}${res.data.stock_restored ? ' • estoque devolvido' : ''}`
+      );
+      closeCancelItem();
+      await fetchData();
+    } catch (e) {
+      toast.error(e.response?.data?.detail || e.message || 'Erro ao cancelar item');
+      setCancelSubmitting(false);
+    }
+  };
+
+  const openOnlineOrderDialog = async () => {
+    setOnlinePlatform('ifood');
+    setOnlineExternalNumber('');
+    setOnlineDeliveryType('delivery');
+    setOnlineItems([{ product_id: '', quantity: 1, notes: '' }]);
+    setOnlineDialogOpen(true);
+    try {
+      const res = await productsAPI.getAll();
+      setOnlineProducts((res.data || []).filter((p) => p.is_available !== false));
+    } catch (e) {
+      toast.error('Erro ao carregar produtos');
+    }
+  };
+
+  const addOnlineItem = () => setOnlineItems((s) => [...s, { product_id: '', quantity: 1, notes: '' }]);
+  const removeOnlineItem = (idx) => setOnlineItems((s) => s.filter((_, i) => i !== idx));
+  const updateOnlineItem = (idx, field, val) => setOnlineItems((s) =>
+    s.map((it, i) => (i === idx ? { ...it, [field]: val } : it))
+  );
+
+  const onlineTotal = onlineItems.reduce((acc, it) => {
+    const p = onlineProducts.find((x) => x.id === it.product_id);
+    return acc + (p ? (p.price || 0) * (parseInt(it.quantity, 10) || 0) : 0);
+  }, 0);
+
+  const submitOnlineOrder = async () => {
+    if (!onlineExternalNumber.trim()) {
+      toast.error('Informe o número do pedido externo');
+      return;
+    }
+    const valid = onlineItems.filter((it) => it.product_id && (parseInt(it.quantity, 10) || 0) > 0);
+    if (valid.length === 0) {
+      toast.error('Adicione pelo menos 1 item válido');
+      return;
+    }
+    const payloadItems = valid.map((it) => {
+      const p = onlineProducts.find((x) => x.id === it.product_id);
+      return {
+        product_id: p.id,
+        product_name: p.name,
+        quantity: parseInt(it.quantity, 10),
+        unit_price: p.price,
+        type: p.type || 'food',
+        notes: it.notes ? it.notes.trim() : null,
+      };
+    });
+    setOnlineSubmitting(true);
+    try {
+      const res = await ordersAPI.createOnline({
+        platform: onlinePlatform,
+        external_order_number: onlineExternalNumber.trim(),
+        delivery_type: onlineDeliveryType,
+        items: payloadItems,
+      });
+      toast.success(`Pedido online criado: ${res.data.platform.toUpperCase()} #${res.data.external_order_number}`);
+      setOnlineDialogOpen(false);
+      await fetchData();
+    } catch (e) {
+      toast.error(e.response?.data?.detail || 'Erro ao criar pedido online');
+    } finally {
+      setOnlineSubmitting(false);
+    }
+  };
+
   if (loading) {
     return (
       <Layout title="Caixa">
@@ -375,7 +514,18 @@ export default function CashierPage() {
           <div className="lg:col-span-2">
             <Card>
               <CardHeader className="pb-2 sm:pb-4">
-                <CardTitle className="font-heading text-lg sm:text-xl">Comandas Abertas</CardTitle>
+                <div className="flex justify-between items-center gap-2 flex-wrap">
+                  <CardTitle className="font-heading text-lg sm:text-xl">Comandas Abertas</CardTitle>
+                  <Button
+                    size="sm"
+                    variant="default"
+                    onClick={openOnlineOrderDialog}
+                    data-testid="new-online-order-btn"
+                  >
+                    <Plus className="h-4 w-4 mr-1" />
+                    Novo Pedido Online
+                  </Button>
+                </div>
               </CardHeader>
               <CardContent>
                 {orders.length === 0 ? (
@@ -396,9 +546,13 @@ export default function CashierPage() {
                       >
                         <CardContent className="p-3 sm:p-4">
                           <div className="flex justify-between items-center mb-2">
-                            <Badge variant="outline" className="font-heading text-base sm:text-lg">
-                              Mesa {order.table_number}
-                            </Badge>
+                            {isOnlineOrder(order) ? (
+                              <OnlineOrderBadge order={order} />
+                            ) : (
+                              <Badge variant="outline" className="font-heading text-base sm:text-lg">
+                                Mesa {order.table_number}
+                              </Badge>
+                            )}
                             <span className="text-xs text-muted-foreground">
                               {formatDate(order.created_at)}
                             </span>
@@ -448,12 +602,47 @@ export default function CashierPage() {
                 <CardContent className="space-y-3 sm:space-y-4">
                   {/* Itens do Pedido */}
                   <ScrollArea className="h-32 sm:h-48 border rounded p-2">
-                    {selectedOrder.items.map((item) => (
-                      <div key={item.id} className="flex justify-between text-xs sm:text-sm py-1">
-                        <span>{item.quantity}x {item.product_name}</span>
-                        <span>{formatCurrency(item.unit_price * item.quantity)}</span>
-                      </div>
-                    ))}
+                    {selectedOrder.items.map((item) => {
+                      const isCancelled = item.status === 'cancelled';
+                      return (
+                        <div
+                          key={item.id}
+                          className={cn(
+                            'flex justify-between items-center gap-2 text-xs sm:text-sm py-1',
+                            isCancelled && 'opacity-60 line-through'
+                          )}
+                          data-testid={`cashier-item-row-${item.id}`}
+                        >
+                          <span className="flex-1 min-w-0 truncate">
+                            {item.quantity}x {item.product_name}
+                            {isCancelled && (
+                              <Badge
+                                variant="destructive"
+                                className="ml-2 text-[10px]"
+                                data-testid={`item-cancelled-badge-${item.id}`}
+                              >
+                                CANCELADO
+                              </Badge>
+                            )}
+                          </span>
+                          <span className="shrink-0">
+                            {formatCurrency(item.unit_price * item.quantity)}
+                          </span>
+                          {!isCancelled && (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-6 w-6 shrink-0 text-destructive hover:bg-destructive/10"
+                              onClick={() => openCancelItem(item)}
+                              title="Cancelar este item"
+                              data-testid={`cancel-item-btn-${item.id}`}
+                            >
+                              <X className="h-3.5 w-3.5" />
+                            </Button>
+                          )}
+                        </div>
+                      );
+                    })}
                   </ScrollArea>
 
                   {/* Totais */}
@@ -552,6 +741,36 @@ export default function CashierPage() {
                       {selectedOrder.comp_reason && <span className="ml-2 text-muted-foreground">— {selectedOrder.comp_reason}</span>}
                     </div>
                   )}
+
+                  {/* Cancelar comanda (exige admin) */}
+                  <Button
+                    variant="outline"
+                    className="w-full text-xs border-destructive/40 text-destructive hover:bg-destructive/10"
+                    onClick={async () => {
+                      const reason = window.prompt('Motivo do cancelamento:', '');
+                      if (!reason || !reason.trim()) return;
+                      const email = window.prompt('E-mail do administrador:', '');
+                      if (!email) return;
+                      const password = window.prompt('Senha do administrador:', '');
+                      if (!password) return;
+                      try {
+                        const r = await fetch(`${process.env.REACT_APP_BACKEND_URL}/api/orders/${selectedOrder.id}/cancel`, {
+                          method: 'PATCH',
+                          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('token')}` },
+                          body: JSON.stringify({ reason: reason.trim(), admin_email: email.trim(), admin_password: password }),
+                        });
+                        if (!r.ok) throw new Error((await r.json()).detail || 'Erro');
+                        const res = await r.json();
+                        toast.success(`Comanda cancelada (autorizado por ${res.cancelled_by})`);
+                        window.location.reload();
+                      } catch (e) {
+                        toast.error(e.message);
+                      }
+                    }}
+                    data-testid="cancel-order-btn"
+                  >
+                    ❌ Cancelar Comanda (exige admin)
+                  </Button>
                 </CardContent>
               </Card>
             ) : (
@@ -603,6 +822,268 @@ export default function CashierPage() {
           </div>
         </div>
       </div>
+
+      {/* Dialog: Novo Pedido Online (iFood / 99Food / Outro) */}
+      <Dialog open={onlineDialogOpen} onOpenChange={setOnlineDialogOpen}>
+        <DialogContent className="max-w-lg" data-testid="online-order-dialog">
+          <DialogHeader>
+            <DialogTitle>Novo Pedido Online</DialogTitle>
+            <DialogDescription>
+              Registre manualmente um pedido recebido em iFood, 99Food ou outra plataforma.
+              Não aplica taxa de serviço de 10%.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-2">
+              <div className="space-y-1">
+                <Label>Plataforma</Label>
+                <Select value={onlinePlatform} onValueChange={setOnlinePlatform}>
+                  <SelectTrigger data-testid="online-platform-select">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="ifood">iFood</SelectItem>
+                    <SelectItem value="99food">99Food</SelectItem>
+                    <SelectItem value="other">Outra</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-1">
+                <Label>Tipo</Label>
+                <Select value={onlineDeliveryType} onValueChange={setOnlineDeliveryType}>
+                  <SelectTrigger data-testid="online-delivery-select">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="delivery">Delivery</SelectItem>
+                    <SelectItem value="pickup">Retirada</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+
+            <div className="space-y-1">
+              <Label>Número do pedido externo</Label>
+              <Input
+                value={onlineExternalNumber}
+                onChange={(e) => setOnlineExternalNumber(e.target.value)}
+                placeholder="Ex.: 5678 ou #18"
+                data-testid="online-external-number"
+              />
+            </div>
+
+            <div className="space-y-1">
+              <div className="flex justify-between items-center">
+                <Label>Itens do pedido</Label>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={addOnlineItem}
+                  data-testid="online-add-item-btn"
+                >
+                  <Plus className="h-3 w-3 mr-1" /> Item
+                </Button>
+              </div>
+              <div className="space-y-2 max-h-64 overflow-y-auto">
+                {onlineItems.map((it, idx) => (
+                  <div
+                    key={idx}
+                    className="flex gap-2 items-start border rounded p-2"
+                    data-testid={`online-item-row-${idx}`}
+                  >
+                    <div className="flex-1 space-y-1">
+                      <Select
+                        value={it.product_id}
+                        onValueChange={(v) => updateOnlineItem(idx, 'product_id', v)}
+                      >
+                        <SelectTrigger data-testid={`online-item-product-${idx}`}>
+                          <SelectValue placeholder="Selecione o produto" />
+                        </SelectTrigger>
+                        <SelectContent className="max-h-60">
+                          {onlineProducts.map((p) => (
+                            <SelectItem key={p.id} value={p.id}>
+                              {p.name} — {formatCurrency(p.price)}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <Input
+                        placeholder="Observação (opcional)"
+                        value={it.notes || ''}
+                        onChange={(e) => updateOnlineItem(idx, 'notes', e.target.value)}
+                        data-testid={`online-item-notes-${idx}`}
+                      />
+                    </div>
+                    <Input
+                      type="number"
+                      min={1}
+                      className="w-16"
+                      value={it.quantity}
+                      onChange={(e) => updateOnlineItem(idx, 'quantity', e.target.value)}
+                      data-testid={`online-item-qty-${idx}`}
+                    />
+                    {onlineItems.length > 1 && (
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        onClick={() => removeOnlineItem(idx)}
+                        data-testid={`online-item-remove-${idx}`}
+                      >
+                        <X className="h-4 w-4" />
+                      </Button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex justify-between items-center pt-2 border-t">
+              <span className="text-sm text-muted-foreground">Total (sem taxa)</span>
+              <span className="font-bold text-lg" data-testid="online-order-total">
+                {formatCurrency(onlineTotal)}
+              </span>
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setOnlineDialogOpen(false)}
+              disabled={onlineSubmitting}
+              data-testid="online-cancel-btn"
+            >
+              Voltar
+            </Button>
+            <Button
+              onClick={submitOnlineOrder}
+              disabled={onlineSubmitting}
+              data-testid="online-submit-btn"
+            >
+              {onlineSubmitting ? 'Enviando...' : 'Criar pedido'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Dialog: Cancelamento individual de item */}
+      <Dialog open={!!cancelItemState} onOpenChange={(o) => { if (!o) closeCancelItem(); }}>
+        <DialogContent className="max-w-md" data-testid="cancel-item-dialog">
+          <DialogHeader>
+            <DialogTitle>Cancelar item</DialogTitle>
+            <DialogDescription>
+              {cancelItemState?.item && (
+                <>
+                  <strong>{cancelItemState.item.product_name}</strong> — atualmente{' '}
+                  {cancelItemState.item.quantity}x{' '}
+                  {formatCurrency(cancelItemState.item.unit_price)}.
+                </>
+              )}
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-3">
+            <div className="space-y-1">
+              <Label>Quantidade a cancelar</Label>
+              <Input
+                type="number"
+                min={1}
+                max={cancelItemState?.item?.quantity || 1}
+                value={cancelQty}
+                onChange={(e) => setCancelQty(e.target.value)}
+                data-testid="cancel-item-qty"
+              />
+              {cancelItemState?.item && (
+                <p className="text-[11px] text-muted-foreground">
+                  Máx.: {cancelItemState.item.quantity}. Restarão{' '}
+                  {Math.max(0, (cancelItemState.item.quantity || 0) - (parseInt(cancelQty, 10) || 0))}x ativos.
+                </p>
+              )}
+            </div>
+
+            <div className="space-y-1">
+              <Label>Motivo do cancelamento</Label>
+              <Input
+                value={cancelReason}
+                onChange={(e) => setCancelReason(e.target.value)}
+                placeholder="Ex.: cliente desistiu"
+                data-testid="cancel-item-reason"
+              />
+            </div>
+
+            {cancelItemState?.item?.stock_deducted && (
+              <div className="space-y-1 rounded border border-amber-500/40 bg-amber-500/10 p-2">
+                <Label className="text-amber-800">
+                  Estoque já foi baixado — Devolver ao estoque?
+                </Label>
+                <div className="flex gap-4 text-sm">
+                  <label className="flex items-center gap-1 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="restore"
+                      checked={cancelRestore === 'yes'}
+                      onChange={() => setCancelRestore('yes')}
+                      data-testid="cancel-item-restore-yes"
+                    />
+                    Sim
+                  </label>
+                  <label className="flex items-center gap-1 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="restore"
+                      checked={cancelRestore === 'no'}
+                      onChange={() => setCancelRestore('no')}
+                      data-testid="cancel-item-restore-no"
+                    />
+                    Não
+                  </label>
+                </div>
+              </div>
+            )}
+
+            <div className="pt-2 border-t space-y-2">
+              <Label className="text-xs uppercase tracking-wide text-muted-foreground">
+                Autorização do administrador
+              </Label>
+              <Input
+                type="email"
+                placeholder="E-mail do admin"
+                value={cancelAdminEmail}
+                onChange={(e) => setCancelAdminEmail(e.target.value)}
+                autoComplete="off"
+                data-testid="cancel-item-admin-email"
+              />
+              <Input
+                type="password"
+                placeholder="Senha do admin"
+                value={cancelAdminPassword}
+                onChange={(e) => setCancelAdminPassword(e.target.value)}
+                autoComplete="new-password"
+                data-testid="cancel-item-admin-password"
+              />
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={closeCancelItem}
+              disabled={cancelSubmitting}
+              data-testid="cancel-item-cancel-btn"
+            >
+              Voltar
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={submitCancelItem}
+              disabled={cancelSubmitting}
+              data-testid="cancel-item-confirm-btn"
+            >
+              {cancelSubmitting ? 'Cancelando...' : 'Confirmar cancelamento'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Layout>
   );
 }

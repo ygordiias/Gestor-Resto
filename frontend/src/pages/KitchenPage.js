@@ -8,6 +8,7 @@ import { cn, getStatusLabel, formatDate } from '../lib/utils';
 import socketService, { playNotificationSound } from '../lib/socket';
 import { toast } from 'sonner';
 import { ChefHat, Clock, Check, Timer, Bell } from 'lucide-react';
+import { OnlineOrderBadge, isOnlineOrder } from '../components/OnlineOrderBadge';
 
 export default function KitchenPage() {
   const [orders, setOrders] = useState([]);
@@ -121,6 +122,7 @@ export default function KitchenPage() {
             orderCreatedAt: order.created_at,
             waiterId: order.waiter_id,
             waiterName: order.waiter_name,
+            _order: order,
           });
         });
     });
@@ -213,9 +215,15 @@ export default function KitchenPage() {
                 </div>
               )}
               <div className="flex justify-between items-start mb-2">
-                <Badge variant="outline" className="font-heading text-base sm:text-lg">
-                  Mesa {item.tableNumber}
-                </Badge>
+                <div className="flex flex-col gap-1">
+                  {isOnlineOrder(item._order) ? (
+                    <OnlineOrderBadge order={item._order} size="lg" />
+                  ) : (
+                    <Badge variant="outline" className="font-heading text-base sm:text-lg">
+                      Mesa {item.tableNumber}
+                    </Badge>
+                  )}
+                </div>
                 <span className="text-xs text-muted-foreground flex items-center gap-1">
                   <Clock className="h-3 w-3" />
                   {formatDate(item.orderCreatedAt)}
