@@ -294,6 +294,13 @@ class OrderCreate(BaseModel):
     waiter_id: Optional[str] = None
     waiter_name: Optional[str] = None
 
+class OnlineOrderCreate(BaseModel):
+    """Pedido online criado manualmente pelo Caixa (iFood, 99Food, Outro)."""
+    platform: str  # ifood | 99food | other
+    external_order_number: str  # numero do pedido na plataforma (livre)
+    delivery_type: str  # delivery | pickup
+    items: List[OrderItemBase]
+
 class Order(OrderBase):
     model_config = ConfigDict(extra="ignore")
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -692,6 +699,83 @@ async def create_order(order_data: OrderCreate, current_user: dict = Depends(get
     await emit_order_updates(order_dict["items"])
     await sio.emit('tables_updated', await get_tables())
     
+    return {k: v for k, v in order_dict.items() if k != "_id"}
+
+@api_router.post("/orders/online", response_model=dict)
+async def create_online_order(
+    order_data: OnlineOrderCreate,
+    current_user: dict = Depends(require_role([UserRole.ADMIN, UserRole.CASHIER])),
+):
+    """Cria manualmente um pedido online recebido de iFood/99Food/Outro.
+
+    Reusa o mesmo modelo `orders` do sistema (mesma colecao, mesma estrutura de itens,
+    mesmo fluxo de estoque/receita). NAO aplica taxa de servico de 10%.
+    """
+    platform = (order_data.platform or "").strip().lower()
+    if platform not in ("ifood", "99food", "other"):
+        raise HTTPException(status_code=400, detail="Plataforma inválida (ifood | 99food | other)")
+    delivery_type = (order_data.delivery_type or "").strip().lower()
+    if delivery_type not in ("delivery", "pickup"):
+        raise HTTPException(status_code=400, detail="Tipo inválido (delivery | pickup)")
+    external_number = (order_data.external_order_number or "").strip()
+    if not external_number:
+        raise HTTPException(status_code=400, detail="Informe o número do pedido externo")
+    if not order_data.items:
+        raise HTTPException(status_code=400, detail="Pedido deve ter pelo menos 1 item")
+
+    # Reusa validador de estoque existente
+    await validate_stock(order_data.items)
+
+    # Monta itens no mesmo formato dos pedidos normais
+    items_out = []
+    for it in order_data.items:
+        oi = OrderItem(**it.model_dump()).model_dump()
+        oi["created_at"] = oi["created_at"].isoformat()
+        items_out.append(oi)
+
+    subtotal = sum(i["unit_price"] * i["quantity"] for i in items_out)
+
+    order_dict = {
+        "id": str(uuid.uuid4()),
+        # Campos ja existentes no modelo (compativel com orders antigos):
+        "table_id": None,
+        "table_number": None,
+        "waiter_id": current_user.get("id"),
+        "waiter_name": current_user.get("name"),
+        "items": items_out,
+        "status": OrderStatus.PENDING.value,
+        "subtotal": subtotal,
+        "service_fee": 0.0,
+        "service_fee_percentage": 0,  # online: sem 10%
+        "total": subtotal,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "closed_at": None,
+        "is_closed": False,
+        "is_comp": False,
+        # Campos de identificacao online (mesmo padrao ja usado em /public/pedido):
+        "source": "online",
+        "origin": platform,  # ifood | 99food | other (mais especifico que "web")
+        "platform": platform,
+        "external_order_number": external_number,
+        "delivery_type": delivery_type,
+        # Metadata de auditoria
+        "created_by_id": current_user.get("id"),
+        "created_by_name": current_user.get("name"),
+    }
+
+    await db.orders.insert_one(order_dict)
+
+    # Reusa exatamente o mesmo emitter para atualizar Cozinha e Bar
+    await emit_order_updates(items_out)
+    await sio.emit('new_online_order', {
+        "order_id": order_dict["id"],
+        "platform": platform,
+        "external_order_number": external_number,
+        "delivery_type": delivery_type,
+        "total": subtotal,
+        "items_count": len(items_out),
+    })
+
     return {k: v for k, v in order_dict.items() if k != "_id"}
 
 async def emit_order_updates(items):

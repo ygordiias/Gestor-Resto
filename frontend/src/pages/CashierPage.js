@@ -15,10 +15,11 @@ import {
   DialogDescription,
   DialogFooter,
 } from '../components/ui/dialog';
-import { ordersAPI, cashRegisterAPI, tablesAPI, invoicesAPI } from '../lib/api';
+import { ordersAPI, cashRegisterAPI, tablesAPI, invoicesAPI, productsAPI } from '../lib/api';
 import { cn, formatCurrency, formatDate } from '../lib/utils';
 import socketService from '../lib/socket';
 import { toast } from 'sonner';
+import { OnlineOrderBadge, isOnlineOrder } from '../components/OnlineOrderBadge';
 import { 
   CreditCard, 
   Receipt, 
@@ -103,6 +104,14 @@ export default function CashierPage() {
   const [cancelAdminPassword, setCancelAdminPassword] = useState('');
   const [cancelRestore, setCancelRestore] = useState('no'); // 'yes' | 'no'
   const [cancelSubmitting, setCancelSubmitting] = useState(false);
+  // Pedido online (iFood / 99Food / Outro)
+  const [onlineDialogOpen, setOnlineDialogOpen] = useState(false);
+  const [onlinePlatform, setOnlinePlatform] = useState('ifood');
+  const [onlineExternalNumber, setOnlineExternalNumber] = useState('');
+  const [onlineDeliveryType, setOnlineDeliveryType] = useState('delivery');
+  const [onlineItems, setOnlineItems] = useState([]); // [{product_id, quantity}]
+  const [onlineProducts, setOnlineProducts] = useState([]);
+  const [onlineSubmitting, setOnlineSubmitting] = useState(false);
   const isMountedRef = useRef(true);
 
   // Encontra o pedido selecionado de forma memoizada
@@ -353,6 +362,70 @@ export default function CashierPage() {
     }
   };
 
+  const openOnlineOrderDialog = async () => {
+    setOnlinePlatform('ifood');
+    setOnlineExternalNumber('');
+    setOnlineDeliveryType('delivery');
+    setOnlineItems([{ product_id: '', quantity: 1, notes: '' }]);
+    setOnlineDialogOpen(true);
+    try {
+      const res = await productsAPI.getAll();
+      setOnlineProducts((res.data || []).filter((p) => p.is_available !== false));
+    } catch (e) {
+      toast.error('Erro ao carregar produtos');
+    }
+  };
+
+  const addOnlineItem = () => setOnlineItems((s) => [...s, { product_id: '', quantity: 1, notes: '' }]);
+  const removeOnlineItem = (idx) => setOnlineItems((s) => s.filter((_, i) => i !== idx));
+  const updateOnlineItem = (idx, field, val) => setOnlineItems((s) =>
+    s.map((it, i) => (i === idx ? { ...it, [field]: val } : it))
+  );
+
+  const onlineTotal = onlineItems.reduce((acc, it) => {
+    const p = onlineProducts.find((x) => x.id === it.product_id);
+    return acc + (p ? (p.price || 0) * (parseInt(it.quantity, 10) || 0) : 0);
+  }, 0);
+
+  const submitOnlineOrder = async () => {
+    if (!onlineExternalNumber.trim()) {
+      toast.error('Informe o número do pedido externo');
+      return;
+    }
+    const valid = onlineItems.filter((it) => it.product_id && (parseInt(it.quantity, 10) || 0) > 0);
+    if (valid.length === 0) {
+      toast.error('Adicione pelo menos 1 item válido');
+      return;
+    }
+    const payloadItems = valid.map((it) => {
+      const p = onlineProducts.find((x) => x.id === it.product_id);
+      return {
+        product_id: p.id,
+        product_name: p.name,
+        quantity: parseInt(it.quantity, 10),
+        unit_price: p.price,
+        type: p.type || 'food',
+        notes: it.notes ? it.notes.trim() : null,
+      };
+    });
+    setOnlineSubmitting(true);
+    try {
+      const res = await ordersAPI.createOnline({
+        platform: onlinePlatform,
+        external_order_number: onlineExternalNumber.trim(),
+        delivery_type: onlineDeliveryType,
+        items: payloadItems,
+      });
+      toast.success(`Pedido online criado: ${res.data.platform.toUpperCase()} #${res.data.external_order_number}`);
+      setOnlineDialogOpen(false);
+      await fetchData();
+    } catch (e) {
+      toast.error(e.response?.data?.detail || 'Erro ao criar pedido online');
+    } finally {
+      setOnlineSubmitting(false);
+    }
+  };
+
   if (loading) {
     return (
       <Layout title="Caixa">
@@ -441,7 +514,18 @@ export default function CashierPage() {
           <div className="lg:col-span-2">
             <Card>
               <CardHeader className="pb-2 sm:pb-4">
-                <CardTitle className="font-heading text-lg sm:text-xl">Comandas Abertas</CardTitle>
+                <div className="flex justify-between items-center gap-2 flex-wrap">
+                  <CardTitle className="font-heading text-lg sm:text-xl">Comandas Abertas</CardTitle>
+                  <Button
+                    size="sm"
+                    variant="default"
+                    onClick={openOnlineOrderDialog}
+                    data-testid="new-online-order-btn"
+                  >
+                    <Plus className="h-4 w-4 mr-1" />
+                    Novo Pedido Online
+                  </Button>
+                </div>
               </CardHeader>
               <CardContent>
                 {orders.length === 0 ? (
@@ -462,9 +546,13 @@ export default function CashierPage() {
                       >
                         <CardContent className="p-3 sm:p-4">
                           <div className="flex justify-between items-center mb-2">
-                            <Badge variant="outline" className="font-heading text-base sm:text-lg">
-                              Mesa {order.table_number}
-                            </Badge>
+                            {isOnlineOrder(order) ? (
+                              <OnlineOrderBadge order={order} />
+                            ) : (
+                              <Badge variant="outline" className="font-heading text-base sm:text-lg">
+                                Mesa {order.table_number}
+                              </Badge>
+                            )}
                             <span className="text-xs text-muted-foreground">
                               {formatDate(order.created_at)}
                             </span>
@@ -734,6 +822,149 @@ export default function CashierPage() {
           </div>
         </div>
       </div>
+
+      {/* Dialog: Novo Pedido Online (iFood / 99Food / Outro) */}
+      <Dialog open={onlineDialogOpen} onOpenChange={setOnlineDialogOpen}>
+        <DialogContent className="max-w-lg" data-testid="online-order-dialog">
+          <DialogHeader>
+            <DialogTitle>Novo Pedido Online</DialogTitle>
+            <DialogDescription>
+              Registre manualmente um pedido recebido em iFood, 99Food ou outra plataforma.
+              Não aplica taxa de serviço de 10%.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-2">
+              <div className="space-y-1">
+                <Label>Plataforma</Label>
+                <Select value={onlinePlatform} onValueChange={setOnlinePlatform}>
+                  <SelectTrigger data-testid="online-platform-select">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="ifood">iFood</SelectItem>
+                    <SelectItem value="99food">99Food</SelectItem>
+                    <SelectItem value="other">Outra</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-1">
+                <Label>Tipo</Label>
+                <Select value={onlineDeliveryType} onValueChange={setOnlineDeliveryType}>
+                  <SelectTrigger data-testid="online-delivery-select">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="delivery">Delivery</SelectItem>
+                    <SelectItem value="pickup">Retirada</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+
+            <div className="space-y-1">
+              <Label>Número do pedido externo</Label>
+              <Input
+                value={onlineExternalNumber}
+                onChange={(e) => setOnlineExternalNumber(e.target.value)}
+                placeholder="Ex.: 5678 ou #18"
+                data-testid="online-external-number"
+              />
+            </div>
+
+            <div className="space-y-1">
+              <div className="flex justify-between items-center">
+                <Label>Itens do pedido</Label>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={addOnlineItem}
+                  data-testid="online-add-item-btn"
+                >
+                  <Plus className="h-3 w-3 mr-1" /> Item
+                </Button>
+              </div>
+              <div className="space-y-2 max-h-64 overflow-y-auto">
+                {onlineItems.map((it, idx) => (
+                  <div
+                    key={idx}
+                    className="flex gap-2 items-start border rounded p-2"
+                    data-testid={`online-item-row-${idx}`}
+                  >
+                    <div className="flex-1 space-y-1">
+                      <Select
+                        value={it.product_id}
+                        onValueChange={(v) => updateOnlineItem(idx, 'product_id', v)}
+                      >
+                        <SelectTrigger data-testid={`online-item-product-${idx}`}>
+                          <SelectValue placeholder="Selecione o produto" />
+                        </SelectTrigger>
+                        <SelectContent className="max-h-60">
+                          {onlineProducts.map((p) => (
+                            <SelectItem key={p.id} value={p.id}>
+                              {p.name} — {formatCurrency(p.price)}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <Input
+                        placeholder="Observação (opcional)"
+                        value={it.notes || ''}
+                        onChange={(e) => updateOnlineItem(idx, 'notes', e.target.value)}
+                        data-testid={`online-item-notes-${idx}`}
+                      />
+                    </div>
+                    <Input
+                      type="number"
+                      min={1}
+                      className="w-16"
+                      value={it.quantity}
+                      onChange={(e) => updateOnlineItem(idx, 'quantity', e.target.value)}
+                      data-testid={`online-item-qty-${idx}`}
+                    />
+                    {onlineItems.length > 1 && (
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        onClick={() => removeOnlineItem(idx)}
+                        data-testid={`online-item-remove-${idx}`}
+                      >
+                        <X className="h-4 w-4" />
+                      </Button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex justify-between items-center pt-2 border-t">
+              <span className="text-sm text-muted-foreground">Total (sem taxa)</span>
+              <span className="font-bold text-lg" data-testid="online-order-total">
+                {formatCurrency(onlineTotal)}
+              </span>
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setOnlineDialogOpen(false)}
+              disabled={onlineSubmitting}
+              data-testid="online-cancel-btn"
+            >
+              Voltar
+            </Button>
+            <Button
+              onClick={submitOnlineOrder}
+              disabled={onlineSubmitting}
+              data-testid="online-submit-btn"
+            >
+              {onlineSubmitting ? 'Enviando...' : 'Criar pedido'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Dialog: Cancelamento individual de item */}
       <Dialog open={!!cancelItemState} onOpenChange={(o) => { if (!o) closeCancelItem(); }}>

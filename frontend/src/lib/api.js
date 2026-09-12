@@ -201,6 +201,7 @@ export const tablesAPI = {
 // Orders - with offline support
 export const ordersAPI = {
   getAll: (params) => api.get('/orders', { params }),
+  createOnline: (data) => api.post('/orders/online', data),
   getOpen: async () => {
     try {
       const response = await api.get('/orders/open');
