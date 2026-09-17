@@ -1228,30 +1228,54 @@ ADMIN_PHONE = "5516981214154"
 async def send_whatsapp_message(phone: str, message: str):
     """Preparação para envio via WhatsApp. Loga mensagem até API ser configurada."""
     logger.info(f"[WHATSAPP → {phone}] {message}")
+async def check_stock_alert(stock_item_id: str):
+    """Verifica se um item de estoque ficou abaixo do mínimo após baixa e emite alerta."""
+    stock_item = await db.stock.find_one({"id": stock_item_id}, {"_id": 0})
 
-async def check_stock_alert(product_id: str):
-    """Verifica se estoque ficou abaixo do mínimo após baixa e emite alerta."""
-    stock_item = await db.stock.find_one({"product_id": product_id}, {"_id": 0})
+    # Compatibilidade com estoque legado vinculado diretamente ao produto
+    if not stock_item:
+        stock_item = await db.stock.find_one(
+            {"product_id": stock_item_id},
+            {"_id": 0}
+        )
+
     if not stock_item:
         return
-    if stock_item["quantity"] <= stock_item.get("min_quantity", 5):
-        product = await db.products.find_one({"id": product_id}, {"_id": 0})
-        product_name = product["name"] if product else product_id
+
+    quantity = float(stock_item.get("quantity", 0) or 0)
+    min_quantity = float(stock_item.get("min_quantity", 5) or 0)
+
+    if quantity <= min_quantity:
+        item_name = stock_item.get("name")
+
+        # Compatibilidade com registros antigos que não possuem name
+        if not item_name and stock_item.get("product_id"):
+            product = await db.products.find_one(
+                {"id": stock_item["product_id"]},
+                {"_id": 0}
+            )
+            item_name = product["name"] if product else stock_item["product_id"]
+
+        if not item_name:
+            item_name = stock_item.get("product_id") or stock_item.get("id", "Item de estoque")
+
         msg = (
             f"⚠️ Estoque baixo\n"
-            f"Produto: {product_name}\n"
-            f"Quantidade atual: {stock_item['quantity']}\n"
-            f"Mínimo configurado: {stock_item.get('min_quantity', 5)}"
+            f"Item: {item_name}\n"
+            f"Quantidade atual: {quantity}\n"
+            f"Mínimo configurado: {min_quantity}"
         )
+
         await send_whatsapp_message(ADMIN_PHONE, msg)
-        await sio.emit('stock_alert', {
-            "product_id": product_id,
-            "product_name": product_name,
-            "quantity": stock_item["quantity"],
-            "min_quantity": stock_item.get("min_quantity", 5),
+
+        await sio.emit("stock_alert", {
+            "stock_item_id": stock_item.get("id"),
+            "product_id": stock_item.get("product_id"),
+            "product_name": item_name,
+            "quantity": quantity,
+            "min_quantity": min_quantity,
             "message": msg
         })
-
 
 async def validate_stock(items):
     """Valida estoque disponível para todos os itens antes de criar pedido."""
@@ -1324,7 +1348,7 @@ async def deduct_stock(product_id: str, quantity: int, order_code: str = ""):
             )
             stock_item = await db.stock.find_one({"id": sid}, {"_id": 0})
             if stock_item:
-                await check_stock_alert(stock_item["product_id"])
+                await check_stock_alert(sid)
             log_lines.append(f"-{need_qty} {names.get(sid, sid)}")
         logger.info(f"[CMV] Baixa por receita - Pedido {order_code or '-'} produto={product_id} x{quantity}: " + ", ".join(log_lines))
         return
@@ -1386,8 +1410,7 @@ async def restore_stock(product_id: str, quantity: int, order_code: str = ""):
                     "$set": {"last_updated": datetime.now(timezone.utc).isoformat()}
                 }
             )
-            if stock_item.get("product_id"):
-                await check_stock_alert(stock_item.get("product_id"))
+            await check_stock_alert(sid)
             log_lines.append(f"+{add_qty} {names.get(sid, sid)}")
         logger.info(f"[CMV] Devolucao por receita - Pedido {order_code or '-'} produto={product_id} x{quantity}: " + ", ".join(log_lines))
         return
@@ -1403,7 +1426,7 @@ async def restore_stock(product_id: str, quantity: int, order_code: str = ""):
             "$set": {"last_updated": datetime.now(timezone.utc).isoformat()}
         }
     )
-    await check_stock_alert(product_id)
+    await check_stock_alert(stock_item["id"])
     logger.info(f"[STOCK] Devolucao direta - Pedido {order_code or '-'} produto={product_id} x{quantity}")
 
 @api_router.get("/stock", response_model=List[dict])
@@ -2526,3 +2549,4 @@ async def shutdown_db_client():
 # Wrap FastAPI with Socket.IO for combined HTTP + WebSocket ASGI app
 # This is the final app object that uvicorn will serve
 app = socketio.ASGIApp(sio, other_asgi_app=app)
+
