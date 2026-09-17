@@ -1252,6 +1252,7 @@ async def check_stock_alert(product_id: str):
             "message": msg
         })
 
+
 async def validate_stock(items):
     """Valida estoque disponível para todos os itens antes de criar pedido."""
     errors = []
