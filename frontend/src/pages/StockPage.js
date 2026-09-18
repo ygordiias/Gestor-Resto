@@ -342,21 +342,27 @@ export default function StockPage() {
                 {editingStock ? 'Ajustar Estoque' : 'Novo Item de Estoque'}
               </DialogTitle>
             </DialogHeader>
+
             <div className="space-y-4">
               <div className="space-y-2">
                 <Label>Tipo *</Label>
                 <Select
                   value={form.stock_type}
                   onValueChange={(v) => setForm({ ...form, stock_type: v })}
-                  disabled={!!editingStock}
                 >
                   <SelectTrigger data-testid="stock-type-select">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="raw_material">Matéria-prima (não aparece no cardápio)</SelectItem>
-                    <SelectItem value="semi_finished">Semi-acabado (item produzido)</SelectItem>
-                    <SelectItem value="finished_product">Produto acabado (revenda direta)</SelectItem>
+                    <SelectItem value="raw_material">
+                      Matéria-prima (não aparece no cardápio)
+                    </SelectItem>
+                    <SelectItem value="semi_finished">
+                      Semi-acabado (item produzido)
+                    </SelectItem>
+                    <SelectItem value="finished_product">
+                      Produto acabado (revenda direta)
+                    </SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -388,14 +394,18 @@ export default function StockPage() {
                 <Label>Produto do Cardápio (opcional)</Label>
                 <Select
                   value={form.product_id || '__none__'}
-                  onValueChange={(v) => setForm({ ...form, product_id: v === '__none__' ? '' : v })}
-                  disabled={!!editingStock}
+                  onValueChange={(v) => setForm({
+                    ...form,
+                    product_id: v === '__none__' ? '' : v
+                  })}
                 >
                   <SelectTrigger data-testid="stock-product-select">
                     <SelectValue placeholder="(nenhum)" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="__none__">— Sem vínculo com cardápio —</SelectItem>
+                    <SelectItem value="__none__">
+                      — Sem vínculo com cardápio —
+                    </SelectItem>
                     {products.map(product => (
                       <SelectItem key={product.id} value={product.id}>
                         {product.name}
@@ -403,10 +413,12 @@ export default function StockPage() {
                     ))}
                   </SelectContent>
                 </Select>
+
                 <p className="text-xs text-muted-foreground">
                   Use só quando o item TAMBÉM é vendido no cardápio (ex: refrigerante, água).
                 </p>
               </div>
+
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
                   <Label>Quantidade *</Label>
@@ -418,6 +430,7 @@ export default function StockPage() {
                     data-testid="stock-quantity-input"
                   />
                 </div>
+
                 <div className="space-y-2">
                   <Label>Unidade</Label>
                   <Select
@@ -436,47 +449,72 @@ export default function StockPage() {
                   </Select>
                 </div>
               </div>
+
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
                   <Label>Quantidade Mínima</Label>
                   <Input
                     type="number"
                     value={form.min_quantity}
-                    onChange={(e) => setForm({ ...form, min_quantity: e.target.value })}
+                    onChange={(e) => setForm({
+                      ...form,
+                      min_quantity: e.target.value
+                    })}
                   />
                 </div>
+
                 <div className="space-y-2">
                   <Label>Quantidade Máxima</Label>
                   <Input
                     type="number"
                     value={form.max_quantity}
-                    onChange={(e) => setForm({ ...form, max_quantity: e.target.value })}
+                    onChange={(e) => setForm({
+                      ...form,
+                      max_quantity: e.target.value
+                    })}
                   />
                 </div>
               </div>
+
               <div className="space-y-2 border-t pt-4">
                 <Label className="flex items-center gap-2">
-                  Custo Unitário (R$) <span className="text-xs text-muted-foreground">— usado no cálculo de CMV</span>
+                  Custo Unitário (R$)
+                  <span className="text-xs text-muted-foreground">
+                    — usado no cálculo de CMV
+                  </span>
                 </Label>
+
                 <Input
                   type="number"
                   step="0.01"
                   min="0"
                   value={form.unit_cost}
-                  onChange={(e) => setForm({ ...form, unit_cost: e.target.value })}
+                  onChange={(e) => setForm({
+                    ...form,
+                    unit_cost: e.target.value
+                  })}
                   placeholder="0,00"
                   data-testid="stock-unit-cost-input"
                 />
+
                 <p className="text-xs text-muted-foreground">
                   Valor pago por 1 {getUnitLabel(form.unit).toLowerCase()} deste item.
                 </p>
               </div>
             </div>
+
             <DialogFooter>
-              <Button variant="outline" onClick={() => setIsDialogOpen(false)}>
+              <Button
+                variant="outline"
+                onClick={() => setIsDialogOpen(false)}
+              >
                 Cancelar
               </Button>
-              <Button onClick={handleSave} data-testid="save-stock-btn">
+
+              <Button
+                onClick={handleSave}
+                data-testid="save-stock-btn"
+              >
                 Salvar
               </Button>
             </DialogFooter>
