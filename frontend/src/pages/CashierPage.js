@@ -20,11 +20,11 @@ import { cn, formatCurrency, formatDate } from '../lib/utils';
 import socketService from '../lib/socket';
 import { toast } from 'sonner';
 import { OnlineOrderBadge, isOnlineOrder } from '../components/OnlineOrderBadge';
-import { 
-  CreditCard, 
-  Receipt, 
-  X, 
-  Plus, 
+import {
+  CreditCard,
+  Receipt,
+  X,
+  Plus,
   Minus,
   QrCode,
   Banknote,
@@ -91,6 +91,8 @@ export default function CashierPage() {
   const [tables, setTables] = useState([]);
   const [register, setRegister] = useState(null);
   const [selectedOrderId, setSelectedOrderId] = useState(null);
+  const [orderSearch, setOrderSearch] = useState('');
+  const [closingOrder, setClosingOrder] = useState(false);
   const [payments, setPayments] = useState([]);
   const [loading, setLoading] = useState(true);
   const [openRegisterAmount, setOpenRegisterAmount] = useState('');
@@ -141,7 +143,7 @@ export default function CashierPage() {
 
   useEffect(() => {
     isMountedRef.current = true;
-    
+
     const handleOrderClosed = () => {
       if (isMountedRef.current) fetchData();
     };
@@ -269,6 +271,10 @@ export default function CashierPage() {
   }, [payments]);
 
   const handleRequestCleaning = async (tableId, tableNumber) => {
+    if (orders.some(o => o.table_id === tableId && !o.is_closed)) {
+      toast.error('A mesa ainda possui comandas abertas');
+      return;
+    }
     try {
       await tablesAPI.update(tableId, { status: 'cleaning' });
       toast.success(`Limpeza solicitada para Mesa ${tableNumber}`);
@@ -277,38 +283,48 @@ export default function CashierPage() {
       toast.error('Erro ao solicitar limpeza');
     }
   };
-
-  const handleCloseOrder = async () => {
-    if (!selectedOrder) return;
-
-    if (getTotalPayments < selectedOrder.total) {
+      const handleCloseOrder = async () => {
+    if (!selectedOrder || closingOrder) return;
+    if (getTotalPayments + 0.001 < selectedOrder.total) {
       toast.error('Valor dos pagamentos insuficiente');
       return;
     }
-
+    setClosingOrder(true);
+    const closedOrder = selectedOrder;
     try {
-      // Fecha o pedido
-      await ordersAPI.close(selectedOrder.id, payments.map(p => ({ method: p.method, amount: p.amount })));
-      toast.success('Comanda fechada com sucesso!');
-      
-      // Pergunta sobre NF-e
-      const emitInvoice = window.confirm('Deseja emitir Nota Fiscal?');
-      if (emitInvoice) {
-        await invoicesAPI.create({ order_id: selectedOrder.id });
-        toast.success('NF-e criada (MOCK)');
-      }
-
-      // Pergunta sobre solicitar limpeza
-      const requestCleaning = window.confirm('Solicitar limpeza da mesa?');
-      if (requestCleaning) {
-        await tablesAPI.update(selectedOrder.table_id, { status: 'cleaning' });
-        toast.info(`Mesa ${selectedOrder.table_number} aguardando limpeza`);
-      }
-      
+      await ordersAPI.close(closedOrder.id, payments.map(p => ({ method: p.method, amount: Number(p.amount) || 0 })));
+      toast.success(closedOrder.tab_number != null
+        ? `Comanda ${closedOrder.tab_number} fechada com sucesso!`
+        : 'Pedido fechado com sucesso!');
       clearSelection();
-      fetchData();
+      // Reconsulta o servidor: outra comanda pode ter sido aberta durante o pagamento.
+      const refreshed = await ordersAPI.getOpen();
+      const remaining = (refreshed.data || []).filter(o =>
+        o.table_id === closedOrder.table_id && !o.is_closed);
+      await fetchData();
+      if (window.confirm('Deseja emitir Nota Fiscal?')) {
+        try {
+          await invoicesAPI.create({ order_id: closedOrder.id });
+          toast.success('NF-e criada (MOCK)');
+        } catch (e) {
+          toast.error('Pagamento concluído, mas não foi possível gerar a nota fiscal');
+        }
+      }
+      if (closedOrder.table_id && remaining.length === 0) {
+        if (window.confirm(`Todas as comandas da mesa ${closedOrder.table_number} foram fechadas. Solicitar limpeza?`)) {
+          // O servidor deve impedir limpeza se outra comanda tiver sido vinculada nesse intervalo.
+          await tablesAPI.update(closedOrder.table_id, { status: 'cleaning' });
+          toast.info(`Mesa ${closedOrder.table_number} aguardando limpeza`);
+          await fetchData();
+        }
+      } else if (closedOrder.table_id) {
+        toast.info(`Mesa ${closedOrder.table_number} continua ocupada: ${remaining.length} pedido(s)/comanda(s) aberto(s).`);
+      }
     } catch (error) {
-      toast.error('Erro ao fechar comanda');
+      toast.error(error.response?.data?.detail || 'Erro ao fechar comanda ou atualizar a mesa');
+      await fetchData();
+    } finally {
+      setClosingOrder(false);
     }
   };
 
@@ -381,6 +397,15 @@ export default function CashierPage() {
   const updateOnlineItem = (idx, field, val) => setOnlineItems((s) =>
     s.map((it, i) => (i === idx ? { ...it, [field]: val } : it))
   );
+
+  const filteredOrders = orders.filter(order => {
+    const term = orderSearch.trim().toLowerCase();
+    if (!term) return true;
+    return [order.tab_number != null ? String(order.tab_number) : '',
+      order.table_number != null ? String(order.table_number) : '',
+      order.external_order_number || '', order.waiter_name || '']
+      .some(value => String(value).toLowerCase().includes(term));
+  });
 
   const onlineTotal = onlineItems.reduce((acc, it) => {
     const p = onlineProducts.find((x) => x.id === it.product_id);
@@ -472,36 +497,46 @@ export default function CashierPage() {
         </div>
       </Layout>
     );
-  }
-
+  }   
   return (
     <Layout title="Caixa">
       <div className="space-y-4 sm:space-y-6" data-testid="cashier-page">
-        {/* Status do Caixa - Responsivo */}
+        {/* Resumo do caixa */}
         <Card className="bg-primary/10 border-primary">
           <CardContent className="p-3 sm:p-4">
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2 sm:gap-4">
               <div>
                 <p className="text-xs sm:text-sm text-muted-foreground">Inicial</p>
-                <p className="text-sm sm:text-lg font-bold">{formatCurrency(register.initial_amount)}</p>
+                <p className="text-sm sm:text-lg font-bold">
+                  {formatCurrency(register.initial_amount)}
+                </p>
               </div>
               <div>
                 <p className="text-xs sm:text-sm text-muted-foreground">Vendas</p>
-                <p className="text-sm sm:text-lg font-bold text-green-600">{formatCurrency(register.total_sales)}</p>
+                <p className="text-sm sm:text-lg font-bold text-green-600">
+                  {formatCurrency(register.total_sales)}
+                </p>
               </div>
               <div>
                 <p className="text-xs sm:text-sm text-muted-foreground">Sangrias</p>
-                <p className="text-sm sm:text-lg font-bold text-red-600">-{formatCurrency(register.withdrawals)}</p>
+                <p className="text-sm sm:text-lg font-bold text-red-600">
+                  -{formatCurrency(register.withdrawals)}
+                </p>
               </div>
               <div>
                 <p className="text-xs sm:text-sm text-muted-foreground">Reforços</p>
-                <p className="text-sm sm:text-lg font-bold text-blue-600">+{formatCurrency(register.deposits)}</p>
+                <p className="text-sm sm:text-lg font-bold text-blue-600">
+                  +{formatCurrency(register.deposits)}
+                </p>
               </div>
               <div className="col-span-2 sm:col-span-1">
                 <p className="text-xs sm:text-sm text-muted-foreground">Saldo</p>
                 <p className="text-lg sm:text-xl font-heading font-bold text-primary">
                   {formatCurrency(
-                    register.initial_amount + register.total_sales + register.deposits - register.withdrawals
+                    register.initial_amount +
+                    register.total_sales +
+                    register.deposits -
+                    register.withdrawals
                   )}
                 </p>
               </div>
@@ -510,12 +545,14 @@ export default function CashierPage() {
         </Card>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 sm:gap-6">
-          {/* Lista de Comandas */}
+          {/* Lista de comandas abertas */}
           <div className="lg:col-span-2">
             <Card>
               <CardHeader className="pb-2 sm:pb-4">
                 <div className="flex justify-between items-center gap-2 flex-wrap">
-                  <CardTitle className="font-heading text-lg sm:text-xl">Comandas Abertas</CardTitle>
+                  <CardTitle className="font-heading text-lg sm:text-xl">
+                    Comandas Abertas
+                  </CardTitle>
                   <Button
                     size="sm"
                     variant="default"
@@ -527,14 +564,26 @@ export default function CashierPage() {
                   </Button>
                 </div>
               </CardHeader>
-              <CardContent>
+
+              <CardContent className="space-y-3">
+                <Input
+                  placeholder="Buscar comanda, mesa ou pedido online..."
+                  value={orderSearch}
+                  onChange={(e) => setOrderSearch(e.target.value)}
+                  data-testid="cashier-order-search"
+                />
+
                 {orders.length === 0 ? (
                   <p className="text-center text-muted-foreground py-8">
                     Nenhuma comanda aberta
                   </p>
+                ) : filteredOrders.length === 0 ? (
+                  <p className="text-center text-muted-foreground py-8">
+                    Nenhuma comanda encontrada
+                  </p>
                 ) : (
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 sm:gap-4">
-                    {orders.map((order) => (
+                    {filteredOrders.map((order) => (
                       <Card
                         key={order.id}
                         className={cn(
@@ -545,31 +594,45 @@ export default function CashierPage() {
                         data-testid={`order-card-${order.id}`}
                       >
                         <CardContent className="p-3 sm:p-4">
-                          <div className="flex justify-between items-center mb-2">
+                          <div className="flex justify-between items-center mb-2 gap-2">
                             {isOnlineOrder(order) ? (
                               <OnlineOrderBadge order={order} />
                             ) : (
-                              <Badge variant="outline" className="font-heading text-base sm:text-lg">
-                                Mesa {order.table_number}
+                              <Badge
+                                variant="outline"
+                                className="font-heading text-sm sm:text-base"
+                              >
+                                {order.tab_number != null
+                                  ? `Comanda ${order.tab_number} · Mesa ${order.table_number}`
+                                  : `Mesa ${order.table_number}`}
                               </Badge>
                             )}
                             <span className="text-xs text-muted-foreground">
                               {formatDate(order.created_at)}
                             </span>
                           </div>
+
                           <div className="space-y-1 mb-2">
-                            {order.items.slice(0, 3).map((item) => (
-                              <div key={item.id} className="flex justify-between text-xs sm:text-sm">
-                                <span className="truncate">{item.quantity}x {item.product_name}</span>
-                                <span>{formatCurrency(item.unit_price * item.quantity)}</span>
+                            {(order.items || []).slice(0, 3).map((item) => (
+                              <div
+                                key={item.id}
+                                className="flex justify-between gap-2 text-xs sm:text-sm"
+                              >
+                                <span className="truncate">
+                                  {item.quantity}x {item.product_name}
+                                </span>
+                                <span>
+                                  {formatCurrency(item.unit_price * item.quantity)}
+                                </span>
                               </div>
                             ))}
-                            {order.items.length > 3 && (
+                            {(order.items || []).length > 3 && (
                               <p className="text-xs text-muted-foreground">
                                 +{order.items.length - 3} itens...
                               </p>
                             )}
                           </div>
+
                           <div className="pt-2 border-t flex justify-between items-center">
                             <span className="font-medium text-sm">Total:</span>
                             <span className="text-base sm:text-lg font-bold text-primary">
@@ -585,25 +648,34 @@ export default function CashierPage() {
             </Card>
           </div>
 
-          {/* Painel de Pagamento */}
+          {/* Painel de pagamento individual */}
           <div>
             {selectedOrder ? (
               <Card className="sticky top-20">
                 <CardHeader className="pb-2">
-                  <div className="flex justify-between items-center">
+                  <div className="flex justify-between items-center gap-2">
                     <CardTitle className="font-heading text-lg">
-                      Mesa {selectedOrder.table_number}
+                      {isOnlineOrder(selectedOrder)
+                        ? 'Pedido online'
+                        : selectedOrder.tab_number != null
+                          ? `Comanda ${selectedOrder.tab_number} · Mesa ${selectedOrder.table_number}`
+                          : `Mesa ${selectedOrder.table_number}`}
                     </CardTitle>
-                    <Button variant="ghost" size="icon" onClick={clearSelection}>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={clearSelection}
+                    >
                       <X className="h-4 w-4" />
                     </Button>
                   </div>
                 </CardHeader>
+
                 <CardContent className="space-y-3 sm:space-y-4">
-                  {/* Itens do Pedido */}
                   <ScrollArea className="h-32 sm:h-48 border rounded p-2">
-                    {selectedOrder.items.map((item) => {
+                    {(selectedOrder.items || []).map((item) => {
                       const isCancelled = item.status === 'cancelled';
+
                       return (
                         <div
                           key={item.id}
@@ -613,21 +685,30 @@ export default function CashierPage() {
                           )}
                           data-testid={`cashier-item-row-${item.id}`}
                         >
-                          <span className="flex-1 min-w-0 truncate">
-                            {item.quantity}x {item.product_name}
+                          <span className="flex-1 min-w-0">
+                            <span className="block truncate">
+                              {item.quantity}x {item.product_name}
+                            </span>
+                            {item.notes && (
+                              <span className="block text-[11px] text-muted-foreground">
+                                Obs.: {item.notes}
+                              </span>
+                            )}
                             {isCancelled && (
                               <Badge
                                 variant="destructive"
-                                className="ml-2 text-[10px]"
+                                className="text-[10px]"
                                 data-testid={`item-cancelled-badge-${item.id}`}
                               >
                                 CANCELADO
                               </Badge>
                             )}
                           </span>
+
                           <span className="shrink-0">
                             {formatCurrency(item.unit_price * item.quantity)}
                           </span>
+
                           {!isCancelled && (
                             <Button
                               variant="ghost"
@@ -652,16 +733,20 @@ export default function CashierPage() {
                       <span>{formatCurrency(selectedOrder.subtotal)}</span>
                     </div>
                     <div className="flex justify-between text-xs sm:text-sm">
-                      <span>Serviço ({selectedOrder.service_fee_percentage}%):</span>
+                      <span>
+                        Serviço ({selectedOrder.service_fee_percentage}%):
+                      </span>
                       <span>{formatCurrency(selectedOrder.service_fee)}</span>
                     </div>
                     <div className="flex justify-between font-bold text-base sm:text-lg">
                       <span>Total:</span>
-                      <span className="text-primary">{formatCurrency(selectedOrder.total)}</span>
+                      <span className="text-primary">
+                        {formatCurrency(selectedOrder.total)}
+                      </span>
                     </div>
                   </div>
 
-                  {/* Formas de Pagamento */}
+                  {/* Formas de pagamento */}
                   <div className="space-y-2">
                     <Label className="text-sm">Pagamento</Label>
                     {payments.map((payment, idx) => (
@@ -674,28 +759,38 @@ export default function CashierPage() {
                         canRemove={payments.length > 1}
                       />
                     ))}
-                    <Button variant="outline" size="sm" onClick={addPayment} className="w-full">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={addPayment}
+                      className="w-full"
+                      disabled={closingOrder}
+                    >
                       <Plus className="h-4 w-4 mr-2" />
                       Dividir
                     </Button>
                   </div>
 
-                  {/* Total de Pagamentos */}
                   <div className="flex justify-between font-bold text-sm">
                     <span>Total Pagamentos:</span>
-                    <span className={cn(
-                      getTotalPayments >= selectedOrder.total ? 'text-green-600' : 'text-red-600'
-                    )}>
+                    <span
+                      className={cn(
+                        getTotalPayments >= selectedOrder.total
+                          ? 'text-green-600'
+                          : 'text-red-600'
+                      )}
+                    >
                       {formatCurrency(getTotalPayments)}
                     </span>
                   </div>
 
-                  {/* Troco */}
                   {getTotalPayments > selectedOrder.total && (
                     <div className="flex justify-between text-base sm:text-lg bg-muted p-2 rounded">
                       <span>Troco:</span>
                       <span className="font-bold">
-                        {formatCurrency(getTotalPayments - selectedOrder.total)}
+                        {formatCurrency(
+                          getTotalPayments - selectedOrder.total
+                        )}
                       </span>
                     </div>
                   )}
@@ -703,11 +798,14 @@ export default function CashierPage() {
                   <Button
                     className="w-full font-heading uppercase tracking-widest text-sm"
                     onClick={handleCloseOrder}
-                    disabled={getTotalPayments < selectedOrder.total}
+                    disabled={
+                      closingOrder ||
+                      getTotalPayments + 0.001 < selectedOrder.total
+                    }
                     data-testid="close-order-btn"
                   >
                     <Receipt className="h-4 w-4 mr-2" />
-                    Fechar Comanda
+                    {closingOrder ? 'Fechando...' : 'Fechar Comanda'}
                   </Button>
 
                   {/* Cortesia / Permuta */}
@@ -716,17 +814,36 @@ export default function CashierPage() {
                       variant="outline"
                       className="w-full text-xs border-purple-500/40 text-purple-600 hover:bg-purple-500/10"
                       onClick={async () => {
-                        const reason = window.prompt('Motivo da cortesia/permuta:', '');
+                        const reason = window.prompt(
+                          'Motivo da cortesia/permuta:',
+                          ''
+                        );
                         if (!reason || !reason.trim()) return;
+
                         try {
-                          const r = await fetch(`${process.env.REACT_APP_BACKEND_URL}/api/orders/${selectedOrder.id}/comp`, {
-                            method: 'PATCH',
-                            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('token')}` },
-                            body: JSON.stringify({ is_comp: true, comp_reason: reason.trim() }),
-                          });
-                          if (!r.ok) throw new Error((await r.json()).detail || 'Erro');
+                          const r = await fetch(
+                            `${process.env.REACT_APP_BACKEND_URL}/api/orders/${selectedOrder.id}/comp`,
+                            {
+                              method: 'PATCH',
+                              headers: {
+                                'Content-Type': 'application/json',
+                                Authorization: `Bearer ${localStorage.getItem('token')}`,
+                              },
+                              body: JSON.stringify({
+                                is_comp: true,
+                                comp_reason: reason.trim(),
+                              }),
+                            }
+                          );
+
+                          if (!r.ok) {
+                            throw new Error(
+                              (await r.json()).detail || 'Erro'
+                            );
+                          }
+
                           toast.success('Pedido marcado como cortesia');
-                          window.location.reload();
+                          await fetchData();
                         } catch (e) {
                           toast.error(e.message);
                         }
@@ -736,33 +853,73 @@ export default function CashierPage() {
                       🎁 Marcar como Cortesia/Permuta
                     </Button>
                   ) : (
-                    <div className="p-2 rounded border border-purple-500/40 bg-purple-500/10 text-xs" data-testid="comp-info">
-                      <span className="font-bold text-purple-700">🎁 CORTESIA</span>
-                      {selectedOrder.comp_reason && <span className="ml-2 text-muted-foreground">— {selectedOrder.comp_reason}</span>}
+                    <div
+                      className="p-2 rounded border border-purple-500/40 bg-purple-500/10 text-xs"
+                      data-testid="comp-info"
+                    >
+                      <span className="font-bold text-purple-700">
+                        🎁 CORTESIA
+                      </span>
+                      {selectedOrder.comp_reason && (
+                        <span className="ml-2 text-muted-foreground">
+                          — {selectedOrder.comp_reason}
+                        </span>
+                      )}
                     </div>
                   )}
 
-                  {/* Cancelar comanda (exige admin) */}
+                  {/* Cancelamento da comanda */}
                   <Button
                     variant="outline"
                     className="w-full text-xs border-destructive/40 text-destructive hover:bg-destructive/10"
                     onClick={async () => {
-                      const reason = window.prompt('Motivo do cancelamento:', '');
+                      const reason = window.prompt(
+                        'Motivo do cancelamento:',
+                        ''
+                      );
                       if (!reason || !reason.trim()) return;
-                      const email = window.prompt('E-mail do administrador:', '');
+
+                      const email = window.prompt(
+                        'E-mail do administrador:',
+                        ''
+                      );
                       if (!email) return;
-                      const password = window.prompt('Senha do administrador:', '');
+
+                      const password = window.prompt(
+                        'Senha do administrador:',
+                        ''
+                      );
                       if (!password) return;
+
                       try {
-                        const r = await fetch(`${process.env.REACT_APP_BACKEND_URL}/api/orders/${selectedOrder.id}/cancel`, {
-                          method: 'PATCH',
-                          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('token')}` },
-                          body: JSON.stringify({ reason: reason.trim(), admin_email: email.trim(), admin_password: password }),
-                        });
-                        if (!r.ok) throw new Error((await r.json()).detail || 'Erro');
+                        const r = await fetch(
+                          `${process.env.REACT_APP_BACKEND_URL}/api/orders/${selectedOrder.id}/cancel`,
+                          {
+                            method: 'PATCH',
+                            headers: {
+                              'Content-Type': 'application/json',
+                              Authorization: `Bearer ${localStorage.getItem('token')}`,
+                            },
+                            body: JSON.stringify({
+                              reason: reason.trim(),
+                              admin_email: email.trim(),
+                              admin_password: password,
+                            }),
+                          }
+                        );
+
+                        if (!r.ok) {
+                          throw new Error(
+                            (await r.json()).detail || 'Erro'
+                          );
+                        }
+
                         const res = await r.json();
-                        toast.success(`Comanda cancelada (autorizado por ${res.cancelled_by})`);
-                        window.location.reload();
+                        toast.success(
+                          `Comanda cancelada (autorizado por ${res.cancelled_by})`
+                        );
+                        clearSelection();
+                        await fetchData();
                       } catch (e) {
                         toast.error(e.message);
                       }
@@ -776,7 +933,9 @@ export default function CashierPage() {
             ) : (
               <Card>
                 <CardHeader className="pb-2">
-                  <CardTitle className="font-heading text-lg">Operações</CardTitle>
+                  <CardTitle className="font-heading text-lg">
+                    Operações
+                  </CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-4">
                   <p className="text-sm text-muted-foreground text-center">
@@ -784,7 +943,9 @@ export default function CashierPage() {
                   </p>
 
                   <div className="space-y-3 pt-4 border-t">
-                    <Label className="text-sm">Sangria / Reforço</Label>
+                    <Label className="text-sm">
+                      Sangria / Reforço
+                    </Label>
                     <Input
                       type="number"
                       placeholder="Valor"
@@ -796,12 +957,21 @@ export default function CashierPage() {
                       value={movementReason}
                       onChange={(e) => setMovementReason(e.target.value)}
                     />
+
                     <div className="grid grid-cols-2 gap-2">
-                      <Button variant="outline" onClick={handleWithdrawal} className="text-red-600 text-xs sm:text-sm">
+                      <Button
+                        variant="outline"
+                        onClick={handleWithdrawal}
+                        className="text-red-600 text-xs sm:text-sm"
+                      >
                         <Minus className="h-4 w-4 mr-1" />
                         Sangria
                       </Button>
-                      <Button variant="outline" onClick={handleDeposit} className="text-green-600 text-xs sm:text-sm">
+                      <Button
+                        variant="outline"
+                        onClick={handleDeposit}
+                        className="text-green-600 text-xs sm:text-sm"
+                      >
                         <Plus className="h-4 w-4 mr-1" />
                         Reforço
                       </Button>
@@ -823,14 +993,17 @@ export default function CashierPage() {
         </div>
       </div>
 
-      {/* Dialog: Novo Pedido Online (iFood / 99Food / Outro) */}
+      {/* Dialog: Novo Pedido Online */}
       <Dialog open={onlineDialogOpen} onOpenChange={setOnlineDialogOpen}>
-        <DialogContent className="max-w-lg" data-testid="online-order-dialog">
+        <DialogContent
+          className="max-w-lg"
+          data-testid="online-order-dialog"
+        >
           <DialogHeader>
             <DialogTitle>Novo Pedido Online</DialogTitle>
             <DialogDescription>
-              Registre manualmente um pedido recebido em iFood, 99Food ou outra plataforma.
-              Não aplica taxa de serviço de 10%.
+              Registre manualmente um pedido recebido em iFood,
+              99Food ou outra plataforma. Não aplica taxa de serviço de 10%.
             </DialogDescription>
           </DialogHeader>
 
@@ -838,7 +1011,10 @@ export default function CashierPage() {
             <div className="grid grid-cols-2 gap-2">
               <div className="space-y-1">
                 <Label>Plataforma</Label>
-                <Select value={onlinePlatform} onValueChange={setOnlinePlatform}>
+                <Select
+                  value={onlinePlatform}
+                  onValueChange={setOnlinePlatform}
+                >
                   <SelectTrigger data-testid="online-platform-select">
                     <SelectValue />
                   </SelectTrigger>
@@ -849,9 +1025,13 @@ export default function CashierPage() {
                   </SelectContent>
                 </Select>
               </div>
+
               <div className="space-y-1">
                 <Label>Tipo</Label>
-                <Select value={onlineDeliveryType} onValueChange={setOnlineDeliveryType}>
+                <Select
+                  value={onlineDeliveryType}
+                  onValueChange={setOnlineDeliveryType}
+                >
                   <SelectTrigger data-testid="online-delivery-select">
                     <SelectValue />
                   </SelectTrigger>
@@ -867,7 +1047,9 @@ export default function CashierPage() {
               <Label>Número do pedido externo</Label>
               <Input
                 value={onlineExternalNumber}
-                onChange={(e) => setOnlineExternalNumber(e.target.value)}
+                onChange={(e) =>
+                  setOnlineExternalNumber(e.target.value)
+                }
                 placeholder="Ex.: 5678 ou #18"
                 data-testid="online-external-number"
               />
@@ -882,9 +1064,11 @@ export default function CashierPage() {
                   onClick={addOnlineItem}
                   data-testid="online-add-item-btn"
                 >
-                  <Plus className="h-3 w-3 mr-1" /> Item
+                  <Plus className="h-3 w-3 mr-1" />
+                  Item
                 </Button>
               </div>
+
               <div className="space-y-2 max-h-64 overflow-y-auto">
                 {onlineItems.map((it, idx) => (
                   <div
@@ -895,9 +1079,13 @@ export default function CashierPage() {
                     <div className="flex-1 space-y-1">
                       <Select
                         value={it.product_id}
-                        onValueChange={(v) => updateOnlineItem(idx, 'product_id', v)}
+                        onValueChange={(v) =>
+                          updateOnlineItem(idx, 'product_id', v)
+                        }
                       >
-                        <SelectTrigger data-testid={`online-item-product-${idx}`}>
+                        <SelectTrigger
+                          data-testid={`online-item-product-${idx}`}
+                        >
                           <SelectValue placeholder="Selecione o produto" />
                         </SelectTrigger>
                         <SelectContent className="max-h-60">
@@ -908,21 +1096,28 @@ export default function CashierPage() {
                           ))}
                         </SelectContent>
                       </Select>
+
                       <Input
                         placeholder="Observação (opcional)"
                         value={it.notes || ''}
-                        onChange={(e) => updateOnlineItem(idx, 'notes', e.target.value)}
+                        onChange={(e) =>
+                          updateOnlineItem(idx, 'notes', e.target.value)
+                        }
                         data-testid={`online-item-notes-${idx}`}
                       />
                     </div>
+
                     <Input
                       type="number"
                       min={1}
                       className="w-16"
                       value={it.quantity}
-                      onChange={(e) => updateOnlineItem(idx, 'quantity', e.target.value)}
+                      onChange={(e) =>
+                        updateOnlineItem(idx, 'quantity', e.target.value)
+                      }
                       data-testid={`online-item-qty-${idx}`}
                     />
+
                     {onlineItems.length > 1 && (
                       <Button
                         size="icon"
@@ -939,8 +1134,13 @@ export default function CashierPage() {
             </div>
 
             <div className="flex justify-between items-center pt-2 border-t">
-              <span className="text-sm text-muted-foreground">Total (sem taxa)</span>
-              <span className="font-bold text-lg" data-testid="online-order-total">
+              <span className="text-sm text-muted-foreground">
+                Total (sem taxa)
+              </span>
+              <span
+                className="font-bold text-lg"
+                data-testid="online-order-total"
+              >
                 {formatCurrency(onlineTotal)}
               </span>
             </div>
@@ -967,14 +1167,25 @@ export default function CashierPage() {
       </Dialog>
 
       {/* Dialog: Cancelamento individual de item */}
-      <Dialog open={!!cancelItemState} onOpenChange={(o) => { if (!o) closeCancelItem(); }}>
-        <DialogContent className="max-w-md" data-testid="cancel-item-dialog">
+      <Dialog
+        open={!!cancelItemState}
+        onOpenChange={(open) => {
+          if (!open) closeCancelItem();
+        }}
+      >
+        <DialogContent
+          className="max-w-md"
+          data-testid="cancel-item-dialog"
+        >
           <DialogHeader>
             <DialogTitle>Cancelar item</DialogTitle>
             <DialogDescription>
               {cancelItemState?.item && (
                 <>
-                  <strong>{cancelItemState.item.product_name}</strong> — atualmente{' '}
+                  <strong>
+                    {cancelItemState.item.product_name}
+                  </strong>
+                  {' '}— atualmente{' '}
                   {cancelItemState.item.quantity}x{' '}
                   {formatCurrency(cancelItemState.item.unit_price)}.
                 </>
@@ -993,10 +1204,16 @@ export default function CashierPage() {
                 onChange={(e) => setCancelQty(e.target.value)}
                 data-testid="cancel-item-qty"
               />
+
               {cancelItemState?.item && (
                 <p className="text-[11px] text-muted-foreground">
-                  Máx.: {cancelItemState.item.quantity}. Restarão{' '}
-                  {Math.max(0, (cancelItemState.item.quantity || 0) - (parseInt(cancelQty, 10) || 0))}x ativos.
+                  Máx.: {cancelItemState.item.quantity}.
+                  {' '}Restarão{' '}
+                  {Math.max(
+                    0,
+                    (cancelItemState.item.quantity || 0) -
+                    (parseInt(cancelQty, 10) || 0)
+                  )}x ativos.
                 </p>
               )}
             </div>
@@ -1016,6 +1233,7 @@ export default function CashierPage() {
                 <Label className="text-amber-800">
                   Estoque já foi baixado — Devolver ao estoque?
                 </Label>
+
                 <div className="flex gap-4 text-sm">
                   <label className="flex items-center gap-1 cursor-pointer">
                     <input
@@ -1027,6 +1245,7 @@ export default function CashierPage() {
                     />
                     Sim
                   </label>
+
                   <label className="flex items-center gap-1 cursor-pointer">
                     <input
                       type="radio"
@@ -1045,19 +1264,25 @@ export default function CashierPage() {
               <Label className="text-xs uppercase tracking-wide text-muted-foreground">
                 Autorização do administrador
               </Label>
+
               <Input
                 type="email"
                 placeholder="E-mail do admin"
                 value={cancelAdminEmail}
-                onChange={(e) => setCancelAdminEmail(e.target.value)}
+                onChange={(e) =>
+                  setCancelAdminEmail(e.target.value)
+                }
                 autoComplete="off"
                 data-testid="cancel-item-admin-email"
               />
+
               <Input
                 type="password"
                 placeholder="Senha do admin"
                 value={cancelAdminPassword}
-                onChange={(e) => setCancelAdminPassword(e.target.value)}
+                onChange={(e) =>
+                  setCancelAdminPassword(e.target.value)
+                }
                 autoComplete="new-password"
                 data-testid="cancel-item-admin-password"
               />
@@ -1073,13 +1298,16 @@ export default function CashierPage() {
             >
               Voltar
             </Button>
+
             <Button
               variant="destructive"
               onClick={submitCancelItem}
               disabled={cancelSubmitting}
               data-testid="cancel-item-confirm-btn"
             >
-              {cancelSubmitting ? 'Cancelando...' : 'Confirmar cancelamento'}
+              {cancelSubmitting
+                ? 'Cancelando...'
+                : 'Confirmar cancelamento'}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1087,3 +1315,4 @@ export default function CashierPage() {
     </Layout>
   );
 }
+ 
