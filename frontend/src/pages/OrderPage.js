@@ -8,17 +8,17 @@ import { Input } from '../components/ui/input';
 import { Textarea } from '../components/ui/textarea';
 import { ScrollArea } from '../components/ui/scroll-area';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
-import { productsAPI, categoriesAPI, ordersAPI, tablesAPI } from '../lib/api';
+import api, { productsAPI, categoriesAPI, ordersAPI, tablesAPI } from '../lib/api';
 import { cn, formatCurrency, getStatusLabel, getStatusColor } from '../lib/utils';
 import { useAuth } from '../contexts/AuthContext';
 import socketService, { playNotificationSound } from '../lib/socket';
 import { toast } from 'sonner';
-import { 
-  Plus, 
-  Minus, 
-  ShoppingCart, 
-  Trash2, 
-  Send, 
+import {
+  Plus,
+  Minus,
+  ShoppingCart,
+  Trash2,
+  Send,
   ArrowLeft,
   Search,
   UtensilsCrossed,
@@ -33,7 +33,7 @@ export default function OrderPage() {
   const navigate = useNavigate();
   const { user } = useAuth();
   const isMountedRef = useRef(true);
-  
+
   const [table, setTable] = useState(location.state?.table || null);
   const [products, setProducts] = useState([]);
   const [categories, setCategories] = useState([]);
@@ -43,6 +43,68 @@ export default function OrderPage() {
   const [selectedCategory, setSelectedCategory] = useState('all');
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
+  const [tableTabs, setTableTabs] = useState([]);
+  const [selectedTab, setSelectedTab] = useState('traditional');
+  const [tabInput, setTabInput] = useState('');
+  const [linkingTab, setLinkingTab] = useState(false);
+  const [notesDialog, setNotesDialog] = useState(null);
+  const [draftNotes, setDraftNotes] = useState('');
+  const selectedTabRef = useRef('traditional');
+  const cartRef = useRef([]);
+  const cartIdRef = useRef(0);
+
+  const changeTab = (value) => {
+    if (cartRef.current.length && value !== selectedTabRef.current &&
+        !window.confirm('Há itens não enviados. Trocar de comanda descartará esses itens. Continuar?')) return false;
+    selectedTabRef.current = value;
+    setSelectedTab(value);
+    setCart([]);
+    cartRef.current = [];
+    setCurrentOrder(value === 'traditional' ? null :
+      tableTabs.find(o => String(o.tab_number) === value) || null);
+    return true;
+  };
+
+  const fetchTableOrders = useCallback(async () => {
+    const [tabsRes, ordersRes] = await Promise.all([
+      api.get(`/tables/${tableId}/tabs`),
+      ordersAPI.getOpen(),
+    ]);
+    if (!isMountedRef.current) return;
+    const tabs = tabsRes.data || [];
+    setTableTabs(tabs);
+    const traditional = (ordersRes.data || []).find(o =>
+      o.table_id === tableId && o.tab_number == null && !o.is_closed);
+    const selected = selectedTabRef.current;
+    const order = selected === 'traditional' ? traditional :
+      tabs.find(o => String(o.tab_number) === selected);
+    setCurrentOrder(order || null);
+    if (selected !== 'traditional' && !order) {
+      selectedTabRef.current = 'traditional';
+      setSelectedTab('traditional');
+      setCurrentOrder(traditional || null);
+    }
+  }, [tableId]);
+
+  const linkTab = async () => {
+    const number = Number(tabInput);
+    if (!Number.isInteger(number) || number <= 0) {
+      toast.error('Digite um número de comanda válido'); return;
+    }
+    setLinkingTab(true);
+    try {
+      await api.post(`/tables/${tableId}/tabs`, { tab_number: number });
+      setTabInput('');
+      await fetchTableOrders();
+      changeTab(String(number));
+      const orderRes = await api.get(`/tables/${tableId}/tabs`);
+      setTableTabs(orderRes.data || []);
+      setCurrentOrder((orderRes.data || []).find(o => o.tab_number === number) || null);
+      toast.success(`Comanda ${number} vinculada à mesa`);
+    } catch (error) {
+      toast.error(error.response?.data?.detail || 'Não foi possível vincular a comanda');
+    } finally { setLinkingTab(false); }
+  };
 
   const fetchData = useCallback(async () => {
     if (!isMountedRef.current) return;
@@ -56,22 +118,18 @@ export default function OrderPage() {
       if (isMountedRef.current) {
         setProducts(productsRes.data.filter(p => p.is_available));
         setCategories(categoriesRes.data);
-        
+
         if (!table) {
           const foundTable = tableRes.data.find(t => t.id === tableId);
           setTable(foundTable);
         }
 
-        // Get current order if exists
         try {
-          const orderRes = await ordersAPI.getByTable(tableId);
-          if (orderRes.data && isMountedRef.current) {
-            setCurrentOrder(orderRes.data);
-          }
+          await fetchTableOrders();
         } catch (e) {
-          // No current order
+          toast.error('Não foi possível carregar as comandas desta mesa');
         }
-        
+
         setLoading(false);
       }
     } catch (error) {
@@ -80,11 +138,11 @@ export default function OrderPage() {
         setLoading(false);
       }
     }
-  }, [tableId, table]);
+  }, [tableId, table, fetchTableOrders]);
 
   useEffect(() => {
     isMountedRef.current = true;
-    
+
     // Handler para notificação de item pronto
     const handleWaiterNotification = (data) => {
       if (!isMountedRef.current) return;
@@ -100,9 +158,13 @@ export default function OrderPage() {
     fetchData();
     socketService.connect();
     socketService.on('waiter_notification', handleWaiterNotification);
+    socketService.on('tables_updated', () => { fetchTableOrders().catch(() => {}); });
+    socketService.on('order_closed', () => { fetchTableOrders().catch(() => {}); });
     socketService.on('order_updated', (order) => {
       if (isMountedRef.current && order.table_id === tableId) {
-        setCurrentOrder(order);
+        const selected = selectedTabRef.current;
+        if ((selected === 'traditional' && order.tab_number == null) ||
+            String(order.tab_number) === selected) setCurrentOrder(order);
       }
     });
 
@@ -110,56 +172,47 @@ export default function OrderPage() {
       isMountedRef.current = false;
       socketService.off('waiter_notification');
       socketService.off('order_updated');
+      socketService.off('tables_updated');
+      socketService.off('order_closed');
     };
   }, [fetchData, tableId, table?.number]);
 
   const addToCart = useCallback((product) => {
     setCart(prev => {
-      const existing = prev.find(item => item.product_id === product.id);
-      if (existing) {
-        return prev.map(item =>
-          item.product_id === product.id
-            ? { ...item, quantity: item.quantity + 1 }
-            : item
-        );
-      }
+      const existing = prev.find(item => item.product_id === product.id && !item.notes);
+      if (existing) return prev.map(item => item.id === existing.id ?
+        { ...item, quantity: item.quantity + 1 } : item);
+      cartIdRef.current += 1;
       return [...prev, {
-        id: `cart-${product.id}-${Date.now()}`,
-        product_id: product.id,
-        product_name: product.name,
-        quantity: 1,
-        unit_price: product.price,
-        type: product.type,
-        notes: '',
+        id: `cart-${product.id}-${cartIdRef.current}`,
+        product_id: product.id, product_name: product.name,
+        quantity: 1, unit_price: product.price, type: product.type, notes: '',
       }];
     });
     toast.success(`${product.name} adicionado`);
   }, []);
 
-  const updateCartQuantity = useCallback((productId, delta) => {
-    setCart(prev => {
-      return prev.map(item => {
-        if (item.product_id === productId) {
-          const newQty = item.quantity + delta;
-          if (newQty <= 0) return null;
-          return { ...item, quantity: newQty };
-        }
-        return item;
-      }).filter(Boolean);
-    });
+  const updateCartQuantity = useCallback((itemId, delta) => {
+    setCart(prev => prev.map(item => item.id === itemId ?
+      { ...item, quantity: item.quantity + delta } : item).filter(item => item.quantity > 0));
   }, []);
 
-  const updateCartNotes = useCallback((productId, notes) => {
-    setCart(prev =>
-      prev.map(item =>
-        item.product_id === productId ? { ...item, notes } : item
-      )
-    );
+  const updateCartNotes = useCallback((itemId, notes) => {
+    setCart(prev => prev.map(item => item.id === itemId ? { ...item, notes } : item));
   }, []);
 
-  const removeFromCart = useCallback((productId) => {
-    setCart(prev => prev.filter(item => item.product_id !== productId));
+  const removeFromCart = useCallback((itemId) => {
+    setCart(prev => prev.filter(item => item.id !== itemId));
   }, []);
+
+  useEffect(() => { cartRef.current = cart; }, [cart]);
+
+  const openNotes = (item) => {
+    setNotesDialog(item.id);
+    setDraftNotes(item.notes || '');
+  };
+  const notesChips = ['Sem cebola', 'Sem tomate', 'Sem picles', 'Sem molho',
+    'Molho à parte', 'Bem passado', 'Ao ponto', 'Sem gelo'];
 
   const handleSendOrder = async () => {
     if (cart.length === 0) {
@@ -187,14 +240,17 @@ export default function OrderPage() {
         })),
         waiter_id: user.id,
         waiter_name: user.name,
+        ...(selectedTab !== 'traditional' ? { tab_number: Number(selectedTab) } : {}),
       };
 
-      await ordersAPI.create(orderData);
+      // Comandas físicas precisam de confirmação real do servidor; nunca enfileirar offline.
+      if (selectedTab !== 'traditional') await api.post('/orders', orderData);
+      else await ordersAPI.create(orderData);
       toast.success('Pedido enviado com sucesso!');
       setCart([]);
-      fetchData();
+      await fetchTableOrders();
     } catch (error) {
-      toast.error('Erro ao enviar pedido');
+      toast.error(error.response?.data?.detail || 'Erro ao enviar pedido');
     } finally {
       setSending(false);
     }
@@ -202,6 +258,10 @@ export default function OrderPage() {
 
   const handleRequestCleaning = async () => {
     try {
+      if (tableTabs.length || (currentOrder && !currentOrder.is_closed)) {
+        toast.error('Existem comandas abertas nesta mesa. Feche todas antes de solicitar limpeza.');
+        return;
+      }
       await tablesAPI.update(tableId, { status: 'cleaning' });
       toast.success('Limpeza solicitada!');
       navigate('/tables');
@@ -247,7 +307,7 @@ export default function OrderPage() {
             <ArrowLeft className="h-4 w-4" />
             <span className="hidden sm:inline">Voltar</span>
           </Button>
-          
+
           {/* Botão de solicitar limpeza (para tablet do cliente) */}
           <Button
             variant="outline"
@@ -260,6 +320,37 @@ export default function OrderPage() {
             <span className="hidden sm:inline">Solicitar Limpeza</span>
           </Button>
         </div>
+
+        <Card>
+          <CardContent className="p-3 sm:p-4 space-y-3">
+            <div className="font-semibold">Comandas da mesa {table?.number}</div>
+            <div className="flex flex-wrap gap-2">
+              <Button size="sm" variant={selectedTab === 'traditional' ? 'default' : 'outline'}
+                onClick={() => changeTab('traditional')}
+                disabled={tableTabs.length > 0 && selectedTab !== 'traditional'}>
+                Mesa (tradicional)
+              </Button>
+              {tableTabs.map(tab => (
+                <Button key={tab.id} size="sm"
+                  variant={selectedTab === String(tab.tab_number) ? 'default' : 'outline'}
+                  onClick={() => changeTab(String(tab.tab_number))}>
+                  Comanda {tab.tab_number} · {formatCurrency(tab.total || 0)}
+                </Button>
+              ))}
+            </div>
+            <div className="flex gap-2 items-center">
+              <Input type="number" min="1" inputMode="numeric" placeholder="Número da comanda física"
+                value={tabInput} onChange={e => setTabInput(e.target.value)}
+                className="max-w-xs" />
+              <Button onClick={linkTab} disabled={linkingTab || !tabInput.trim()}>
+                {linkingTab ? 'Vinculando...' : 'Vincular comanda'}
+              </Button>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Vincular não exige pedido. Cada comanda tem consumo e pagamento independentes.
+            </p>
+          </CardContent>
+        </Card>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 sm:gap-6">
           {/* Produtos */}
@@ -314,8 +405,8 @@ export default function OrderPage() {
                   </h3>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 sm:gap-4">
                     {foodProducts.map(product => (
-                      <Card 
-                        key={product.id} 
+                      <Card
+                        key={product.id}
                         className="card-hover cursor-pointer"
                         onClick={() => addToCart(product)}
                         data-testid={`product-${product.id}`}
@@ -356,8 +447,8 @@ export default function OrderPage() {
                   </h3>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 sm:gap-4">
                     {drinkProducts.map(product => (
-                      <Card 
-                        key={product.id} 
+                      <Card
+                        key={product.id}
                         className="card-hover cursor-pointer"
                         onClick={() => addToCart(product)}
                         data-testid={`product-${product.id}`}
@@ -397,7 +488,7 @@ export default function OrderPage() {
               <CardHeader className="pb-2">
                 <CardTitle className="font-heading flex items-center gap-2 text-base sm:text-lg">
                   <ShoppingCart className="h-4 w-4 sm:h-5 sm:w-5" />
-                  Pedido
+                  {selectedTab === 'traditional' ? 'Pedido da mesa' : `Comanda ${selectedTab}`}
                 </CardTitle>
               </CardHeader>
               <CardContent className="space-y-3 sm:space-y-4">
@@ -447,7 +538,7 @@ export default function OrderPage() {
                                 variant="ghost"
                                 size="icon"
                                 className="h-6 w-6 sm:h-8 sm:w-8 text-destructive shrink-0"
-                                onClick={() => removeFromCart(item.product_id)}
+                                onClick={() => removeFromCart(item.id)}
                               >
                                 <Trash2 className="h-3 w-3 sm:h-4 sm:w-4" />
                               </Button>
@@ -457,7 +548,7 @@ export default function OrderPage() {
                                 variant="outline"
                                 size="icon"
                                 className="h-7 w-7 sm:h-8 sm:w-8"
-                                onClick={() => updateCartQuantity(item.product_id, -1)}
+                                onClick={() => updateCartQuantity(item.id, -1)}
                               >
                                 <Minus className="h-3 w-3 sm:h-4 sm:w-4" />
                               </Button>
@@ -466,19 +557,15 @@ export default function OrderPage() {
                                 variant="outline"
                                 size="icon"
                                 className="h-7 w-7 sm:h-8 sm:w-8"
-                                onClick={() => updateCartQuantity(item.product_id, 1)}
+                                onClick={() => updateCartQuantity(item.id, 1)}
                               >
                                 <Plus className="h-3 w-3 sm:h-4 sm:w-4" />
                               </Button>
                             </div>
-                            <Textarea
-                              placeholder="Observações do item (ex: sem cebola, ponto da carne...)"
-                              value={item.notes}
-                              onChange={(e) => updateCartNotes(item.product_id, e.target.value)}
-                              className="min-h-[80px] sm:min-h-[64px] text-base sm:text-sm resize-y leading-relaxed"
-                              rows={3}
-                              data-testid={`item-notes-${item.product_id}`}
-                            />
+                            <Button size="sm" variant="outline" className="w-full justify-start"
+                              onClick={() => openNotes(item)}>
+                              {item.notes ? `Obs: ${item.notes}` : '+ Observações / ponto / retirar ingrediente'}
+                            </Button>
                           </div>
                         ))}
                       </div>
@@ -517,6 +604,34 @@ export default function OrderPage() {
           </div>
         </div>
       </div>
+      {notesDialog && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4"
+          onClick={() => setNotesDialog(null)}>
+          <div className="bg-background rounded-xl p-4 w-full max-w-lg space-y-3 shadow-xl"
+            onClick={e => e.stopPropagation()}>
+            <h3 className="font-semibold text-lg">Observações do item</h3>
+            <div className="flex flex-wrap gap-2">
+              {notesChips.map(chip => (
+                <Button key={chip} variant="outline" size="sm" onClick={() =>
+                  setDraftNotes(prev => prev.split(', ').includes(chip) ?
+                    prev.split(', ').filter(x => x !== chip).join(', ') :
+                    [prev.trim(), chip].filter(Boolean).join(', '))}>
+                  {chip}
+                </Button>
+              ))}
+            </div>
+            <Textarea rows={4} value={draftNotes} onChange={e => setDraftNotes(e.target.value)}
+              placeholder="Ex.: 1 hambúrguer sem cebola, carne bem passada" />
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setNotesDialog(null)}>Cancelar</Button>
+              <Button onClick={() => {
+                updateCartNotes(notesDialog, draftNotes.trim());
+                setNotesDialog(null);
+              }}>Salvar observação</Button>
+            </div>
+          </div>
+        </div>
+      )}
     </Layout>
   );
 }
