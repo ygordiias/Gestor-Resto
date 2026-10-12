@@ -291,6 +291,7 @@ class OrderCreate(BaseModel):
     table_id: str
     table_number: int
     items: List[OrderItemBase]
+    tab_number: Optional[int] = None  # Comanda física (opcional para pedidos legados)
     waiter_id: Optional[str] = None
     waiter_name: Optional[str] = None
 
@@ -305,6 +306,7 @@ class Order(OrderBase):
     model_config = ConfigDict(extra="ignore")
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     items: List[OrderItem] = []
+    tab_number: Optional[int] = None
     status: OrderStatus = OrderStatus.PENDING
     subtotal: float = 0
     service_fee: float = 0
@@ -599,6 +601,93 @@ async def delete_table(table_id: str, current_user: dict = Depends(require_role(
     await db.tables.delete_one({"id": table_id})
     return {"message": "Table deleted"}
 
+# ==================== COMANDAS FÍSICAS ====================
+class TabRangeCreate(BaseModel):
+    start: int
+    end: int
+
+class TabLinkCreate(BaseModel):
+    tab_number: int
+
+async def refresh_table_after_order(table_id: Optional[str]):
+    """Nunca libera uma mesa enquanto houver qualquer pedido aberto nela."""
+    if not table_id:
+        return
+    remaining = await db.orders.find_one({"table_id": table_id, "is_closed": False}, {"_id": 0, "id": 1})
+    await db.tables.update_one({"id": table_id}, {"$set": {
+        "status": "occupied" if remaining else "available",
+        "current_order_id": remaining["id"] if remaining else None,
+    }})
+
+async def release_physical_tab(order: dict):
+    number = order.get("tab_number")
+    if number is not None:
+        await db.physical_tabs.update_one(
+            {"number": number, "active_order_id": order["id"]},
+            {"$set": {"active_order_id": None, "table_id": None}},
+        )
+
+@api_router.get("/tabs")
+async def list_physical_tabs(current_user: dict = Depends(get_current_user)):
+    tabs = await db.physical_tabs.find({}, {"_id": 0}).sort("number", 1).to_list(10000)
+    return tabs
+
+@api_router.post("/tabs/range")
+async def register_physical_tabs(data: TabRangeCreate, current_user: dict = Depends(require_role([UserRole.ADMIN]))):
+    if data.start <= 0 or data.end < data.start or data.end - data.start > 1000:
+        raise HTTPException(status_code=400, detail="Intervalo inválido (máximo de 1001 por operação)")
+    created = 0
+    for number in range(data.start, data.end + 1):
+        result = await db.physical_tabs.update_one(
+            {"number": number},
+            {"$setOnInsert": {"number": number, "active_order_id": None, "table_id": None}},
+            upsert=True,
+        )
+        if result.upserted_id is not None:
+            created += 1
+    return {"created": created, "total_requested": data.end - data.start + 1}
+
+@api_router.get("/tables/{table_id}/tabs")
+async def get_table_tabs(table_id: str, current_user: dict = Depends(get_current_user)):
+    return await db.orders.find(
+        {"table_id": table_id, "is_closed": False, "tab_number": {"$ne": None}},
+        {"_id": 0},
+    ).sort("tab_number", 1).to_list(1000)
+
+@api_router.post("/tables/{table_id}/tabs")
+async def link_physical_tab(table_id: str, data: TabLinkCreate, current_user: dict = Depends(get_current_user)):
+    table = await db.tables.find_one({"id": table_id}, {"_id": 0})
+    if not table:
+        raise HTTPException(status_code=404, detail="Mesa não encontrada")
+    if table.get("status") == "cleaning":
+        raise HTTPException(status_code=400, detail="Mesa em limpeza")
+    order = Order(table_id=table_id, table_number=table["number"],
+                  waiter_id=current_user.get("id"), waiter_name=current_user.get("name"),
+                  tab_number=data.tab_number, items=[])
+    order_doc = order.model_dump()
+    order_doc["created_at"] = order_doc["created_at"].isoformat()
+    # Reserva a comanda atomicamente, evitando duas mesas com o mesmo número.
+    locked = await db.physical_tabs.update_one(
+        {"number": data.tab_number, "active_order_id": None},
+        {"$set": {"active_order_id": order.id, "table_id": table_id}},
+    )
+    if locked.modified_count != 1:
+        exists = await db.physical_tabs.find_one({"number": data.tab_number}, {"_id": 0})
+        if not exists:
+            raise HTTPException(status_code=404, detail="Comanda não cadastrada")
+        raise HTTPException(status_code=409, detail="Comanda já está em uso")
+    try:
+        await db.orders.insert_one(order_doc)
+        await db.tables.update_one({"id": table_id}, {"$set": {"status": "occupied", "current_order_id": order.id}})
+    except Exception:
+        await db.physical_tabs.update_one(
+            {"number": data.tab_number, "active_order_id": order.id},
+            {"$set": {"active_order_id": None, "table_id": None}},
+        )
+        raise
+    await sio.emit("tables_updated", await get_tables())
+    return {k: v for k, v in order_doc.items() if k != "_id"}
+
 # ==================== ORDER ROUTES ====================
 @api_router.get("/orders", response_model=List[dict])
 async def get_orders(status_filter: Optional[str] = Query(None, alias="status"), is_closed: Optional[bool] = None):
@@ -636,8 +725,26 @@ async def create_order(order_data: OrderCreate, current_user: dict = Depends(get
     # Validar estoque antes de criar pedido
     await validate_stock(order_data.items)
     
-    # Check if table already has an open order
-    existing_order = await db.orders.find_one({"table_id": order_data.table_id, "is_closed": False})
+    # Pedidos com comanda física nunca são mesclados com outra comanda.
+    if order_data.tab_number is not None:
+        existing_order = await db.orders.find_one({
+            "table_id": order_data.table_id, "tab_number": order_data.tab_number,
+            "is_closed": False,
+        })
+        if not existing_order:
+            raise HTTPException(status_code=409, detail="Vincule a comanda à mesa antes de lançar produtos")
+    else:
+        # Atendimento tradicional: só reutiliza pedido SEM comanda física.
+        active_tab = await db.orders.find_one({
+            "table_id": order_data.table_id, "is_closed": False,
+            "tab_number": {"$ne": None},
+        })
+        if active_tab:
+            raise HTTPException(status_code=409, detail="Selecione uma comanda física antes de lançar produtos")
+        existing_order = await db.orders.find_one({
+            "table_id": order_data.table_id, "is_closed": False,
+            "$or": [{"tab_number": None}, {"tab_number": {"$exists": False}}],
+        })
     
     if existing_order:
         # Add items to existing order
@@ -670,12 +777,22 @@ async def create_order(order_data: OrderCreate, current_user: dict = Depends(get
         await emit_order_updates(items)
         return updated_order
     
+    # Create new traditional order only if table has no active physical tabs.
+    if order_data.tab_number is None:
+        active_tab = await db.orders.find_one({
+            "table_id": order_data.table_id, "is_closed": False,
+            "tab_number": {"$ne": None},
+        })
+        if active_tab:
+            raise HTTPException(status_code=409, detail="Selecione uma comanda física antes de lançar produtos")
+
     # Create new order
     order = Order(
         table_id=order_data.table_id,
         table_number=order_data.table_number,
         waiter_id=order_data.waiter_id,
         waiter_name=order_data.waiter_name,
+        tab_number=order_data.tab_number,
         items=[OrderItem(**item.model_dump()) for item in order_data.items]
     )
     
@@ -871,10 +988,8 @@ async def cancel_order(order_id: str, data: dict, current_user: dict = Depends(g
         }}
     )
     # Libera a mesa
-    await db.tables.update_one(
-        {"id": order["table_id"]},
-        {"$set": {"status": TableStatus.AVAILABLE.value, "current_order_id": None}}
-    )
+    await release_physical_tab(order)
+    await refresh_table_after_order(order.get("table_id"))
     await sio.emit('tables_updated', await get_tables())
     await sio.emit('order_closed', {"order_id": order_id})
     logger.info(f"[CANCEL] {current_user.get('name')} cancelou pedido {order_id} autorizado por {admin.get('name')} — {reason}")
@@ -1072,7 +1187,9 @@ async def close_order(order_id: str, payment_data: dict):
     order = await db.orders.find_one({"id": order_id}, {"_id": 0})
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
-    
+    if order.get("is_closed"):
+        raise HTTPException(status_code=409, detail="Pedido já está fechado")
+
     # Register payments
     for payment in payment_data.get("payments", []):
         payment_obj = Payment(order_id=order_id, amount=payment["amount"], method=payment["method"])
@@ -1104,10 +1221,8 @@ async def close_order(order_id: str, payment_data: dict):
     )
     
     # Update table
-    await db.tables.update_one(
-        {"id": order["table_id"]},
-        {"$set": {"status": TableStatus.AVAILABLE.value, "current_order_id": None}}
-    )
+    await release_physical_tab(order)
+    await refresh_table_after_order(order.get("table_id"))
     
     # Update cash register (nao conta cortesia/permuta)
     register = await db.cash_registers.find_one({"is_open": True}, {"_id": 0})
@@ -1208,10 +1323,8 @@ async def quick_cancel_order(order_id: str):
     )
 
     # Liberar mesa
-    await db.tables.update_one(
-        {"id": order["table_id"]},
-        {"$set": {"status": TableStatus.AVAILABLE.value, "current_order_id": None}}
-    )
+    await release_physical_tab(order)
+    await refresh_table_after_order(order.get("table_id"))
 
     # Emitir atualizações
     await sio.emit('tables_updated', await get_tables())
