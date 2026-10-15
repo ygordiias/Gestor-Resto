@@ -73,6 +73,30 @@ async def startup_validate_db():
         if result.get("ok") != 1.0:
             raise Exception("MongoDB ping retornou status != ok")
         logger.info(f"MongoDB conectado com sucesso: {mongo_url[:30]}...")
+                # Cadastro automático das comandas físicas 200 a 230
+        # Preserva comandas existentes e seus vínculos com pedidos.
+        created_tabs = 0
+
+        for tab_number in range(200, 231):
+            result = await db.physical_tabs.update_one(
+                {"number": tab_number},
+                {
+                    "$setOnInsert": {
+                        "number": tab_number,
+                        "active_order_id": None,
+                        "table_id": None
+                    }
+                },
+                upsert=True
+            )
+
+            if result.upserted_id is not None:
+                created_tabs += 1
+
+        logger.info(
+            f"Comandas físicas 200 a 230 verificadas. "
+            f"Novos cadastros: {created_tabs}"
+        )
 
         # Auto-create superadmin
         superadmin = await db.users.find_one({"email": "ygor@gestorresto.com"})
