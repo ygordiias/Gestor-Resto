@@ -587,38 +587,90 @@ async def create_table(table_data: TableBase, current_user: dict = Depends(requi
     await db.tables.insert_one(table.model_dump())
     return table.model_dump()
 
+
+async def validate_table_status_change(table_id: str, new_status: str):
+    """Impede liberar ou limpar uma mesa que ainda possui pedidos abertos."""
+    table = await db.tables.find_one({"id": table_id}, {"_id": 0})
+    if not table:
+        raise HTTPException(status_code=404, detail="Mesa não encontrada")
+
+    if new_status in ("available", "reserved", "cleaning"):
+        open_order = await db.orders.find_one({
+            "table_id": table_id,
+            "is_closed": False
+        }, {"_id": 0, "id": 1})
+
+        if open_order:
+            raise HTTPException(
+                status_code=409,
+                detail="Mesa possui comanda aberta. Feche todas as comandas antes de liberar ou solicitar limpeza."
+            )
+
+
 @api_router.put("/tables/{table_id}")
 async def update_table(table_id: str, table_data: dict):
-    # Validação: não pode mudar mesa ocupada para outro status se tiver pedido aberto
-    if table_data.get("status") in ["available", "reserved", "cleaning"]:
-        existing_order = await db.orders.find_one({"table_id": table_id, "is_closed": False})
-        if existing_order and table_data.get("status") != "cleaning":
-            raise HTTPException(status_code=400, detail="Mesa possui comanda aberta")
-    
-    await db.tables.update_one({"id": table_id}, {"$set": table_data})
-    tables = await get_tables()
-    await sio.emit('tables_updated', tables)
+    new_status = table_data.get("status")
+
+    if new_status is not None:
+        if new_status not in ("available", "occupied", "reserved", "cleaning"):
+            raise HTTPException(status_code=400, detail="Status inválido")
+
+        await validate_table_status_change(table_id, new_status)
+    else:
+        table = await db.tables.find_one({"id": table_id}, {"_id": 0})
+        if not table:
+            raise HTTPException(status_code=404, detail="Mesa não encontrada")
+
+    # O vínculo do pedido é controlado pelo backend.
+    safe_data = {
+        key: value for key, value in table_data.items()
+        if key in ("status", "capacity", "table_type", "note")
+    }
+
+    if not safe_data:
+        raise HTTPException(status_code=400, detail="Nenhum campo válido")
+
+    await db.tables.update_one(
+        {"id": table_id},
+        {"$set": safe_data}
+    )
+
+    await sio.emit("tables_updated", await get_tables())
     return {"message": "Table updated"}
+
 
 @api_router.put("/tables/{table_id}/status")
 async def update_table_status(table_id: str, status_data: dict):
-    """Endpoint específico para atualizar status da mesa"""
+    """Atualiza o status sem permitir liberar mesas com comandas abertas."""
     new_status = status_data.get("status")
-    if new_status not in ["available", "occupied", "reserved", "cleaning"]:
+
+    if new_status not in ("available", "occupied", "reserved", "cleaning"):
         raise HTTPException(status_code=400, detail="Status inválido")
-    
-    await db.tables.update_one({"id": table_id}, {"$set": {"status": new_status}})
-    tables = await get_tables()
-    await sio.emit('tables_updated', tables)
+
+    await validate_table_status_change(table_id, new_status)
+
+    await db.tables.update_one(
+        {"id": table_id},
+        {"$set": {"status": new_status}}
+    )
+
+    await sio.emit("tables_updated", await get_tables())
     return {"message": f"Status atualizado para {new_status}"}
+
 
 @api_router.post("/tables/{table_id}/request-cleaning")
 async def request_table_cleaning(table_id: str):
-    """Solicita limpeza da mesa"""
-    await db.tables.update_one({"id": table_id}, {"$set": {"status": "cleaning"}})
-    tables = await get_tables()
-    await sio.emit('tables_updated', tables)
+    """Solicita limpeza somente após todas as comandas serem fechadas."""
+    await validate_table_status_change(table_id, "cleaning")
+
+    await db.tables.update_one(
+        {"id": table_id},
+        {"$set": {"status": "cleaning"}}
+    )
+
+    await sio.emit("tables_updated", await get_tables())
     return {"message": "Limpeza solicitada"}
+
 
 @api_router.delete("/tables/{table_id}")
 async def delete_table(table_id: str, current_user: dict = Depends(require_role([UserRole.ADMIN]))):
