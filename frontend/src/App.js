@@ -24,6 +24,7 @@ import TechnicalSheetViewPage from './pages/TechnicalSheetViewPage';
 import CMVReportPage from './pages/CMVReportPage';
 import ProductionPage from './pages/ProductionPage';
 import ClienteApp from './cliente/ClienteApp';
+import GrillPage from './pages/GrillPage';
 
 // Protected Route Component
 function ProtectedRoute({ children, allowedRoles }) {
@@ -238,7 +239,14 @@ function AppRoutes() {
           </ProtectedRoute>
         }
       />
-      
+      <Route
+  path="/grill"
+  element={
+    <ProtectedRoute allowedRoles={['admin', 'kitchen']}>
+      <GrillPage />
+    </ProtectedRoute>
+  }
+/>
       <Route path="/" element={<Navigate to={getDefaultRoute()} replace />} />
       <Route path="*" element={<Navigate to={getDefaultRoute()} replace />} />
     </Routes>
