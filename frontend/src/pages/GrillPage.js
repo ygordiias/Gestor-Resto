@@ -1,11 +1,11 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import Layout from '../components/Layout';
 import { ordersAPI } from '../lib/api';
 import socketService from '../lib/socket';
 import { isOnlineOrder } from '../components/OnlineOrderBadge';
 import { AlertTriangle, ChefHat, Clock, Flame } from 'lucide-react';
 
+// Produtos que não devem aparecer na tela da chapa
 const EXCLUDED = [
   'batata frita',
   'batatas fritas',
@@ -129,6 +129,7 @@ export default function GrillPage() {
     };
   }, [fetchOrders, applyOrders]);
 
+  // Agrupa os produtos por pedido/comanda
   const activeOrders = orders
     .map(order => ({
       order,
@@ -145,21 +146,25 @@ export default function GrillPage() {
       return aTime - bTime;
     });
 
+  // Tela de carregamento, sem menu lateral
   if (loading) {
     return (
-      <Layout title="Painel da Chapa">
+      <div className="min-h-screen bg-slate-950 text-white p-4 sm:p-6">
         <div className="p-8 text-center text-xl">
           Carregando pedidos da chapa...
         </div>
-      </Layout>
+      </div>
     );
   }
 
+  // Painel exclusivo da chapa
   return (
-    <Layout title="Painel da Chapa">
+    <div className="min-h-screen bg-slate-950 text-white p-4 sm:p-6">
       <div className="space-y-5">
 
+        {/* CABEÇALHO */}
         <div className="bg-slate-900 text-white rounded-xl p-5 flex flex-wrap items-center justify-between gap-4">
+
           <div className="flex items-center gap-3">
             <Flame className="h-9 w-9 text-orange-400" />
 
@@ -183,21 +188,27 @@ export default function GrillPage() {
               Pedidos ativos
             </p>
           </div>
+
         </div>
 
+        {/* SEM PEDIDOS */}
         {activeOrders.length === 0 ? (
-          <div className="rounded-xl border p-12 text-center">
-            <ChefHat className="h-14 w-14 mx-auto mb-4 text-muted-foreground" />
+          <div className="rounded-xl border border-slate-700 p-12 text-center bg-slate-900">
+
+            <ChefHat className="h-14 w-14 mx-auto mb-4 text-slate-400" />
 
             <h2 className="text-2xl font-bold">
               Nenhum pedido para a chapa
             </h2>
 
-            <p className="text-muted-foreground mt-2">
+            <p className="text-slate-400 mt-2">
               Aguardando novos pedidos...
             </p>
+
           </div>
         ) : (
+
+          /* LISTA DE PEDIDOS */
           <div className="grid grid-cols-1 xl:grid-cols-2 2xl:grid-cols-3 gap-4">
 
             {activeOrders.map(({ order, items }) => {
@@ -222,9 +233,11 @@ export default function GrillPage() {
                   }}
                 >
 
+                  {/* IDENTIFICAÇÃO E CRONÔMETRO */}
                   <div className="flex justify-between items-start gap-3">
 
                     <div className="space-y-1">
+
                       {isOnlineOrder(order) ? (
                         <>
                           <p className="text-lg font-bold">
@@ -252,10 +265,12 @@ export default function GrillPage() {
                           )}
                         </>
                       )}
+
                     </div>
 
                     <div className="text-right shrink-0 space-y-2">
 
+                      {/* ALERTA DE ATRASO */}
                       {timing.late && (
                         <div className="bg-white text-red-800 rounded-lg px-3 py-2 font-black flex items-center gap-2 animate-pulse">
                           <AlertTriangle className="h-5 w-5" />
@@ -263,27 +278,33 @@ export default function GrillPage() {
                         </div>
                       )}
 
+                      {/* ALERTA DE ATENÇÃO */}
                       {timing.warning && (
                         <div className="bg-white text-amber-900 rounded-lg px-3 py-2 font-black">
                           ATENÇÃO
                         </div>
                       )}
 
+                      {/* CRONÔMETRO */}
                       <div className="flex items-center justify-end gap-2">
+
                         <Clock className="h-6 w-6" />
 
                         <span className="text-3xl font-black tabular-nums">
                           {formatTime(timing.elapsed)}
                         </span>
+
                       </div>
 
                       <p className="text-xs">
                         Limite: {timing.limit / 60} minutos
                       </p>
+
                     </div>
 
                   </div>
 
+                  {/* PRODUTOS DO PEDIDO */}
                   <div className="border-t-2 border-white/40 pt-3 space-y-3">
 
                     {items.map(item => (
@@ -291,6 +312,7 @@ export default function GrillPage() {
                         key={item.id}
                         className="border-b border-white/30 pb-3"
                       >
+
                         <div className="flex items-start justify-between gap-3">
 
                           <p className="text-xl sm:text-2xl font-black">
@@ -305,16 +327,19 @@ export default function GrillPage() {
 
                         </div>
 
+                        {/* OBSERVAÇÕES EM DESTAQUE */}
                         {item.notes && (
                           <div className="mt-2 rounded-lg bg-white text-red-900 p-3 font-black text-base">
                             OBS: {item.notes}
                           </div>
                         )}
+
                       </div>
                     ))}
 
                   </div>
 
+                  {/* RESUMO */}
                   <div className="flex justify-between text-sm font-bold">
                     <span>Novos: {pending}</span>
                     <span>Em preparo: {preparing}</span>
@@ -334,6 +359,7 @@ export default function GrillPage() {
         )}
 
       </div>
-    </Layout>
+    </div>
   );
 }
+
