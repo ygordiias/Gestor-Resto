@@ -7,6 +7,7 @@ import { Button } from './ui/button';
 import { Badge } from './ui/badge';
 import socketService, { playNotificationSound } from '../lib/socket';
 import { toast } from 'sonner';
+
 import {
   LayoutDashboard,
   UtensilsCrossed,
@@ -29,58 +30,70 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
 } from 'lucide-react';
+
 import { Logo } from './Logo';
 
+const adminNavigation = [
+  { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
+  { name: 'Mesas', href: '/tables', icon: UtensilsCrossed },
+  { name: 'Cozinha', href: '/kitchen', icon: ChefHat },
+  { name: 'Bar', href: '/bar', icon: Wine },
+  { name: 'Caixa', href: '/cashier', icon: CreditCard },
+  { name: 'Cardápio', href: '/menu', icon: BookOpen },
+  { name: 'Estoque', href: '/stock', icon: Package },
+  { name: 'Produção', href: '/production', icon: Factory },
+  { name: 'CMV', href: '/cmv', icon: Calculator },
+  { name: 'Relatórios', href: '/reports', icon: BarChart3 },
+  { name: 'Usuários', href: '/users', icon: Users },
+  { name: 'Notas Fiscais', href: '/invoices', icon: FileText },
+  {
+    name: 'Fichas Tecnicas',
+    href: '/technical-sheets',
+    icon: ClipboardList,
+  },
+  { name: 'Configurações', href: '/settings', icon: Settings },
+];
+
 const navigation = {
-  superadmin: [
-    { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
-    { name: 'Mesas', href: '/tables', icon: UtensilsCrossed },
-    { name: 'Cozinha', href: '/kitchen', icon: ChefHat },
-    { name: 'Bar', href: '/bar', icon: Wine },
-    { name: 'Caixa', href: '/cashier', icon: CreditCard },
-    { name: 'Cardápio', href: '/menu', icon: BookOpen },
-    { name: 'Estoque', href: '/stock', icon: Package },
-    { name: 'Produção', href: '/production', icon: Factory },
-    { name: 'CMV', href: '/cmv', icon: Calculator },
-    { name: 'Relatórios', href: '/reports', icon: BarChart3 },
-    { name: 'Usuários', href: '/users', icon: Users },
-    { name: 'Notas Fiscais', href: '/invoices', icon: FileText },
-    { name: 'Fichas Tecnicas', href: '/technical-sheets', icon: ClipboardList },
-    { name: 'Configurações', href: '/settings', icon: Settings },
-  ],
-  admin: [
-    { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
-    { name: 'Mesas', href: '/tables', icon: UtensilsCrossed },
-    { name: 'Cozinha', href: '/kitchen', icon: ChefHat },
-    { name: 'Bar', href: '/bar', icon: Wine },
-    { name: 'Caixa', href: '/cashier', icon: CreditCard },
-    { name: 'Cardápio', href: '/menu', icon: BookOpen },
-    { name: 'Estoque', href: '/stock', icon: Package },
-    { name: 'Produção', href: '/production', icon: Factory },
-    { name: 'CMV', href: '/cmv', icon: Calculator },
-    { name: 'Relatórios', href: '/reports', icon: BarChart3 },
-    { name: 'Usuários', href: '/users', icon: Users },
-    { name: 'Notas Fiscais', href: '/invoices', icon: FileText },
-    { name: 'Fichas Tecnicas', href: '/technical-sheets', icon: ClipboardList },
-    { name: 'Configurações', href: '/settings', icon: Settings },
-  ],
+  superadmin: adminNavigation,
+  admin: adminNavigation,
+
   waiter: [
     { name: 'Mesas', href: '/tables', icon: UtensilsCrossed },
-    { name: 'Fichas Tecnicas', href: '/technical-sheets', icon: ClipboardList },
+    {
+      name: 'Fichas Tecnicas',
+      href: '/technical-sheets',
+      icon: ClipboardList,
+    },
   ],
+
   cashier: [
     { name: 'Caixa', href: '/cashier', icon: CreditCard },
     { name: 'Mesas', href: '/tables', icon: UtensilsCrossed },
     { name: 'Notas Fiscais', href: '/invoices', icon: FileText },
-    { name: 'Fichas Tecnicas', href: '/technical-sheets', icon: ClipboardList },
+    {
+      name: 'Fichas Tecnicas',
+      href: '/technical-sheets',
+      icon: ClipboardList,
+    },
   ],
+
   kitchen: [
     { name: 'Cozinha', href: '/kitchen', icon: ChefHat },
-    { name: 'Fichas Tecnicas', href: '/technical-sheets', icon: ClipboardList },
+    {
+      name: 'Fichas Tecnicas',
+      href: '/technical-sheets',
+      icon: ClipboardList,
+    },
   ],
+
   bar: [
     { name: 'Bar', href: '/bar', icon: Wine },
-    { name: 'Fichas Tecnicas', href: '/technical-sheets', icon: ClipboardList },
+    {
+      name: 'Fichas Tecnicas',
+      href: '/technical-sheets',
+      icon: ClipboardList,
+    },
   ],
 };
 
@@ -89,7 +102,10 @@ export default function Layout({ children, title }) {
   const location = useLocation();
   const navigate = useNavigate();
 
+  // Menu mobile
   const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  // Menu desktop retrátil
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     try {
       return localStorage.getItem('gestor-sidebar-collapsed') === 'true';
@@ -103,20 +119,24 @@ export default function Layout({ children, title }) {
 
   const userNavigation = navigation[user?.role] || [];
 
-  const toggleDesktopSidebar = () => {
-    setSidebarCollapsed(previous => {
-      const next = !previous;
+  // Salva a preferência do menu no navegador
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        'gestor-sidebar-collapsed',
+        String(sidebarCollapsed)
+      );
+    } catch {
+      // O menu funciona mesmo se o armazenamento estiver indisponível
+    }
+  }, [sidebarCollapsed]);
 
-      try {
-        localStorage.setItem('gestor-sidebar-collapsed', String(next));
-      } catch {
-        // Continua funcionando mesmo sem armazenamento local
-      }
+  // Fecha o menu mobile quando muda de página
+  useEffect(() => {
+    setSidebarOpen(false);
+  }, [location.pathname]);
 
-      return next;
-    });
-  };
-
+  // Notificações em tempo real
   useEffect(() => {
     isMountedRef.current = true;
 
@@ -152,7 +172,10 @@ export default function Layout({ children, title }) {
     };
 
     socketService.connect();
-    socketService.on('waiter_notification', handleWaiterNotification);
+    socketService.on(
+      'waiter_notification',
+      handleWaiterNotification
+    );
 
     return () => {
       isMountedRef.current = false;
@@ -170,10 +193,17 @@ export default function Layout({ children, title }) {
     setNotifications([]);
   };
 
+  const toggleSidebar = () => {
+    setSidebarCollapsed(previous => !previous);
+  };
+
   return (
     <div className="min-h-screen parchment-bg">
 
-      {/* MENU MOBILE */}
+      {/* ======================================
+          MENU MOBILE
+      ====================================== */}
+
       <div
         className={cn(
           'fixed inset-0 z-50 lg:hidden',
@@ -201,6 +231,7 @@ export default function Layout({ children, title }) {
           </div>
 
           <nav className="p-3 sm:p-4 space-y-1 sm:space-y-2 flex-1 overflow-y-auto">
+
             {userNavigation.map(item => (
               <Link
                 key={item.href}
@@ -214,14 +245,20 @@ export default function Layout({ children, title }) {
                 )}
               >
                 <item.icon className="h-4 w-4 sm:h-5 sm:w-5 shrink-0" />
-                <span className="font-medium">{item.name}</span>
+
+                <span className="font-medium">
+                  {item.name}
+                </span>
               </Link>
             ))}
+
           </nav>
 
+          {/* Usuário mobile */}
           <div className="border-t border-border p-3 sm:p-4 shrink-0 bg-card">
 
             <div className="flex items-center gap-3 mb-3">
+
               <div className="h-9 w-9 rounded-full bg-primary/20 flex items-center justify-center shrink-0">
                 <span className="font-heading text-primary text-base">
                   {user?.name?.charAt(0)}
@@ -232,10 +269,12 @@ export default function Layout({ children, title }) {
                 <p className="text-sm font-medium truncate">
                   {user?.name}
                 </p>
+
                 <p className="text-xs text-muted-foreground truncate">
                   {getRoleLabel(user?.role)}
                 </p>
               </div>
+
             </div>
 
             <Button
@@ -255,10 +294,13 @@ export default function Layout({ children, title }) {
         </div>
       </div>
 
-      {/* MENU DESKTOP RETRÁTIL */}
+      {/* ======================================
+          MENU DESKTOP RETRÁTIL
+      ====================================== */}
+
       <div
         className={cn(
-          'hidden lg:fixed lg:inset-y-0 lg:z-40 lg:flex lg:flex-col transition-all duration-300 ease-in-out',
+          'hidden lg:fixed lg:inset-y-0 lg:z-40 lg:flex lg:flex-col transition-[width] duration-300 ease-in-out',
           sidebarCollapsed
             ? 'lg:w-20'
             : 'lg:w-64 xl:w-72'
@@ -273,34 +315,60 @@ export default function Layout({ children, title }) {
           )}
         >
 
-          {/* LOGO */}
+          {/* Logo e botão de recolher */}
           <div
             className={cn(
               'flex h-14 xl:h-16 shrink-0 items-center border-b border-border',
               sidebarCollapsed
                 ? 'justify-center'
-                : '-mx-4 xl:-mx-6 px-4 xl:px-6'
+                : 'justify-between gap-2 -mx-4 xl:-mx-6 px-4 xl:px-6'
             )}
           >
-            {sidebarCollapsed ? (
-              <ChefHat className="h-7 w-7 text-primary" />
-            ) : (
-              <Logo size="md" />
+            {!sidebarCollapsed && (
+              <div className="min-w-0 overflow-hidden">
+                <Logo size="md" />
+              </div>
             )}
+
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={toggleSidebar}
+              className="shrink-0"
+              title={
+                sidebarCollapsed
+                  ? 'Expandir menu'
+                  : 'Recolher menu'
+              }
+              aria-label={
+                sidebarCollapsed
+                  ? 'Expandir menu'
+                  : 'Recolher menu'
+              }
+              aria-expanded={!sidebarCollapsed}
+            >
+              {sidebarCollapsed ? (
+                <PanelLeftOpen className="h-5 w-5" />
+              ) : (
+                <PanelLeftClose className="h-5 w-5" />
+              )}
+            </Button>
           </div>
 
-          {/* NAVEGAÇÃO */}
+          {/* Navegação desktop */}
           <nav className="flex flex-1 flex-col">
+
             <ul className="flex flex-1 flex-col gap-y-1 xl:gap-y-2">
 
               {userNavigation.map(item => (
                 <li key={item.href}>
+
                   <Link
                     to={item.href}
                     title={sidebarCollapsed ? item.name : undefined}
                     aria-label={item.name}
                     className={cn(
-                      'group flex items-center rounded-lg text-sm font-medium transition-all duration-200',
+                      'group flex items-center rounded-lg text-sm font-medium transition-colors duration-200',
                       sidebarCollapsed
                         ? 'justify-center p-3'
                         : 'gap-x-3 p-2 xl:p-3',
@@ -317,13 +385,14 @@ export default function Layout({ children, title }) {
                       </span>
                     )}
                   </Link>
+
                 </li>
               ))}
 
             </ul>
           </nav>
 
-          {/* USUÁRIO E SAIR */}
+          {/* Usuário desktop */}
           <div className="border-t border-border pt-4">
 
             <div
@@ -334,6 +403,7 @@ export default function Layout({ children, title }) {
                   : 'gap-3'
               )}
             >
+
               <div className="h-9 w-9 xl:h-10 xl:w-10 rounded-full bg-primary/20 flex items-center justify-center shrink-0">
                 <span className="font-heading text-primary text-base xl:text-lg">
                   {user?.name?.charAt(0)}
@@ -351,15 +421,16 @@ export default function Layout({ children, title }) {
                   </p>
                 </div>
               )}
+
             </div>
 
             <Button
               variant="outline"
               className={cn(
-                'text-sm',
+                'w-full text-sm',
                 sidebarCollapsed
-                  ? 'w-full justify-center px-2'
-                  : 'w-full justify-start gap-2'
+                  ? 'justify-center px-2'
+                  : 'justify-start gap-2'
               )}
               onClick={handleLogout}
               title={sidebarCollapsed ? 'Sair' : undefined}
@@ -372,24 +443,26 @@ export default function Layout({ children, title }) {
             </Button>
 
           </div>
-
         </div>
       </div>
 
-      {/* CONTEÚDO PRINCIPAL */}
+      {/* ======================================
+          CONTEÚDO PRINCIPAL
+      ====================================== */}
+
       <div
         className={cn(
-          'transition-all duration-300 ease-in-out',
+          'transition-[padding] duration-300 ease-in-out',
           sidebarCollapsed
             ? 'lg:pl-20'
             : 'lg:pl-64 xl:pl-72'
         )}
       >
 
-        {/* BARRA SUPERIOR */}
+        {/* Barra superior */}
         <div className="sticky top-0 z-30 flex h-14 sm:h-16 shrink-0 items-center gap-x-2 sm:gap-x-4 border-b border-border bg-card/95 backdrop-blur px-3 sm:px-4 lg:px-6 xl:px-8">
 
-          {/* BOTÃO MENU MOBILE */}
+          {/* Abrir menu mobile */}
           <Button
             variant="ghost"
             size="icon"
@@ -400,64 +473,56 @@ export default function Layout({ children, title }) {
             <Menu className="h-5 w-5 sm:h-6 sm:w-6" />
           </Button>
 
-          {/* BOTÃO MENU DESKTOP */}
-          <Button
-            variant="ghost"
-            size="icon"
-            className="hidden lg:inline-flex shrink-0"
-            onClick={toggleDesktopSidebar}
-            title={sidebarCollapsed ? 'Expandir menu' : 'Recolher menu'}
-            aria-label={sidebarCollapsed ? 'Expandir menu' : 'Recolher menu'}
-            aria-expanded={!sidebarCollapsed}
-          >
-            {sidebarCollapsed ? (
-              <PanelLeftOpen className="h-5 w-5" />
-            ) : (
-              <PanelLeftClose className="h-5 w-5" />
-            )}
-          </Button>
-
-          {/* TÍTULO */}
+          {/* Título da página */}
           <div className="flex flex-1 items-center gap-x-2 sm:gap-x-4 self-stretch min-w-0">
+
             <h2 className="font-heading text-lg sm:text-xl md:text-2xl text-foreground truncate">
               {title}
             </h2>
+
           </div>
 
-          {/* NOTIFICAÇÕES */}
-          {(user?.role === 'waiter' ||
+          {/* Notificações */}
+          {(
+            user?.role === 'waiter' ||
             user?.role === 'admin' ||
-            user?.role === 'superadmin') &&
-            notifications.length > 0 && (
-              <div className="relative">
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="relative"
-                  onClick={clearNotifications}
-                  aria-label="Limpar notificações"
-                >
-                  <Bell className="h-5 w-5" />
+            user?.role === 'superadmin'
+          ) && notifications.length > 0 && (
 
-                  <Badge className="absolute -top-1 -right-1 h-5 w-5 p-0 flex items-center justify-center text-xs">
-                    {notifications.length}
-                  </Badge>
-                </Button>
-              </div>
-            )}
+            <div className="relative">
 
-          {/* AVATAR MOBILE */}
+              <Button
+                variant="ghost"
+                size="icon"
+                className="relative"
+                onClick={clearNotifications}
+                aria-label="Limpar notificações"
+              >
+                <Bell className="h-5 w-5" />
+
+                <Badge className="absolute -top-1 -right-1 h-5 w-5 p-0 flex items-center justify-center text-xs">
+                  {notifications.length}
+                </Badge>
+              </Button>
+
+            </div>
+          )}
+
+          {/* Avatar mobile */}
           <div className="flex items-center gap-x-2 sm:gap-x-4 lg:hidden">
+
             <div className="h-7 w-7 sm:h-8 sm:w-8 rounded-full bg-primary/20 flex items-center justify-center">
+
               <span className="font-heading text-primary text-xs sm:text-sm">
                 {user?.name?.charAt(0)}
               </span>
+
             </div>
           </div>
 
         </div>
 
-        {/* CONTEÚDO DA PÁGINA */}
+        {/* Conteúdo das páginas */}
         <main className="p-3 sm:p-4 lg:p-6 xl:p-8">
           {children}
         </main>
