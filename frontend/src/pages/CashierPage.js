@@ -38,7 +38,224 @@ const PAYMENT_METHODS = [
   { value: 'pix', label: 'PIX', icon: QrCode },
   { value: 'voucher', label: 'Vale', icon: Gift },
 ];
+// ======================================================
+// GESTOR RESTO - IMPRESSAO TERMICA
+// Etapa 1: pre-conta nao fiscal
+// Compatível com Chrome / Windows 11
+// Bobinas de 58 mm e 80 mm
+// ======================================================
 
+const escapeReceipt = (value) =>
+  String(value ?? '').replace(/[&<>"']/g, (ch) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  }[ch]));
+
+function printPreBill(order, paperWidth = '80') {
+  if (!order) return;
+
+  const width = paperWidth === '58' ? '58mm' : '80mm';
+
+  const receiptWindow = window.open(
+    '',
+    '_blank',
+    'width=450,height=650'
+  );
+
+  if (!receiptWindow) {
+    toast.error(
+      'O Chrome bloqueou a impressão. Permita pop-ups para este site.'
+    );
+    return;
+  }
+
+  const identifier =
+    order.tab_number != null
+      ? `Comanda ${order.tab_number} / Mesa ${order.table_number ?? '-'}`
+      : order.table_number != null
+        ? `Mesa ${order.table_number}`
+        : `Pedido ${order.external_order_number || order.id}`;
+
+  const items = (order.items || []).filter(
+    (item) => item.status !== 'cancelled'
+  );
+
+  const rows = items.map((item) => `
+    <tr>
+      <td>
+        ${escapeReceipt(item.quantity)}x
+        ${escapeReceipt(item.product_name)}
+      </td>
+      <td class="right">
+        ${escapeReceipt(
+          formatCurrency(
+            Number(item.unit_price || 0) *
+            Number(item.quantity || 0)
+          )
+        )}
+      </td>
+    </tr>
+    ${
+      item.notes
+        ? `<tr>
+            <td colspan="2" class="note">
+              Obs.: ${escapeReceipt(item.notes)}
+            </td>
+          </tr>`
+        : ''
+    }
+  `).join('');
+
+  const html = `
+    <!doctype html>
+    <html lang="pt-BR">
+      <head>
+        <meta charset="utf-8" />
+        <title>Pré-conta - ${escapeReceipt(identifier)}</title>
+
+        <style>
+          @page {
+            size: ${width} auto;
+            margin: 2mm;
+          }
+
+          * {
+            box-sizing: border-box;
+          }
+
+          body {
+            font-family: monospace;
+            font-size: 12px;
+            width: ${width};
+            max-width: 100%;
+            margin: 0 auto;
+            padding: 3mm;
+            color: #000;
+          }
+
+          h1, h2, p {
+            text-align: center;
+            margin: 3px 0;
+          }
+
+          h1 {
+            font-size: 16px;
+          }
+
+          h2 {
+            font-size: 12px;
+          }
+
+          .line {
+            border-top: 1px dashed #000;
+            margin: 8px 0;
+          }
+
+          table {
+            width: 100%;
+            border-collapse: collapse;
+          }
+
+          td {
+            vertical-align: top;
+            padding: 3px 0;
+          }
+
+          .right {
+            text-align: right;
+            white-space: nowrap;
+          }
+
+          .note {
+            font-size: 10px;
+          }
+
+          .total {
+            font-size: 15px;
+            font-weight: bold;
+            display: flex;
+            justify-content: space-between;
+          }
+
+          @media print {
+            body {
+              width: auto;
+              padding: 0;
+            }
+          }
+        </style>
+      </head>
+
+      <body>
+        <h1>EMAÚS</h1>
+        <h2>HAMBURGUERIA & RESTAURANTE</h2>
+
+        <p>PRÉ-CONTA - NÃO FISCAL</p>
+
+        <div class="line"></div>
+
+        <p>${escapeReceipt(identifier)}</p>
+        <p>${escapeReceipt(new Date().toLocaleString('pt-BR'))}</p>
+
+        <div class="line"></div>
+
+        <table>
+          ${rows}
+        </table>
+
+        <div class="line"></div>
+
+        <table>
+          <tr>
+            <td>Subtotal</td>
+            <td class="right">
+              ${escapeReceipt(
+                formatCurrency(order.subtotal ?? order.total)
+              )}
+            </td>
+          </tr>
+
+          <tr>
+            <td>Serviço</td>
+            <td class="right">
+              ${escapeReceipt(
+                formatCurrency(order.service_fee ?? 0)
+              )}
+            </td>
+          </tr>
+        </table>
+
+        <div class="line"></div>
+
+        <div class="total">
+          <span>TOTAL</span>
+          <span>
+            ${escapeReceipt(formatCurrency(order.total))}
+          </span>
+        </div>
+
+        <div class="line"></div>
+
+        <p>Documento não fiscal.</p>
+        <p>Pagamento não confirmado.</p>
+
+        <script>
+          window.addEventListener('load', () => {
+            window.focus();
+            window.print();
+          });
+        </script>
+      </body>
+    </html>
+  `;
+
+  receiptWindow.document.open();
+  receiptWindow.document.write(html);
+  receiptWindow.document.close();
+}
 // Componente de pagamento com estado controlado
 function PaymentRow({ payment, index, onUpdate, onRemove, canRemove }) {
   const handleMethodChange = useCallback((value) => {
@@ -88,6 +305,14 @@ function PaymentRow({ payment, index, onUpdate, onRemove, canRemove }) {
 
 export default function CashierPage() {
   const [orders, setOrders] = useState([]);
+    // Configuração da impressora térmica
+  const [paperWidth, setPaperWidth] = useState(() => {
+    try {
+      return localStorage.getItem('gestorresto_receipt_width') || '80';
+    } catch {
+      return '80';
+    }
+  });
   const [tables, setTables] = useState([]);
   const [register, setRegister] = useState(null);
   const [selectedOrderId, setSelectedOrderId] = useState(null);
@@ -498,61 +723,51 @@ export default function CashierPage() {
       </Layout>
     );
   }   
-  return (
+    return (
     <Layout title="Caixa">
-      <div className="space-y-4 sm:space-y-6" data-testid="cashier-page">
-        {/* Resumo do caixa */}
-        <Card className="bg-primary/10 border-primary">
-          <CardContent className="p-3 sm:p-4">
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2 sm:gap-4">
-              <div>
-                <p className="text-xs sm:text-sm text-muted-foreground">Inicial</p>
-                <p className="text-sm sm:text-lg font-bold">
-                  {formatCurrency(register.initial_amount)}
-                </p>
-              </div>
-              <div>
-                <p className="text-xs sm:text-sm text-muted-foreground">Vendas</p>
-                <p className="text-sm sm:text-lg font-bold text-green-600">
-                  {formatCurrency(register.total_sales)}
-                </p>
-              </div>
-              <div>
-                <p className="text-xs sm:text-sm text-muted-foreground">Sangrias</p>
-                <p className="text-sm sm:text-lg font-bold text-red-600">
-                  -{formatCurrency(register.withdrawals)}
-                </p>
-              </div>
-              <div>
-                <p className="text-xs sm:text-sm text-muted-foreground">Reforços</p>
-                <p className="text-sm sm:text-lg font-bold text-blue-600">
-                  +{formatCurrency(register.deposits)}
-                </p>
-              </div>
-              <div className="col-span-2 sm:col-span-1">
-                <p className="text-xs sm:text-sm text-muted-foreground">Saldo</p>
-                <p className="text-lg sm:text-xl font-heading font-bold text-primary">
-                  {formatCurrency(
-                    register.initial_amount +
-                    register.total_sales +
-                    register.deposits -
-                    register.withdrawals
-                  )}
-                </p>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
+      <div
+        className="space-y-4 sm:space-y-6"
+        data-testid="cashier-page"
+      >
+
+        {/* CABEÇALHO OPERACIONAL DO CAIXA */}
+        {/* Informações financeiras ocultas dos clientes */}
+
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border bg-card px-4 py-3">
+
+          <div className="space-y-1">
+            <h2 className="font-heading text-lg font-semibold">
+              Frente de Caixa
+            </h2>
+
+            <p className="text-xs text-muted-foreground">
+              Atendimento, comandas e recebimentos
+            </p>
+          </div>
+
+          <Badge
+            variant="outline"
+            className="border-green-500/40 text-green-600"
+          >
+            Caixa aberto
+          </Badge>
+
+        </div>
+
+        {/* ÁREA PRINCIPAL DO CAIXA */}
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 sm:gap-6">
+
           {/* Lista de comandas abertas */}
           <div className="lg:col-span-2">
             <Card>
               <CardHeader className="pb-2 sm:pb-4">
                 <div className="flex justify-between items-center gap-2 flex-wrap">
+
                   <CardTitle className="font-heading text-lg sm:text-xl">
                     Comandas Abertas
                   </CardTitle>
+
                   <Button
                     size="sm"
                     variant="default"
@@ -562,6 +777,7 @@ export default function CashierPage() {
                     <Plus className="h-4 w-4 mr-1" />
                     Novo Pedido Online
                   </Button>
+
                 </div>
               </CardHeader>
 
@@ -794,7 +1010,46 @@ export default function CashierPage() {
                       </span>
                     </div>
                   )}
+                  {/* Impressão térmica da pré-conta */}
+                  <div className="space-y-2 rounded-lg border p-3">
+                    <Label className="text-sm font-medium">
+                      Impressão da pré-conta
+                    </Label>
 
+                    <div className="flex flex-col sm:flex-row gap-2">
+                      <Select
+                        value={paperWidth}
+                        onValueChange={(value) => {
+                          setPaperWidth(value);
+                          localStorage.setItem(
+                            'gestorresto_receipt_width',
+                            value
+                          );
+                        }}
+                      >
+                        <SelectTrigger className="w-full sm:w-28">
+                          <SelectValue placeholder="Bobina" />
+                        </SelectTrigger>
+
+                        <SelectContent>
+                          <SelectItem value="58">58 mm</SelectItem>
+                          <SelectItem value="80">80 mm</SelectItem>
+                        </SelectContent>
+                      </Select>
+
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="flex-1"
+                        disabled={closingOrder}
+                        onClick={() => printPreBill(selectedOrder, paperWidth)}
+                        data-testid="print-prebill-btn"
+                      >
+                        <Receipt className="h-4 w-4 mr-2" />
+                        Imprimir pré-conta
+                      </Button>
+                    </div>
+                  </div>
                   <Button
                     className="w-full font-heading uppercase tracking-widest text-sm"
                     onClick={handleCloseOrder}
