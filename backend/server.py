@@ -1259,6 +1259,57 @@ async def cancel_order_item(order_id: str, item_id: str, data: dict, current_use
         "authorized_by": admin.get("name"),
     }
 
+@api_router.post("/orders/{order_id}/complete-online")
+async def complete_online_order(
+    order_id: str,
+    current_user: dict = Depends(require_role([UserRole.ADMIN, UserRole.CASHIER]))
+):
+    """Finaliza pedido online sem registrar pagamento no caixa físico."""
+    order = await db.orders.find_one({"id": order_id}, {"_id": 0})
+    if not order:
+        raise HTTPException(status_code=404, detail="Pedido não encontrado")
+    if order.get("is_closed"):
+        raise HTTPException(status_code=409, detail="Pedido já finalizado")
+    if order.get("source") != "online":
+        raise HTTPException(status_code=400, detail="Use o fechamento normal para pedidos presenciais")
+    if order.get("status") == "cancelled" or order.get("is_comp"):
+        raise HTTPException(status_code=400, detail="Pedido cancelado ou cortesia não pode gerar repasse")
+    existing = await db.payments.count_documents({"order_id": order_id})
+    if existing:
+        raise HTTPException(status_code=409, detail="Pedido já possui pagamentos; confira antes de finalizar")
+
+    for item in order.get("items", []):
+        if item.get("status") == "cancelled" or item.get("stock_deducted"):
+            continue
+        await deduct_stock(item["product_id"], item["quantity"], order_code=order_id)
+        item["stock_deducted"] = True
+
+    closed_at = datetime.now(timezone.utc).isoformat()
+    result = await db.orders.update_one(
+        {"id": order_id, "is_closed": False},
+        {"$set": {
+            "items": order.get("items", []),
+            "is_closed": True,
+            "closed_at": closed_at,
+            "status": OrderStatus.DELIVERED.value,
+            "settlement_status": "pending_platform",
+            "settlement_gross": order.get("total", 0),
+            "settlement_net": None,
+            "settlement_platform": order.get("platform") or order.get("origin") or "other",
+        }}
+    )
+    if result.modified_count != 1:
+        raise HTTPException(status_code=409, detail="Pedido já foi finalizado")
+    await sio.emit("order_closed", {"order_id": order_id})
+    return {
+        "message": "Pedido online finalizado; aguardando repasse da plataforma",
+        "order_id": order_id,
+        "platform": order.get("platform") or order.get("origin") or "other",
+        "gross_amount": order.get("total", 0),
+        "settlement_status": "pending_platform"
+    }
+
+
 @api_router.post("/orders/{order_id}/close")
 async def close_order(order_id: str, payment_data: dict):
     order = await db.orders.find_one({"id": order_id}, {"_id": 0})
@@ -1266,6 +1317,8 @@ async def close_order(order_id: str, payment_data: dict):
         raise HTTPException(status_code=404, detail="Order not found")
     if order.get("is_closed"):
         raise HTTPException(status_code=409, detail="Pedido já está fechado")
+    if order.get("source") == "online":
+        raise HTTPException(status_code=409, detail="Pedido online deve usar Finalizar pedido online (aguardando repasse)")
 
     # Register payments
     for payment in payment_data.get("payments", []):
@@ -1752,6 +1805,14 @@ async def preview_cash_register(
     total_change = 0
     closed_orders = 0
     warnings = []
+    online_completed = {}
+    online_open = {}
+    def online_bucket(target, order):
+        platform = order.get("platform") or order.get("origin") or "other"
+        bucket = target.setdefault(platform, {"orders": 0, "gross": 0})
+        bucket["orders"] += 1
+        bucket["gross"] += cents(order.get("total"))
+
 
     cursor = db.orders.find({
         "is_closed": True,
@@ -1763,6 +1824,10 @@ async def preview_cash_register(
 
     async for order in cursor:
         if order.get("status") == "cancelled" or order.get("is_comp"):
+            continue
+
+        if order.get("source") == "online":
+            online_bucket(online_completed, order)
             continue
 
         order_total = cents(order.get("total"))
@@ -1806,8 +1871,22 @@ async def preview_cash_register(
     withdrawals = cents(register.get("withdrawals"))
 
     open_orders = await db.orders.count_documents({
-        "is_closed": False
+        "is_closed": False,
+        "source": {"$ne": "online"}
     })
+    online_cursor = db.orders.find({
+        "is_closed": False,
+        "source": "online",
+        "status": {"$ne": "cancelled"}
+    }, {"_id": 0})
+    async for order in online_cursor:
+        online_bucket(online_open, order)
+    def serialize_online(source):
+        return {
+            name: {"orders": data["orders"], "gross": money(data["gross"])}
+            for name, data in source.items()
+        }
+
 
     return {
         "register_id": register["id"],
@@ -1821,6 +1900,8 @@ async def preview_cash_register(
         "total_change": money(total_change),
         "closed_orders": closed_orders,
         "open_orders": open_orders,
+        "online_completed": serialize_online(online_completed),
+        "online_open": serialize_online(online_open),
         "initial_amount": money(initial),
         "deposits": money(deposits),
         "withdrawals": money(withdrawals),
@@ -1873,6 +1954,13 @@ async def close_register(
         "voucher": 0,
     }
 
+    online_completed = {}
+    def online_bucket(order):
+        platform = order.get("platform") or order.get("origin") or "other"
+        bucket = online_completed.setdefault(platform, {"orders": 0, "gross": 0})
+        bucket["orders"] += 1
+        bucket["gross"] += cents(order.get("total"))
+
     total_sales = 0
     closed_orders = 0
     cancelled_orders = 0
@@ -1898,6 +1986,10 @@ async def close_register(
         if order.get("is_comp"):
             courtesy_orders += 1
             courtesy_amount += cents(order.get("total"))
+            continue
+
+        if order.get("source") == "online":
+            online_bucket(order)
             continue
 
         order_total = cents(order.get("total"))
@@ -1982,6 +2074,12 @@ async def close_register(
             for key, value in methods.items()
         },
         "total_sales": money(total_sales),
+        "online_completed": {
+            name: {"orders": data["orders"], "gross": money(data["gross"])}
+            for name, data in online_completed.items()
+        },
+        "online_gross_total": money(sum(x["gross"] for x in online_completed.values())),
+        "gross_total_all_channels": money(total_sales + sum(x["gross"] for x in online_completed.values())),
         "closed_orders": closed_orders,
         "cancelled_orders": cancelled_orders,
         "courtesy_orders": courtesy_orders,
@@ -3024,4 +3122,5 @@ async def shutdown_db_client():
 # Wrap FastAPI with Socket.IO for combined HTTP + WebSocket ASGI app
 # This is the final app object that uvicorn will serve
 app = socketio.ASGIApp(sio, other_asgi_app=app)
+
 
