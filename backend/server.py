@@ -1719,24 +1719,200 @@ async def open_register(register_data: CashRegisterBase, current_user: dict = De
     await db.cash_registers.insert_one(reg_dict)
     return {k: v for k, v in reg_dict.items() if k != "_id"}
 
+@
 @api_router.post("/cash-register/close")
-async def close_register(close_data: dict, current_user: dict = Depends(require_role([UserRole.ADMIN, UserRole.CASHIER]))):
-    register = await db.cash_registers.find_one({"is_open": True}, {"_id": 0})
-    if not register:
-        raise HTTPException(status_code=400, detail="No open register")
-    
-    final_amount = register["initial_amount"] + register["total_sales"] + register["deposits"] - register["withdrawals"]
-    
-    await db.cash_registers.update_one(
-        {"id": register["id"]},
-        {"$set": {
-            "is_open": False,
-            "closed_at": datetime.now(timezone.utc).isoformat(),
-            "closed_by": close_data.get("closed_by"),
-            "final_amount": final_amount
-        }}
+async def close_register(
+    close_data: dict,
+    current_user: dict = Depends(
+        require_role([UserRole.ADMIN, UserRole.CASHIER])
     )
-    return {"message": "Register closed", "final_amount": final_amount}
+):
+    register = await db.cash_registers.find_one(
+        {"is_open": True}, {"_id": 0}
+    )
+    if not register:
+        raise HTTPException(
+            status_code=400,
+            detail="Nenhum caixa aberto"
+        )
+
+    # Não permite fechar com comandas pendentes.
+    pending = await db.orders.count_documents({
+        "is_closed": False
+    })
+    if pending:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Existem {pending} comandas abertas"
+        )
+
+    opened_at = register["opened_at"]
+    closed_at = datetime.now(timezone.utc).isoformat()
+
+    def cents(value):
+        return round(float(value or 0) * 100)
+
+    def money(value):
+        return round(value / 100, 2)
+
+    methods = {
+        "cash": 0,
+        "pix": 0,
+        "credit": 0,
+        "debit": 0,
+        "card": 0,
+        "voucher": 0,
+    }
+
+    total_sales = 0
+    closed_orders = 0
+    cancelled_orders = 0
+    courtesy_orders = 0
+    courtesy_amount = 0
+    missing_payments = []
+    payment_errors = []
+    total_change = 0
+
+    cursor = db.orders.find({
+        "is_closed": True,
+        "closed_at": {
+            "$gte": opened_at,
+            "$lte": closed_at
+        }
+    }, {"_id": 0})
+
+    async for order in cursor:
+        if order.get("status") == "cancelled":
+            cancelled_orders += 1
+            continue
+
+        if order.get("is_comp"):
+            courtesy_orders += 1
+            courtesy_amount += cents(order.get("total"))
+            continue
+
+        order_total = cents(order.get("total"))
+
+        payments = await db.payments.find(
+            {"order_id": order["id"]},
+            {"_id": 0}
+        ).to_list(length=None)
+
+        if not payments and order_total > 0:
+            missing_payments.append(order["id"])
+            continue
+
+        paid = sum(cents(p.get("amount")) for p in payments)
+
+        if paid < order_total:
+            payment_errors.append(order["id"])
+            continue
+
+        # Pagamento acima do total só é conciliado
+        # quando há dinheiro suficiente para o troco.
+        change = paid - order_total
+        cash_received = sum(
+            cents(p.get("amount"))
+            for p in payments
+            if p.get("method") == "cash"
+        )
+
+        if change > cash_received:
+            payment_errors.append(order["id"])
+            continue
+
+        for payment in payments:
+            method = payment.get("method")
+            if method not in methods:
+                payment_errors.append(order["id"])
+                break
+        else:
+            for payment in payments:
+                method = payment["method"]
+                methods[method] += cents(payment.get("amount"))
+
+            methods["cash"] -= change
+            total_change += change
+            total_sales += order_total
+            closed_orders += 1
+
+    # Não encerra o caixa se houver pagamentos
+    # que não podem ser conciliados corretamente.
+    if missing_payments or payment_errors:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": (
+                    "Fechamento bloqueado: existem "
+                    "pagamentos que precisam de conferência"
+                ),
+                "sem_pagamento": missing_payments,
+                "pagamento_inconsistente": payment_errors,
+            }
+        )
+
+    initial = cents(register.get("initial_amount"))
+    deposits = cents(register.get("deposits"))
+    withdrawals = cents(register.get("withdrawals"))
+
+    expected_cash = (
+        initial
+        + methods["cash"]
+        + deposits
+        - withdrawals
+    )
+
+    report = {
+        "register_id": register["id"],
+        "opened_at": opened_at,
+        "closed_at": closed_at,
+        "opened_by": register.get("opened_by"),
+        "closed_by": current_user.get("name"),
+        "payment_methods": {
+            key: money(value)
+            for key, value in methods.items()
+        },
+        "total_sales": money(total_sales),
+        "closed_orders": closed_orders,
+        "cancelled_orders": cancelled_orders,
+        "courtesy_orders": courtesy_orders,
+        "courtesy_amount": money(courtesy_amount),
+        "total_change": money(total_change),
+        "initial_amount": money(initial),
+        "deposits": money(deposits),
+        "withdrawals": money(withdrawals),
+        "expected_cash": money(expected_cash),
+    }
+
+    result = await db.cash_registers.update_one(
+        {
+            "id": register["id"],
+            "is_open": True
+        },
+        {
+            "$set": {
+                "is_open": False,
+                "closed_at": closed_at,
+                "closed_by": current_user.get("name"),
+                "final_amount": money(expected_cash),
+                "total_sales": money(total_sales),
+                "closing_report": report,
+            }
+        }
+    )
+
+    if result.modified_count != 1:
+        raise HTTPException(
+            status_code=409,
+            detail="Este caixa já foi encerrado"
+        )
+
+    return {
+        "message": "Caixa fechado com sucesso",
+        "final_amount": money(expected_cash),
+        "report": report,
+    }
+
 
 @api_router.post("/cash-register/withdrawal")
 async def register_withdrawal(movement_data: dict, current_user: dict = Depends(require_role([UserRole.ADMIN, UserRole.CASHIER]))):
