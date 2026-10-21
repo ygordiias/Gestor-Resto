@@ -716,6 +716,47 @@ const handleCashPreview = async () => {
     }
   };
       const handleCloseOrder = async () => {
+      
+       if (isOnlineOrder(selectedOrder)) {
+  setClosingOrder(true);
+
+  try {
+    const response = await fetch(
+      `${process.env.REACT_APP_BACKEND_URL}/api/orders/${selectedOrder.id}/complete-online`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${localStorage.getItem('token')}`
+        }
+      }
+    );
+
+    const result = await response.json();
+
+    if (!response.ok) {
+      throw new Error(
+        typeof result.detail === 'string'
+          ? result.detail
+          : 'Erro ao finalizar pedido online'
+      );
+    }
+
+    toast.success(
+      'Pedido online finalizado — aguardando repasse da plataforma.'
+    );
+
+    clearSelection();
+    await fetchData();
+
+  } catch (error) {
+    toast.error(error.message || 'Erro ao finalizar pedido online');
+  } finally {
+    setClosingOrder(false);
+  }
+
+  return;
+}
+
     if (!selectedOrder || closingOrder) return;
     if (getTotalPayments + 0.001 < selectedOrder.total) {
       toast.error('Valor dos pagamentos insuficiente');
@@ -1244,31 +1285,27 @@ const handleCashPreview = async () => {
                         </SelectContent>
                       </Select>
 
-                      <Button
-                        type="button"
-                        variant="outline"
-                        className="flex-1"
-                        disabled={closingOrder}
-                        onClick={() => printPreBill(selectedOrder, paperWidth)}
-                        data-testid="print-prebill-btn"
-                      >
-                        <Receipt className="h-4 w-4 mr-2" />
-                        Imprimir pré-conta
-                      </Button>
-                    </div>
-                  </div>
-                  <Button
-                    className="w-full font-heading uppercase tracking-widest text-sm"
-                    onClick={handleCloseOrder}
-                    disabled={
-                      closingOrder ||
-                      getTotalPayments + 0.001 < selectedOrder.total
-                    }
-                    data-testid="close-order-btn"
-                  >
-                    <Receipt className="h-4 w-4 mr-2" />
-                    {closingOrder ? 'Fechando...' : 'Fechar Comanda'}
-                  </Button>
+                      
+
+<Button
+  className="w-full font-heading uppercase tracking-widest text-sm"
+  onClick={handleCloseOrder}
+  disabled={
+    closingOrder ||
+    (
+      !isOnlineOrder(selectedOrder) &&
+      getTotalPayments + 0.001 < selectedOrder.total
+    )
+  }
+  data-testid="close-order-btn"
+>
+  <Receipt className="h-4 w-4 mr-2" />
+  {closingOrder
+    ? 'Finalizando...'
+    : isOnlineOrder(selectedOrder)
+      ? 'Finalizar Pedido Online — Aguardando Repasse'
+      : 'Fechar Comanda'}
+</Button>
 
                   {/* Cortesia / Permuta */}
                   {!selectedOrder.is_comp ? (
