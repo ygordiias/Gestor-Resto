@@ -197,10 +197,11 @@ class OrderStatus(str, Enum):
 class OrderItemType(str, Enum):
     FOOD = "food"
     DRINK = "drink"
-
 class PaymentMethod(str, Enum):
     CASH = "cash"
-    CARD = "card"
+    CARD = "card"  # Histórico de pagamentos antigos
+    CREDIT = "credit"
+    DEBIT = "debit"
     PIX = "pix"
     VOUCHER = "voucher"
 
