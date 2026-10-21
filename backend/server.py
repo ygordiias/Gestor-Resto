@@ -1718,7 +1718,117 @@ async def open_register(register_data: CashRegisterBase, current_user: dict = De
     reg_dict["opened_at"] = reg_dict["opened_at"].isoformat()
     await db.cash_registers.insert_one(reg_dict)
     return {k: v for k, v in reg_dict.items() if k != "_id"}
+# Prévia do fechamento - somente leitura
+# Não encerra o caixa nem altera vendas ou pagamentos.
 
+@api_router.get("/cash-register/preview")
+async def preview_cash_register(
+    current_user: dict = Depends(require_role([UserRole.ADMIN]))
+):
+    register = await db.cash_registers.find_one(
+        {"is_open": True}, {"_id": 0}
+    )
+    if not register:
+        raise HTTPException(
+            status_code=404,
+            detail="Nenhum caixa aberto"
+        )
+
+    opened_at = register["opened_at"]
+    generated_at = datetime.now(timezone.utc).isoformat()
+
+    def cents(value):
+        return round(float(value or 0) * 100)
+
+    def money(value):
+        return round(value / 100, 2)
+
+    methods = {
+        key: 0
+        for key in ("cash", "pix", "credit", "debit", "card", "voucher")
+    }
+
+    total_sales = 0
+    total_change = 0
+    closed_orders = 0
+    warnings = []
+
+    cursor = db.orders.find({
+        "is_closed": True,
+        "closed_at": {
+            "$gte": opened_at,
+            "$lte": generated_at
+        }
+    }, {"_id": 0})
+
+    async for order in cursor:
+        if order.get("status") == "cancelled" or order.get("is_comp"):
+            continue
+
+        order_total = cents(order.get("total"))
+
+        payments = await db.payments.find(
+            {"order_id": order["id"]},
+            {"_id": 0}
+        ).to_list(length=None)
+
+        paid = sum(cents(p.get("amount")) for p in payments)
+        change = paid - order_total
+
+        cash_received = sum(
+            cents(p.get("amount"))
+            for p in payments
+            if p.get("method") == "cash"
+        )
+
+        if (
+            paid < order_total
+            or change < 0
+            or change > cash_received
+            or any(p.get("method") not in methods for p in payments)
+        ):
+            warnings.append(
+                f"Comanda {order.get('tab_number') or order['id']}: "
+                "pagamentos inconsistentes"
+            )
+            continue
+
+        for p in payments:
+            methods[p["method"]] += cents(p.get("amount"))
+
+        methods["cash"] -= change
+        total_change += change
+        total_sales += order_total
+        closed_orders += 1
+
+    initial = cents(register.get("initial_amount"))
+    deposits = cents(register.get("deposits"))
+    withdrawals = cents(register.get("withdrawals"))
+
+    open_orders = await db.orders.count_documents({
+        "is_closed": False
+    })
+
+    return {
+        "register_id": register["id"],
+        "opened_at": opened_at,
+        "generated_at": generated_at,
+        "payment_methods": {
+            key: money(value)
+            for key, value in methods.items()
+        },
+        "total_sales": money(total_sales),
+        "total_change": money(total_change),
+        "closed_orders": closed_orders,
+        "open_orders": open_orders,
+        "initial_amount": money(initial),
+        "deposits": money(deposits),
+        "withdrawals": money(withdrawals),
+        "expected_cash": money(
+            initial + methods["cash"] + deposits - withdrawals
+        ),
+        "warnings": warnings,
+    }
 @api_router.post("/cash-register/close")
 async def close_register(
     close_data: dict,
