@@ -362,8 +362,73 @@ function printCashPreview(report, paperWidth, receiptWindow) {
           <td>Comandas abertas</td>
           <td class="right">${escapeReceipt(report.open_orders || 0)}</td>
         </tr>
-        ${row('Troco considerado', report.total_change)}
+     
+${row('Troco considerado', report.total_change)}
       </table>
+
+      <div class="line"></div>
+
+      <p><strong>PEDIDOS ONLINE EM ABERTO</strong></p>
+      <table>
+        ${Object.entries(report.online_open || {}).map(([platform, data]) => `
+          <tr>
+            <td>
+              ${escapeReceipt(platform.toUpperCase())}
+              (${escapeReceipt(String(data.orders || 0))} pedidos)
+            </td>
+            <td class="right">${amount(data.gross || 0)}</td>
+          </tr>
+        `).join('') || `
+          <tr>
+            <td>Nenhum pedido online em aberto</td>
+          </tr>
+        `}
+        <tr class="strong">
+          <td>TOTAL BRUTO ONLINE ABERTO</td>
+          <td class="right">
+            ${amount(
+              Object.values(report.online_open || {}).reduce(
+                (total, data) => total + Number(data.gross || 0),
+                0
+              )
+            )}
+          </td>
+        </tr>
+      </table>
+
+      <div class="line"></div>
+
+      <p><strong>PEDIDOS ONLINE FINALIZADOS</strong></p>
+      <table>
+        ${Object.entries(report.online_completed || {}).map(([platform, data]) => `
+          <tr>
+            <td>
+              ${escapeReceipt(platform.toUpperCase())}
+              (${escapeReceipt(String(data.orders || 0))} pedidos)
+            </td>
+            <td class="right">${amount(data.gross || 0)}</td>
+          </tr>
+        `).join('') || `
+          <tr>
+            <td>Nenhum pedido online finalizado</td>
+          </tr>
+        `}
+        <tr class="strong">
+          <td>TOTAL BRUTO ONLINE FINALIZADO</td>
+          <td class="right">
+            ${amount(
+              Object.values(report.online_completed || {}).reduce(
+                (total, data) => total + Number(data.gross || 0),
+                0
+              )
+            )}
+          </td>
+        </tr>
+      </table>
+
+      <p>Valores brutos, sem desconto das taxas.</p>
+      <p>Repasse realizado pelas plataformas.</p>
+      <p>Pedidos online nao entram na gaveta.</p>
 
       <div class="line"></div>
 
@@ -383,6 +448,7 @@ function printCashPreview(report, paperWidth, receiptWindow) {
       <p>Não altera nem encerra o caixa.</p>
 
       ${
+
         report.warnings?.length
           ? `
             <div class="line"></div>
@@ -716,8 +782,9 @@ const handleCashPreview = async () => {
     }
   };
       const handleCloseOrder = async () => {
-      
-       if (isOnlineOrder(selectedOrder)) {
+  if (!selectedOrder || closingOrder) return;
+
+  if (isOnlineOrder(selectedOrder)) {
   setClosingOrder(true);
 
   try {
@@ -757,7 +824,6 @@ const handleCashPreview = async () => {
   return;
 }
 
-    if (!selectedOrder || closingOrder) return;
     if (getTotalPayments + 0.001 < selectedOrder.total) {
       toast.error('Valor dos pagamentos insuficiente');
       return;
@@ -1284,28 +1350,37 @@ const handleCashPreview = async () => {
                           <SelectItem value="80">80 mm</SelectItem>
                         </SelectContent>
                       </Select>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="flex-1"
+                        disabled={closingOrder}
+                        onClick={() => printPreBill(selectedOrder, paperWidth)}
+                        data-testid="print-prebill-btn"
+                      >
+                        <Receipt className="h-4 w-4 mr-2" />
+                        Imprimir pré-conta
+                      </Button>
+                    </div>
+                  </div>
 
-                      
-
-<Button
-  className="w-full font-heading uppercase tracking-widest text-sm"
-  onClick={handleCloseOrder}
-  disabled={
-    closingOrder ||
-    (
-      !isOnlineOrder(selectedOrder) &&
-      getTotalPayments + 0.001 < selectedOrder.total
-    )
-  }
-  data-testid="close-order-btn"
->
-  <Receipt className="h-4 w-4 mr-2" />
-  {closingOrder
-    ? 'Finalizando...'
-    : isOnlineOrder(selectedOrder)
-      ? 'Finalizar Pedido Online — Aguardando Repasse'
-      : 'Fechar Comanda'}
-</Button>
+                  <Button
+                    className="w-full font-heading uppercase tracking-widest text-sm"
+                    onClick={handleCloseOrder}
+                    disabled={
+                      closingOrder ||
+                      (!isOnlineOrder(selectedOrder) &&
+                        getTotalPayments + 0.001 < selectedOrder.total)
+                    }
+                    data-testid="close-order-btn"
+                  >
+                    <Receipt className="h-4 w-4 mr-2" />
+                    {closingOrder
+                      ? 'Finalizando...'
+                      : isOnlineOrder(selectedOrder)
+                        ? 'Finalizar Pedido Online — Aguardando Repasse'
+                        : 'Fechar Comanda'}
+                  </Button>
 
                   {/* Cortesia / Permuta */}
                   {!selectedOrder.is_comp ? (
