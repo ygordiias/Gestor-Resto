@@ -34,7 +34,8 @@ import {
 
 const PAYMENT_METHODS = [
   { value: 'cash', label: 'Dinheiro', icon: Banknote },
-  { value: 'card', label: 'Cartão', icon: CreditCard },
+  { value: 'credit', label: 'Crédito', icon: CreditCard },
+  { value: 'debit', label: 'Débito', icon: CreditCard },
   { value: 'pix', label: 'PIX', icon: QrCode },
   { value: 'voucher', label: 'Vale', icon: Gift },
 ];
