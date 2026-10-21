@@ -1719,7 +1719,6 @@ async def open_register(register_data: CashRegisterBase, current_user: dict = De
     await db.cash_registers.insert_one(reg_dict)
     return {k: v for k, v in reg_dict.items() if k != "_id"}
 
-@
 @api_router.post("/cash-register/close")
 async def close_register(
     close_data: dict,
