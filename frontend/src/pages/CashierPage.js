@@ -257,6 +257,155 @@ function printPreBill(order, paperWidth = '80') {
   receiptWindow.document.write(html);
   receiptWindow.document.close();
 }
+// Impressão térmica da prévia do fechamento
+function printCashPreview(report, paperWidth, receiptWindow) {
+  const width = paperWidth === '58' ? '58mm' : '80mm';
+
+  const amount = (value) =>
+    escapeReceipt(formatCurrency(Number(value || 0)));
+
+  const row = (label, value) => `
+    <tr>
+      <td>${escapeReceipt(label)}</td>
+      <td class="right">${amount(value)}</td>
+    </tr>
+  `;
+
+  const methods = report.payment_methods || {};
+
+  const html = `
+    <!doctype html>
+    <html lang="pt-BR">
+    <head>
+      <meta charset="utf-8" />
+      <title>Prévia do fechamento - EMAÚS</title>
+      <style>
+        @page {
+          size: ${width} auto;
+          margin: 2mm;
+        }
+        * { box-sizing: border-box; }
+        body {
+          width: ${width};
+          max-width: 100%;
+          margin: 0 auto;
+          padding: 2mm;
+          color: #000;
+          font: 12px monospace;
+        }
+        h1, h2, p {
+          text-align: center;
+          margin: 4px 0;
+        }
+        h1 { font-size: 17px; }
+        h2 { font-size: 12px; }
+        table {
+          width: 100%;
+          border-collapse: collapse;
+        }
+        td {
+          padding: 3px 0;
+          vertical-align: top;
+        }
+        .right {
+          text-align: right;
+          white-space: nowrap;
+        }
+        .line {
+          border-top: 1px dashed #000;
+          margin: 8px 0;
+        }
+        .strong {
+          font-weight: bold;
+          font-size: 14px;
+        }
+        @media print {
+          body {
+            width: auto;
+            padding: 0;
+          }
+        }
+      </style>
+    </head>
+    <body>
+      <h1>EMAÚS</h1>
+      <h2>HAMBURGUERIA & RESTAURANTE</h2>
+      <p><strong>PRÉVIA DO FECHAMENTO</strong></p>
+      <p>CAIXA NÃO ENCERRADO</p>
+
+      <div class="line"></div>
+
+      <p>Caixa: ${escapeReceipt(report.register_id || '-')}</p>
+      <p>Abertura: ${escapeReceipt(new Date(report.opened_at).toLocaleString('pt-BR'))}</p>
+      <p>Consulta: ${escapeReceipt(new Date(report.generated_at).toLocaleString('pt-BR'))}</p>
+
+      <div class="line"></div>
+
+      <table>
+        ${row('Dinheiro (líquido)', methods.cash)}
+        ${row('PIX', methods.pix)}
+        ${row('Crédito', methods.credit)}
+        ${row('Débito', methods.debit)}
+        ${row('Cartão antigo', methods.card)}
+        ${row('Vale', methods.voucher)}
+      </table>
+
+      <div class="line"></div>
+
+      <table>
+        ${row('Vendas conciliadas', report.total_sales)}
+        <tr>
+          <td>Comandas fechadas</td>
+          <td class="right">${escapeReceipt(report.closed_orders || 0)}</td>
+        </tr>
+        <tr>
+          <td>Comandas abertas</td>
+          <td class="right">${escapeReceipt(report.open_orders || 0)}</td>
+        </tr>
+        ${row('Troco considerado', report.total_change)}
+      </table>
+
+      <div class="line"></div>
+
+      <table>
+        ${row('Fundo inicial', report.initial_amount)}
+        ${row('Reforços', report.deposits)}
+        ${row('Sangrias', report.withdrawals)}
+        <tr class="strong">
+          <td>ESPERADO NA GAVETA</td>
+          <td class="right">${amount(report.expected_cash)}</td>
+        </tr>
+      </table>
+
+      <div class="line"></div>
+
+      <p>Conferência parcial, não fiscal.</p>
+      <p>Não altera nem encerra o caixa.</p>
+
+      ${
+        report.warnings?.length
+          ? `
+            <div class="line"></div>
+            <p>ATENÇÃO: ${escapeReceipt(report.warnings.length)} inconsistência(s)</p>
+            <p>${escapeReceipt(report.warnings.join(' | '))}</p>
+          `
+          : ''
+      }
+
+      <script>
+        window.addEventListener('load', () => {
+          window.focus();
+          window.print();
+        });
+      <\/script>
+    </body>
+    </html>
+  `;
+
+  receiptWindow.document.open();
+  receiptWindow.document.write(html);
+  receiptWindow.document.close();
+}
 // Componente de pagamento com estado controlado
 function PaymentRow({ payment, index, onUpdate, onRemove, canRemove }) {
   const handleMethodChange = useCallback((value) => {
@@ -422,7 +571,64 @@ export default function CashierPage() {
       toast.error('Erro ao fechar caixa');
     }
   };
+const [previewLoading, setPreviewLoading] = useState(false);
 
+const handleCashPreview = async () => {
+  if (previewLoading) return;
+
+  const receiptWindow = window.open(
+    '',
+    '_blank',
+    'width=450,height=650'
+  );
+
+  if (!receiptWindow) {
+    toast.error('Permita pop-ups para imprimir a prévia.');
+    return;
+  }
+
+  receiptWindow.document.write(
+    '<p>Preparando prévia do fechamento...</p>'
+  );
+
+  setPreviewLoading(true);
+
+  try {
+    const response = await fetch(
+      `${process.env.REACT_APP_BACKEND_URL}/api/cash-register/preview`,
+      {
+        headers: {
+          Authorization: `Bearer ${localStorage.getItem('token')}`
+        }
+      }
+    );
+
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+
+      throw new Error(
+        typeof body.detail === 'string'
+          ? body.detail
+          : 'Não foi possível consultar a prévia'
+      );
+    }
+
+    const report = await response.json();
+
+    printCashPreview(report, paperWidth, receiptWindow);
+
+    if (report.warnings?.length) {
+      toast.warning(
+        'Prévia com inconsistências: confira o comprovante.'
+      );
+    }
+  } catch (error) {
+    receiptWindow.close();
+    toast.error(error.message || 'Erro ao gerar prévia');
+  } finally {
+    setPreviewLoading(false);
+  }
+};
   const handleWithdrawal = async () => {
     if (!movementAmount || !movementReason) {
       toast.error('Preencha valor e motivo');
@@ -1233,6 +1439,21 @@ export default function CashierPage() {
                       </Button>
                     </div>
 
+                                      {/* Prévia do Fechamento */}
+                    <Button
+                      variant="outline"
+                      className="w-full text-sm"
+                      onClick={handleCashPreview}
+                      disabled={previewLoading}
+                      data-testid="preview-register-btn"
+                    >
+                      <Receipt className="h-4 w-4 mr-2" />
+                      {previewLoading
+                        ? 'Preparando prévia...'
+                        : 'Prévia do Fechamento (Admin)'}
+                    </Button>
+
+                    {/* Fechamento definitivo do caixa */}
                     <Button
                       variant="destructive"
                       className="w-full text-sm"
@@ -1298,7 +1519,6 @@ export default function CashierPage() {
                 </Select>
               </div>
             </div>
-
             <div className="space-y-1">
               <Label>Número do pedido externo</Label>
               <Input
