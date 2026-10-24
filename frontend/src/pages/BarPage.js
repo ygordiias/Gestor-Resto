@@ -557,12 +557,19 @@ export default function BarPage() {
                         size="lg"
                       />
                     ) : (
-                      <Badge
-                        variant="outline"
-                        className="font-heading text-base sm:text-lg"
-                      >
-                        Mesa {item.tableNumber}
-                      </Badge>
+                
+<div className="space-y-1 min-w-0">
+  <p className="text-base font-bold">
+    Mesa {item.tableNumber ?? '—'}
+  </p>
+
+  {item._order?.tab_number != null && (
+    <p className="text-xl sm:text-2xl font-black text-primary">
+      COMANDA {item._order.tab_number}
+    </p>
+  )}
+</div>
+
                     )}
 
                     <span className="text-xs text-muted-foreground flex items-center gap-1 shrink-0">
