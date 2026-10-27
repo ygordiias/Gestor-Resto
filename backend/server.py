@@ -10,6 +10,8 @@ from motor.motor_asyncio import AsyncIOMotorClient
 import socketio
 import os
 import logging
+import json
+import hashlib
 from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional
@@ -1766,17 +1768,45 @@ async def open_register(register_data: CashRegisterBase, current_user: dict = De
     if existing:
         raise HTTPException(status_code=400, detail="A register is already open")
     
-    register = CashRegister(**register_data.model_dump())
+    # A autoria do caixa vem do usuário autenticado, não do texto do navegador.
+    register = CashRegister(**{**register_data.model_dump(),
+                               "opened_by": current_user.get("name", "Operador")})
     reg_dict = register.model_dump()
+    reg_dict["opened_by_id"] = current_user.get("id")
     reg_dict["opened_at"] = reg_dict["opened_at"].isoformat()
     await db.cash_registers.insert_one(reg_dict)
     return {k: v for k, v in reg_dict.items() if k != "_id"}
+# Campos financeiros conferidos/impressos antes de encerrar o caixa.
+# Não incluir generated_at nem preview_token, pois variam entre consultas.
+_CLOSE_PREVIEW_FIELDS = (
+    "register_id", "payment_methods", "total_sales", "total_change",
+    "closed_orders", "open_orders", "online_completed", "online_open",
+    "initial_amount", "deposits", "withdrawals", "expected_cash", "warnings",
+)
+
+
+def _closing_preview_hash(report: dict) -> str:
+    content = {key: report.get(key) for key in _CLOSE_PREVIEW_FIELDS}
+    encoded = json.dumps(content, sort_keys=True, ensure_ascii=False,
+                         separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _make_closing_preview_token(report: dict, user_id: str) -> str:
+    return jwt.encode({
+        "purpose": "cash_close_preview",
+        "register_id": report["register_id"],
+        "operator_id": user_id,
+        "digest": _closing_preview_hash(report),
+        "exp": datetime.now(timezone.utc) + timedelta(minutes=10),
+    }, SECRET_KEY, algorithm=ALGORITHM)
+
 # Prévia do fechamento - somente leitura
 # Não encerra o caixa nem altera vendas ou pagamentos.
 
 @api_router.get("/cash-register/preview")
 async def preview_cash_register(
-    current_user: dict = Depends(require_role([UserRole.ADMIN]))
+    current_user: dict = Depends(require_role([UserRole.ADMIN, UserRole.CASHIER]))
 ):
     register = await db.cash_registers.find_one(
         {"is_open": True}, {"_id": 0}
@@ -1888,7 +1918,7 @@ async def preview_cash_register(
         }
 
 
-    return {
+    report = {
         "register_id": register["id"],
         "opened_at": opened_at,
         "generated_at": generated_at,
@@ -1910,6 +1940,9 @@ async def preview_cash_register(
         ),
         "warnings": warnings,
     }
+    report["preview_token"] = _make_closing_preview_token(report, current_user["id"])
+    return report
+
 @api_router.post("/cash-register/close")
 async def close_register(
     close_data: dict,
@@ -1928,13 +1961,41 @@ async def close_register(
 
     # Não permite fechar com comandas pendentes.
     pending = await db.orders.count_documents({
-        "is_closed": False
+        "is_closed": False,
+        "source": {"$ne": "online"},
     })
     if pending:
         raise HTTPException(
             status_code=409,
             detail=f"Existem {pending} comandas abertas"
         )
+
+    # A via provisória deve ter sido solicitada, impressa e conferida.
+    # O navegador NÃO consegue confirmar automaticamente que houve papel.
+    if close_data.get("printed_confirmed") is not True:
+        raise HTTPException(status_code=400, detail="Confirme a impressão e conferência da prévia")
+
+    preview_token = close_data.get("preview_token")
+    if not isinstance(preview_token, str) or not preview_token:
+        raise HTTPException(status_code=400, detail="Gere a prévia antes de encerrar o caixa")
+
+    try:
+        token = jwt.decode(preview_token, SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        raise HTTPException(status_code=409, detail="Prévia inválida ou expirada. Imprima novamente")
+
+    if (token.get("purpose") != "cash_close_preview"
+            or token.get("register_id") != register["id"]
+            or token.get("operator_id") != current_user["id"]):
+        raise HTTPException(status_code=409, detail="Prévia não corresponde a este caixa/operador")
+
+    # Recalcula os dados no servidor: se houve pagamento, venda, sangria,
+    # reforço ou pedido online novo, a prévia impressa fica desatualizada.
+    fresh = await preview_cash_register(current_user)
+    if token.get("digest") != _closing_preview_hash(fresh):
+        raise HTTPException(status_code=409, detail="Os valores mudaram após a impressão. Gere outra prévia")
+    if fresh.get("warnings") or fresh.get("open_orders", 0):
+        raise HTTPException(status_code=409, detail="Há inconsistências ou comandas presenciais em aberto")
 
     opened_at = register["opened_at"]
     closed_at = datetime.now(timezone.utc).isoformat()
@@ -2078,6 +2139,7 @@ async def close_register(
             name: {"orders": data["orders"], "gross": money(data["gross"])}
             for name, data in online_completed.items()
         },
+        "online_open": fresh.get("online_open", {}),
         "online_gross_total": money(sum(x["gross"] for x in online_completed.values())),
         "gross_total_all_channels": money(total_sales + sum(x["gross"] for x in online_completed.values())),
         "closed_orders": closed_orders,
@@ -2091,6 +2153,23 @@ async def close_register(
         "expected_cash": money(expected_cash),
     }
 
+    if (report["total_sales"] != fresh["total_sales"]
+            or report["expected_cash"] != fresh["expected_cash"]
+            or report["online_completed"] != fresh["online_completed"]
+            or report["payment_methods"] != fresh["payment_methods"]):
+        raise HTTPException(status_code=409, detail="Valores alterados durante o fechamento. Imprima novamente")
+
+    # Checagem final para reduzir o risco de uma movimentação concorrente
+    # entre a conferência e a gravação do relatório definitivo.
+    if await db.orders.count_documents({
+        "is_closed": False,
+        "source": {"$ne": "online"},
+    }):
+        raise HTTPException(status_code=409, detail="Nova comanda presencial aberta; reimprima a prévia")
+    latest = await preview_cash_register(current_user)
+    if token.get("digest") != _closing_preview_hash(latest):
+        raise HTTPException(status_code=409, detail="Movimentação detectada; reimprima a prévia")
+
     result = await db.cash_registers.update_one(
         {
             "id": register["id"],
@@ -2101,6 +2180,7 @@ async def close_register(
                 "is_open": False,
                 "closed_at": closed_at,
                 "closed_by": current_user.get("name"),
+                "closed_by_id": current_user.get("id"),
                 "final_amount": money(expected_cash),
                 "total_sales": money(total_sales),
                 "closing_report": report,
@@ -2119,6 +2199,34 @@ async def close_register(
         "final_amount": money(expected_cash),
         "report": report,
     }
+
+
+@api_router.get("/cash-register/last-closed/report")
+async def last_closed_cash_report(
+    current_user: dict = Depends(require_role([UserRole.ADMIN, UserRole.CASHIER]))
+):
+    closed = await db.cash_registers.find_one(
+        {"is_open": False, "closing_report": {"$exists": True}},
+        {"_id": 0, "id": 1, "closing_report": 1},
+        sort=[("closed_at", -1)],
+    )
+    if not closed:
+        raise HTTPException(status_code=404, detail="Nenhum fechamento anterior encontrado")
+    return closed["closing_report"]
+
+
+@api_router.get("/cash-register/{register_id}/closing-report")
+async def get_closed_cash_report(
+    register_id: str,
+    current_user: dict = Depends(require_role([UserRole.ADMIN, UserRole.CASHIER]))
+):
+    closed = await db.cash_registers.find_one(
+        {"id": register_id, "is_open": False},
+        {"_id": 0, "closing_report": 1},
+    )
+    if not closed or not closed.get("closing_report"):
+        raise HTTPException(status_code=404, detail="Fechamento ainda não disponível")
+    return closed["closing_report"]
 
 
 @api_router.post("/cash-register/withdrawal")
@@ -3122,5 +3230,4 @@ async def shutdown_db_client():
 # Wrap FastAPI with Socket.IO for combined HTTP + WebSocket ASGI app
 # This is the final app object that uvicorn will serve
 app = socketio.ASGIApp(sio, other_asgi_app=app)
-
 
