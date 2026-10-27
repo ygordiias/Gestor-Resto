@@ -272,13 +272,16 @@ function printCashPreview(report, paperWidth, receiptWindow) {
   `;
 
   const methods = report.payment_methods || {};
+  const isFinal = Boolean(report.closed_at);
+  const dateLabel = isFinal ? 'Encerramento' : 'Consulta';
+  const dateValue = report.closed_at || report.generated_at;
 
   const html = `
     <!doctype html>
     <html lang="pt-BR">
     <head>
       <meta charset="utf-8" />
-      <title>Prévia do fechamento - EMAÚS</title>
+      <title>${isFinal ? 'Fechamento definitivo' : 'Prévia do fechamento'} - EMAÚS</title>
       <style>
         @page {
           size: ${width} auto;
@@ -330,14 +333,15 @@ function printCashPreview(report, paperWidth, receiptWindow) {
     <body>
       <h1>EMAÚS</h1>
       <h2>HAMBURGUERIA & RESTAURANTE</h2>
-      <p><strong>PRÉVIA DO FECHAMENTO</strong></p>
-      <p>CAIXA NÃO ENCERRADO</p>
+      <p><strong>${isFinal ? 'FECHAMENTO DEFINITIVO' : 'PRÉVIA DO FECHAMENTO'}</strong></p>
+      <p>${isFinal ? 'CAIXA ENCERRADO - VIA PARA ARQUIVO' : 'CAIXA NÃO ENCERRADO'}</p>
 
       <div class="line"></div>
 
       <p>Caixa: ${escapeReceipt(report.register_id || '-')}</p>
       <p>Abertura: ${escapeReceipt(new Date(report.opened_at).toLocaleString('pt-BR'))}</p>
-      <p>Consulta: ${escapeReceipt(new Date(report.generated_at).toLocaleString('pt-BR'))}</p>
+      <p>${dateLabel}: ${escapeReceipt(dateValue ? new Date(dateValue).toLocaleString('pt-BR') : '-')}</p>
+      ${isFinal ? `<p>Operador: ${escapeReceipt(report.closed_by || '-')}</p>` : ''}
 
       <div class="line"></div>
 
@@ -444,8 +448,8 @@ ${row('Troco considerado', report.total_change)}
 
       <div class="line"></div>
 
-      <p>Conferência parcial, não fiscal.</p>
-      <p>Não altera nem encerra o caixa.</p>
+      <p>${isFinal ? 'Relatório definitivo salvo no sistema.' : 'Conferência parcial, não fiscal.'}</p>
+      <p>${isFinal ? 'Reimpressão permitida. Documento não fiscal.' : 'Não altera nem encerra o caixa.'}</p>
 
       ${
 
@@ -623,78 +627,153 @@ export default function CashierPage() {
     }
   };
 
-  const handleCloseRegister = async () => {
-    if (orders.length > 0) {
-      toast.error('Feche todas as comandas antes de fechar o caixa');
-      return;
-    }
+  // Fluxo em duas etapas: imprime/conferência -> confirmação -> fechamento.
+  // window.print() NÃO comprova que a impressora realmente imprimiu.
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [closeFlowBusy, setCloseFlowBusy] = useState(false);
+  const [preparedClosing, setPreparedClosing] = useState(null);
+  const [printConfirmed, setPrintConfirmed] = useState(false);
 
-    try {
-      const result = await cashRegisterAPI.close({ closed_by: 'Operador' });
-      toast.success(`Caixa fechado! Valor final: ${formatCurrency(result.data.final_amount)}`);
-      fetchData();
-    } catch (error) {
-      toast.error('Erro ao fechar caixa');
-    }
-  };
-const [previewLoading, setPreviewLoading] = useState(false);
-
-const handleCashPreview = async () => {
-  if (previewLoading) return;
-
-  const receiptWindow = window.open(
-    '',
-    '_blank',
-    'width=450,height=650'
-  );
-
-  if (!receiptWindow) {
-    toast.error('Permita pop-ups para imprimir a prévia.');
-    return;
-  }
-
-  receiptWindow.document.write(
-    '<p>Preparando prévia do fechamento...</p>'
-  );
-
-  setPreviewLoading(true);
-
-  try {
+  const fetchCashReport = async (path) => {
     const response = await fetch(
-      `${process.env.REACT_APP_BACKEND_URL}/api/cash-register/preview`,
-      {
-        headers: {
-          Authorization: `Bearer ${localStorage.getItem('token')}`
-        }
-      }
+      `${process.env.REACT_APP_BACKEND_URL}/api${path}`,
+      { headers: { Authorization: `Bearer ${localStorage.getItem('token')}` } }
     );
-
+    const body = await response.json().catch(() => ({}));
     if (!response.ok) {
-      const body = await response.json().catch(() => ({}));
-
       throw new Error(
         typeof body.detail === 'string'
           ? body.detail
-          : 'Não foi possível consultar a prévia'
+          : body.detail?.message || 'Erro ao consultar relatório do caixa'
       );
     }
+    return body;
+  };
 
-    const report = await response.json();
-
-    printCashPreview(report, paperWidth, receiptWindow);
-
-    if (report.warnings?.length) {
-      toast.warning(
-        'Prévia com inconsistências: confira o comprovante.'
-      );
+  const openReceiptWindow = () => {
+    const receiptWindow = window.open('', '_blank', 'width=450,height=650');
+    if (!receiptWindow) {
+      toast.error('Pop-up bloqueado. Permita a impressão para este site.');
+      return null;
     }
-  } catch (error) {
-    receiptWindow.close();
-    toast.error(error.message || 'Erro ao gerar prévia');
-  } finally {
-    setPreviewLoading(false);
-  }
-};
+    receiptWindow.document.write('<p>Preparando comprovante...</p>');
+    return receiptWindow;
+  };
+
+  const handleCashPreview = async () => {
+    if (previewLoading || closeFlowBusy) return;
+    const receiptWindow = openReceiptWindow();
+    if (!receiptWindow) return;
+    setPreviewLoading(true);
+    try {
+      const report = await fetchCashReport('/cash-register/preview');
+      printCashPreview(report, paperWidth, receiptWindow);
+      if (report.warnings?.length) {
+        toast.warning('A prévia contém inconsistências. Confira os valores.');
+      }
+    } catch (error) {
+      receiptWindow.close();
+      toast.error(error.message || 'Erro ao gerar prévia');
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
+  // O primeiro clique em "Fechar Caixa" SOMENTE abre a prévia para impressão.
+  const handleCloseRegister = async () => {
+    if (closeFlowBusy || previewLoading) return;
+    if (orders.some(order => !isOnlineOrder(order))) {
+      toast.error('Finalize as comandas presenciais antes de fechar o caixa.');
+      return;
+    }
+
+    const receiptWindow = openReceiptWindow();
+    if (!receiptWindow) return; // pop-up bloqueado -> não fecha
+
+    setCloseFlowBusy(true);
+    setPreparedClosing(null);
+    setPrintConfirmed(false);
+    try {
+      const report = await fetchCashReport('/cash-register/preview');
+      if (report.open_orders > 0 || report.warnings?.length) {
+        throw new Error('Fechamento bloqueado: comandas presenciais abertas ou pagamentos inconsistentes.');
+      }
+      if (!report.preview_token) {
+        throw new Error('Backend sem proteção de prévia: não é seguro fechar o caixa.');
+      }
+      printCashPreview(report, paperWidth, receiptWindow);
+      setPreparedClosing(report);
+    } catch (error) {
+      receiptWindow.close();
+      toast.error(error.message || 'Não foi possível preparar o fechamento');
+    } finally {
+      setCloseFlowBusy(false);
+    }
+  };
+
+  // O operador marca manualmente que a via saiu e foi conferida.
+  const confirmCloseRegister = async () => {
+    if (!preparedClosing || !printConfirmed || closeFlowBusy) return;
+    // Abre ANTES da chamada assíncrona para não ser bloqueado pelo navegador.
+    const finalWindow = openReceiptWindow();
+    if (!finalWindow) return; // não encerra sem janela de impressão disponível
+
+    const targetRegisterId = preparedClosing.register_id;
+    setCloseFlowBusy(true);
+    try {
+      const result = await cashRegisterAPI.close({
+        preview_token: preparedClosing.preview_token,
+        printed_confirmed: true,
+      });
+      const finalReport = result.data.report;
+      if (!finalReport || !finalReport.closed_at) {
+        throw new Error('Caixa encerrou, mas o relatório final não foi retornado. Use Reimprimir.');
+      }
+      printCashPreview(finalReport, paperWidth, finalWindow);
+      setPreparedClosing(null);
+      setPrintConfirmed(false);
+      toast.success('Caixa encerrado. Comprovante salvo para reimpressão.');
+      await fetchData();
+    } catch (error) {
+      // Se a conexão caiu após o POST, o servidor pode ter fechado o caixa.
+      // Nunca repetir o POST sem antes consultar o registro salvo.
+      try {
+        const saved = await fetchCashReport(
+          `/cash-register/${encodeURIComponent(targetRegisterId)}/closing-report`
+        );
+        printCashPreview(saved, paperWidth, finalWindow);
+        setPreparedClosing(null);
+        setPrintConfirmed(false);
+        toast.success('Fechamento localizado no histórico e comprovante recuperado.');
+        await fetchData();
+      } catch (lookupError) {
+        finalWindow.close();
+        setPreparedClosing(null);
+        setPrintConfirmed(false);
+        toast.error(
+          error.response?.data?.detail?.message ||
+          error.response?.data?.detail ||
+          error.message ||
+          'Não foi possível confirmar o encerramento. Verifique o caixa antes de tentar novamente.'
+        );
+      }
+    } finally {
+      setCloseFlowBusy(false);
+    }
+  };
+
+  const handleReprintLastClose = async () => {
+    const receiptWindow = openReceiptWindow();
+    if (!receiptWindow) return;
+    try {
+      const report = await fetchCashReport('/cash-register/last-closed/report');
+      printCashPreview(report, paperWidth, receiptWindow);
+    } catch (error) {
+      receiptWindow.close();
+      toast.error(error.message || 'Não foi possível recuperar o fechamento');
+    }
+  };
+
   const handleWithdrawal = async () => {
     if (!movementAmount || !movementReason) {
       toast.error('Preencha valor e motivo');
@@ -1031,6 +1110,16 @@ const handleCashPreview = async () => {
               >
                 Abrir Caixa
               </Button>
+              <Button
+                type="button"
+                variant="outline"
+                className="w-full"
+                onClick={handleReprintLastClose}
+                data-testid="reprint-closed-register-btn"
+              >
+                <Receipt className="h-4 w-4 mr-2" />
+                Reimprimir último fechamento
+              </Button>
             </CardContent>
           </Card>
         </div>
@@ -1276,6 +1365,14 @@ const handleCashPreview = async () => {
                     </div>
                   </div>
 
+                  {isOnlineOrder(selectedOrder) ? (
+                    <div className="rounded border border-blue-500/30 bg-blue-500/5 p-3 text-sm">
+                      <strong>Pagamento via plataforma</strong>
+                      <p>Valor bruto: {formatCurrency(selectedOrder.total)}</p>
+                      <p>Não registrar dinheiro, PIX ou cartão do caixa. Aguardando repasse.</p>
+                    </div>
+                  ) : (
+                    <>
                   {/* Formas de pagamento */}
                   <div className="space-y-2">
                     <Label className="text-sm">Pagamento</Label>
@@ -1323,6 +1420,8 @@ const handleCashPreview = async () => {
                         )}
                       </span>
                     </div>
+                  )}
+                    </>
                   )}
                   {/* Impressão térmica da pré-conta */}
                   <div className="space-y-2 rounded-lg border p-3">
@@ -1556,13 +1655,23 @@ const handleCashPreview = async () => {
                       variant="outline"
                       className="w-full text-sm"
                       onClick={handleCashPreview}
-                      disabled={previewLoading}
+                      disabled={previewLoading || closeFlowBusy}
                       data-testid="preview-register-btn"
                     >
                       <Receipt className="h-4 w-4 mr-2" />
                       {previewLoading
                         ? 'Preparando prévia...'
-                        : 'Prévia do Fechamento (Admin)'}
+                        : 'Prévia do Fechamento'}
+                    </Button>
+
+                    <Button
+                      variant="outline"
+                      className="w-full text-sm"
+                      onClick={handleReprintLastClose}
+                      data-testid="reprint-last-register-btn"
+                    >
+                      <Receipt className="h-4 w-4 mr-2" />
+                      Reimprimir último fechamento
                     </Button>
 
                     {/* Fechamento definitivo do caixa */}
@@ -1570,6 +1679,7 @@ const handleCashPreview = async () => {
                       variant="destructive"
                       className="w-full text-sm"
                       onClick={handleCloseRegister}
+                      disabled={previewLoading || closeFlowBusy}
                       data-testid="close-register-btn"
                     >
                       Fechar Caixa
@@ -1581,6 +1691,62 @@ const handleCashPreview = async () => {
           </div>
         </div>
       </div>
+
+      {/* Confirmar a impressão ANTES de encerrar efetivamente o caixa */}
+      <Dialog
+        open={Boolean(preparedClosing)}
+        onOpenChange={(open) => {
+          if (!open && !closeFlowBusy) {
+            setPreparedClosing(null);
+            setPrintConfirmed(false);
+          }
+        }}
+      >
+        <DialogContent className="max-w-md" data-testid="confirm-close-register-dialog">
+          <DialogHeader>
+            <DialogTitle>Confirmar fechamento do caixa</DialogTitle>
+            <DialogDescription>
+              A prévia foi enviada à impressão. O caixa AINDA está aberto.
+              Confira o papel e os valores antes de encerrar.
+            </DialogDescription>
+          </DialogHeader>
+          {preparedClosing && (
+            <div className="space-y-3 text-sm">
+              <p><strong>Vendas presenciais:</strong> {formatCurrency(preparedClosing.total_sales)}</p>
+              <p><strong>Dinheiro esperado na gaveta:</strong> {formatCurrency(preparedClosing.expected_cash)}</p>
+              <p><strong>Comandas presenciais abertas:</strong> {preparedClosing.open_orders}</p>
+              <label className="flex items-start gap-2 cursor-pointer rounded border p-3">
+                <input
+                  type="checkbox"
+                  className="mt-1"
+                  checked={printConfirmed}
+                  onChange={(event) => setPrintConfirmed(event.target.checked)}
+                  disabled={closeFlowBusy}
+                  data-testid="print-confirmed-checkbox"
+                />
+                <span>Confirmei que o comprovante foi impresso e conferi os valores.</span>
+              </label>
+              <p className="text-xs text-muted-foreground">
+                Se a impressão falhou, cancele. Nenhum fechamento será realizado.
+              </p>
+            </div>
+          )}
+          <DialogFooter className="gap-2">
+            <Button variant="outline" disabled={closeFlowBusy}
+              onClick={() => { setPreparedClosing(null); setPrintConfirmed(false); }}>
+              Cancelar (manter caixa aberto)
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={confirmCloseRegister}
+              disabled={!printConfirmed || closeFlowBusy}
+              data-testid="confirm-register-close-btn"
+            >
+              {closeFlowBusy ? 'Encerrando...' : 'Confirmar e encerrar caixa'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Dialog: Novo Pedido Online */}
       <Dialog open={onlineDialogOpen} onOpenChange={setOnlineDialogOpen}>
