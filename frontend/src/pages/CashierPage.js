@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import Layout from '../components/Layout';
+import FinancialModulesPanel from '../components/FinancialModulesPanel';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
@@ -1122,6 +1123,7 @@ export default function CashierPage() {
               </Button>
             </CardContent>
           </Card>
+          <FinancialModulesPanel />        
         </div>
       </Layout>
     );
@@ -1132,6 +1134,7 @@ export default function CashierPage() {
         className="space-y-4 sm:space-y-6"
         data-testid="cashier-page"
       >
+        <FinancialModulesPanel />
 
         {/* CABEÇALHO OPERACIONAL DO CAIXA */}
         {/* Informações financeiras ocultas dos clientes */}
