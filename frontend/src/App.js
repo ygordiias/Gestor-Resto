@@ -25,6 +25,8 @@ import CMVReportPage from './pages/CMVReportPage';
 import ProductionPage from './pages/ProductionPage';
 import ClienteApp from './cliente/ClienteApp';
 import GrillPage from './pages/GrillPage';
+import TasksPage from './pages/TasksPage';
+import InvoiceHistoryPage from './pages/InvoiceHistoryPage';
 
 // Protected Route Component
 function ProtectedRoute({ children, allowedRoles }) {
@@ -83,7 +85,7 @@ function AppRoutes() {
       <Route path="/cliente/*" element={<ClienteApp />} />
 
       <Route path="/login" element={<LoginPage />} />
-      
+
       <Route
         path="/dashboard"
         element={
@@ -92,7 +94,7 @@ function AppRoutes() {
           </ProtectedRoute>
         }
       />
-      
+
       <Route
         path="/tables"
         element={
@@ -101,7 +103,7 @@ function AppRoutes() {
           </ProtectedRoute>
         }
       />
-      
+
       <Route
         path="/order/:tableId"
         element={
@@ -110,7 +112,7 @@ function AppRoutes() {
           </ProtectedRoute>
         }
       />
-      
+
       <Route
         path="/kitchen"
         element={
@@ -119,7 +121,7 @@ function AppRoutes() {
           </ProtectedRoute>
         }
       />
-      
+
       <Route
         path="/bar"
         element={
@@ -128,7 +130,7 @@ function AppRoutes() {
           </ProtectedRoute>
         }
       />
-      
+
       <Route
         path="/cashier"
         element={
@@ -137,7 +139,7 @@ function AppRoutes() {
           </ProtectedRoute>
         }
       />
-      
+
       <Route
         path="/menu"
         element={
@@ -146,7 +148,7 @@ function AppRoutes() {
           </ProtectedRoute>
         }
       />
-      
+
       <Route
         path="/stock"
         element={
@@ -155,7 +157,7 @@ function AppRoutes() {
           </ProtectedRoute>
         }
       />
-      
+
       <Route
         path="/reports"
         element={
@@ -164,7 +166,7 @@ function AppRoutes() {
           </ProtectedRoute>
         }
       />
-      
+
       <Route
         path="/users"
         element={
@@ -173,7 +175,7 @@ function AppRoutes() {
           </ProtectedRoute>
         }
       />
-      
+
       <Route
         path="/invoices"
         element={
@@ -182,7 +184,7 @@ function AppRoutes() {
           </ProtectedRoute>
         }
       />
-      
+
       <Route
         path="/settings"
         element={
@@ -240,13 +242,35 @@ function AppRoutes() {
         }
       />
       <Route
-  path="/grill"
-  element={
-    <ProtectedRoute allowedRoles={['admin', 'kitchen']}>
-      <GrillPage />
-    </ProtectedRoute>
-  }
-/>
+        path="/grill"
+        element={
+          <ProtectedRoute allowedRoles={['admin', 'kitchen']}>
+            <GrillPage />
+          </ProtectedRoute>
+        }
+      />
+
+      {/* Gestão de tarefas por setor */}
+      <Route
+        path="/tasks"
+        element={
+          <ProtectedRoute allowedRoles={['admin', 'cashier', 'waiter', 'kitchen', 'bar']}>
+            <TasksPage />
+          </ProtectedRoute>
+        }
+      />
+
+      {/* Histórico completo de notas fiscais */}
+      <Route
+        path="/invoices/history"
+        element={
+          <ProtectedRoute allowedRoles={['admin', 'cashier']}>
+            <InvoiceHistoryPage />
+          </ProtectedRoute>
+        }
+      />
+
+      {/* Rotas padrão no final */}
       <Route path="/" element={<Navigate to={getDefaultRoute()} replace />} />
       <Route path="*" element={<Navigate to={getDefaultRoute()} replace />} />
     </Routes>
