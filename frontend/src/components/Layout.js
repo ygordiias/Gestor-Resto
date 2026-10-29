@@ -46,6 +46,8 @@ const adminNavigation = [
   { name: 'Relatórios', href: '/reports', icon: BarChart3 },
   { name: 'Usuários', href: '/users', icon: Users },
   { name: 'Notas Fiscais', href: '/invoices', icon: FileText },
+  { name: 'Histórico de Notas', href: '/invoices/history', icon: FileText },
+  { name: 'Tarefas', href: '/tasks', icon: ClipboardList },
   {
     name: 'Fichas Tecnicas',
     href: '/technical-sheets',
@@ -60,6 +62,7 @@ const navigation = {
 
   waiter: [
     { name: 'Mesas', href: '/tables', icon: UtensilsCrossed },
+    { name: 'Tarefas', href: '/tasks', icon: ClipboardList },
     {
       name: 'Fichas Tecnicas',
       href: '/technical-sheets',
@@ -69,6 +72,8 @@ const navigation = {
 
   cashier: [
     { name: 'Caixa', href: '/cashier', icon: CreditCard },
+    { name: 'Tarefas', href: '/tasks', icon: ClipboardList },
+    { name: 'Histórico de Notas', href: '/invoices/history', icon: FileText },
     { name: 'Mesas', href: '/tables', icon: UtensilsCrossed },
     { name: 'Notas Fiscais', href: '/invoices', icon: FileText },
     {
@@ -80,6 +85,7 @@ const navigation = {
 
   kitchen: [
     { name: 'Cozinha', href: '/kitchen', icon: ChefHat },
+    { name: 'Tarefas', href: '/tasks', icon: ClipboardList },
     {
       name: 'Fichas Tecnicas',
       href: '/technical-sheets',
@@ -89,6 +95,7 @@ const navigation = {
 
   bar: [
     { name: 'Bar', href: '/bar', icon: Wine },
+    { name: 'Tarefas', href: '/tasks', icon: ClipboardList },
     {
       name: 'Fichas Tecnicas',
       href: '/technical-sheets',
@@ -531,4 +538,3 @@ export default function Layout({ children, title }) {
     </div>
   );
 }
-
