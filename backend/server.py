@@ -2927,6 +2927,186 @@ async def save_settings(data: dict, current_user: dict = Depends(require_role([U
         await db.settings.update_one({"_id": "fiscal"}, {"$set": data["fiscal"]}, upsert=True)
     return {"message": "Configurações salvas"}
 
+# ==================== TAREFAS OPERACIONAIS ====================
+# Gestor Resto - Tarefas e checklists
+# Colecao MongoDB: operations_tasks
+
+@api_router.get("/operations/tasks")
+async def list_operation_tasks(
+    sector: Optional[str] = None,
+    task_status: Optional[str] = Query(None, alias="status"),
+    current_user: dict = Depends(get_current_user)
+):
+    query = {}
+
+    if sector and sector.lower() not in ("all", "todos"):
+        query["sector"] = sector
+
+    if task_status and task_status.lower() not in ("all", "todos"):
+        query["status"] = task_status
+
+    return await db.operations_tasks.find(
+        query, {"_id": 0}
+    ).sort("created_at", -1).to_list(2000)
+
+
+@api_router.post("/operations/tasks", status_code=201)
+async def create_operation_task(
+    data: dict,
+    current_user: dict = Depends(
+        require_role([UserRole.ADMIN])
+    )
+):
+    name = data.get("name") or data.get("title")
+
+    if not isinstance(name, str) or not name.strip():
+        raise HTTPException(
+            status_code=422,
+            detail="Informe o nome da tarefa"
+        )
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    # Preserva os campos enviados pelo frontend.
+    protected = {
+        "id", "_id", "status", "created_at",
+        "updated_at", "completed_at",
+        "completed_by_id", "completed_by_name",
+        "created_by_id", "created_by_name"
+    }
+
+    task = {
+        k: v for k, v in data.items()
+        if k not in protected
+        and not k.startswith("$")
+        and "." not in k
+    }
+
+    task.update({
+        "id": str(uuid.uuid4()),
+        "name": name.strip(),
+        "title": name.strip(),
+        "status": "pending",
+        "created_at": now,
+        "updated_at": now,
+        "created_by_id": current_user["id"],
+        "created_by_name": current_user.get("name", "")
+    })
+
+    await db.operations_tasks.insert_one(task.copy())
+
+    return task
+
+
+@api_router.put("/operations/tasks/{task_id}")
+@api_router.patch("/operations/tasks/{task_id}")
+async def update_operation_task(
+    task_id: str,
+    data: dict,
+    current_user: dict = Depends(
+        require_role([UserRole.ADMIN])
+    )
+):
+    protected = {
+        "id", "_id", "status", "created_at",
+        "created_by_id", "created_by_name",
+        "completed_at", "completed_by_id",
+        "completed_by_name"
+    }
+
+    update = {
+        k: v for k, v in data.items()
+        if k not in protected
+        and not k.startswith("$")
+        and "." not in k
+    }
+
+    if "name" in update or "title" in update:
+        name = update.get("name") or update.get("title")
+        if not isinstance(name, str) or not name.strip():
+            raise HTTPException(
+                status_code=422,
+                detail="Nome da tarefa inválido"
+            )
+        update["name"] = name.strip()
+        update["title"] = name.strip()
+
+    if not update:
+        raise HTTPException(
+            status_code=400,
+            detail="Nenhum campo para atualizar"
+        )
+
+    update["updated_at"] = datetime.now(
+        timezone.utc
+    ).isoformat()
+
+    result = await db.operations_tasks.update_one(
+        {"id": task_id},
+        {"$set": update}
+    )
+
+    if result.matched_count == 0:
+        raise HTTPException(
+            status_code=404,
+            detail="Tarefa não encontrada"
+        )
+
+    return await db.operations_tasks.find_one(
+        {"id": task_id}, {"_id": 0}
+    )
+
+
+@api_router.patch("/operations/tasks/{task_id}/complete")
+async def complete_operation_task(
+    task_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    now = datetime.now(timezone.utc).isoformat()
+
+    result = await db.operations_tasks.update_one(
+        {"id": task_id, "status": {"$ne": "completed"}},
+        {"$set": {
+            "status": "completed",
+            "completed_at": now,
+            "completed_by_id": current_user["id"],
+            "completed_by_name": current_user.get("name", ""),
+            "updated_at": now
+        }}
+    )
+
+    task = await db.operations_tasks.find_one(
+        {"id": task_id}, {"_id": 0}
+    )
+
+    if not task:
+        raise HTTPException(
+            status_code=404,
+            detail="Tarefa não encontrada"
+        )
+
+    return task
+
+
+@api_router.delete("/operations/tasks/{task_id}")
+async def delete_operation_task(
+    task_id: str,
+    current_user: dict = Depends(
+        require_role([UserRole.ADMIN])
+    )
+):
+    result = await db.operations_tasks.delete_one(
+        {"id": task_id}
+    )
+
+    if result.deleted_count == 0:
+        raise HTTPException(
+            status_code=404,
+            detail="Tarefa não encontrada"
+        )
+
+    return {"message": "Tarefa excluída com sucesso"}
+
 # ==================== SETUP ====================
 @api_router.get("/")
 async def root():
