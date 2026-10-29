@@ -10,7 +10,13 @@ from zoneinfo import ZoneInfo
 import re
 import uuid
 
-from fastapi import Depends, HTTPException, Query
+from fastapi import Depends, HTTPException, Query, UploadFile, File, Form
+from fastapi.responses import Response
+from motor.motor_asyncio import AsyncIOMotorGridFSBucket
+from bson import ObjectId
+from bson.errors import InvalidId
+from gridfs.errors import NoFile
+from typing import Literal
 from pydantic import BaseModel, Field
 from pymongo import ASCENDING, DESCENDING
 
@@ -20,6 +26,8 @@ STAFF_SECTOR = {'kitchen': 'kitchen', 'bar': 'bar', 'cashier': 'cashier', 'waite
 TASK_TYPES = {'cleaning', 'stock', 'expiry', 'oil_change', 'preparation', 'purchasing', 'maintenance', 'other'}
 FREQUENCIES = {'once', 'daily', 'weekly', 'occurrence'}
 PAYMENT_METHODS = {'cash', 'pix', 'credit', 'debit', 'card', 'voucher', 'platform'}
+MAX_PHOTO_BYTES = 6 * 1024 * 1024  # 6 MiB, inclusive on mobile
+
 
 
 def utc_now():
@@ -81,9 +89,26 @@ class TaskNote(BaseModel):
     note: str = Field(default='', max_length=500)
 
 
+class TaskReview(BaseModel):
+    action: Literal['approve', 'reject']
+    note: str = Field(default='', max_length=500)
+
+
+def detect_photo_type(data: bytes) -> str | None:
+    """Only accept image signatures we explicitly support; never SVG or HTML."""
+    if data.startswith(b'\xff\xd8\xff') and data.endswith(b'\xff\xd9'):
+        return 'image/jpeg'
+    if data.startswith(b'\x89PNG\r\n\x1a\n'):
+        return 'image/png'
+    if data.startswith(b'RIFF') and data[8:12] == b'WEBP':
+        return 'image/webp'
+    return None
+
+
 def register_operational_routes(api_router, db, require_role, UserRole):
     admin = require_role([UserRole.ADMIN])
     staff = require_role([UserRole.ADMIN, UserRole.CASHIER, UserRole.KITCHEN, UserRole.BAR, UserRole.WAITER])
+    photo_bucket = AsyncIOMotorGridFSBucket(db, bucket_name="task_evidence")
 
     def allowed(task, user):
         role = user.get('role')
@@ -114,8 +139,13 @@ def register_operational_routes(api_router, db, require_role, UserRole):
         today = now.date().isoformat()
         due = t.get('due_on')
         late = due < today or (due == today and (t.get('due_time') or '23:59') < now.strftime('%H:%M'))
+        task_status = ('done' if t.get('completed') else
+                       'inactive' if not t.get('active', True) else
+                       'pending_review' if t.get('pending_review') else
+                       'needs_correction' if (t.get('events') or [{}])[-1].get('action') == 'rejected' else
+                       'overdue' if late else 'pending')
         return {k: v for k, v in t.items() if k not in ('_id', 'events')} | {
-            'status': 'done' if t.get('completed') else ('inactive' if not t.get('active', True) else ('overdue' if late else 'pending')),
+            'status': task_status,
             'events_count': len(t.get('events', [])),
             'last_event': (t.get('events') or [None])[-1],
         }
@@ -167,6 +197,8 @@ def register_operational_routes(api_router, db, require_role, UserRole):
         # Sem apagar o histórico nem reabrir uma tarefa pontual já concluída.
         if t.get('completed') and data.active:
             raise HTTPException(status_code=409, detail='Tarefa concluída; crie uma nova para repetir')
+        if t.get('pending_review'):
+            raise HTTPException(status_code=409, detail='Aguarde a aprovação/rejeição da foto antes de editar a tarefa')
         fields = {
             'title': data.title.strip(), 'description': data.description.strip(), 'sector': data.sector,
             'task_type': data.task_type, 'frequency': data.frequency, 'due_on': data.due_on,
@@ -177,32 +209,151 @@ def register_operational_routes(api_router, db, require_role, UserRole):
         return {'message': 'Tarefa atualizada'}
 
     @api_router.post('/operations/tasks/{task_id}/complete')
-    async def complete_task(task_id: str, data: TaskNote, current_user: dict = Depends(staff)):
-        t = await db.operational_tasks.find_one({'id': task_id}, {'_id': 0})
-        if not t:
+    async def complete_task_legacy(task_id: str, data: TaskNote, current_user: dict = Depends(staff)):
+        # No bypass: all new task completions must have photographic evidence.
+        raise HTTPException(status_code=409,
+                            detail='Foto obrigatória: use a opção Concluir com foto na tela de tarefas')
+
+    @api_router.post('/operations/tasks/{task_id}/complete-photo')
+    async def submit_photo_completion(
+        task_id: str,
+        photo: UploadFile = File(...),
+        note: str = Form(default='', max_length=500),
+        current_user: dict = Depends(staff),
+    ):
+        """Submit photographic evidence for admin review; not marked complete until approved.
+
+        GridFS is persistent in the same MongoDB database; never Render local disk.
+        Access is protected on both upload and read paths.
+        """
+        task = await db.operational_tasks.find_one({'id': task_id}, {'_id': 0})
+        if not task:
             raise HTTPException(status_code=404, detail='Tarefa não encontrada')
-        if not allowed(t, current_user):
-            raise HTTPException(status_code=403, detail='Você não pode concluir tarefas de outro setor')
-        if not t.get('active') or t.get('completed'):
+        if not allowed(task, current_user):
+            raise HTTPException(status_code=403, detail='Você não pode executar tarefas deste setor')
+        if not task.get('active') or task.get('completed'):
             raise HTTPException(status_code=409, detail='Tarefa inativa ou já concluída')
-        cycle = parsed_day(t.get('due_on'), 'Vencimento')
-        freq = t.get('frequency')
-        new_due = cycle + timedelta(days=1 if freq == 'daily' else 7) if freq in ('daily', 'weekly') else None
-        event = {'id': str(uuid.uuid4()), 'action': 'completed', 'cycle_due_on': t['due_on'],
-                 'at': utc_now(), 'by_id': current_user.get('id'), 'by_name': current_user.get('name'), 'note': data.note.strip()}
-        changes = {'last_completed_at': event['at']}
-        if new_due:
-            # Se existirem dias atrasados, não os descarta: a próxima ocorrência permanece vencida.
-            changes['due_on'] = new_due.isoformat()
-        else:
-            changes['completed'] = True
+        if task.get('pending_review'):
+            raise HTTPException(status_code=409, detail='Foto já enviada; aguarde análise do administrador')
+        if len(note) > 500:
+            raise HTTPException(status_code=422, detail='Observação muito longa (máximo 500 caracteres)')
+        if photo.content_type not in {'image/jpeg', 'image/png', 'image/webp'}:
+            raise HTTPException(status_code=422, detail='Envie uma foto JPG, PNG ou WebP')
+        raw = await photo.read(MAX_PHOTO_BYTES + 1)
+        await photo.close()
+        if not raw or len(raw) > MAX_PHOTO_BYTES:
+            raise HTTPException(status_code=413, detail='Foto vazia ou maior que 6 MB')
+        content_type = detect_photo_type(raw)
+        if content_type != photo.content_type:
+            raise HTTPException(status_code=422, detail='Conteúdo não corresponde a uma foto válida')
+
+        submission_id = str(uuid.uuid4())
+        now = utc_now()
+        evidence_id = await photo_bucket.upload_from_stream(
+            f'task-{task_id}-{submission_id}', raw,
+            metadata={'task_id': task_id, 'submitted_by_id': current_user.get('id'),
+                      'submission_id': submission_id, 'content_type': content_type,
+                      'uploaded_at': now},
+        )
+        event = {'id': submission_id, 'action': 'submitted',
+                 'cycle_due_on': task['due_on'], 'at': now,
+                 'by_id': current_user.get('id'), 'by_name': current_user.get('name'),
+                 'note': note.strip(), 'photo_id': str(evidence_id),
+                 'photo_content_type': content_type}
+        pending = {'submission_id': submission_id, 'photo_id': str(evidence_id),
+                   'at': now, 'by_id': current_user.get('id'), 'by_name': current_user.get('name'),
+                   'cycle_due_on': task['due_on']}
+        try:
+            result = await db.operational_tasks.update_one(
+                {'id': task_id, 'active': True, 'completed': False, 'due_on': task['due_on'],
+                 'pending_review': {'$exists': False},
+                 'sector': task['sector'], 'assignee_id': task.get('assignee_id')},
+                {'$set': {'pending_review': pending}, '$push': {'events': event}},
+            )
+        except Exception:
+            # A gravação pode ter concluído no MongoDB mesmo se a conexão caiu
+            # antes da resposta. Não apagar a foto em caso de resultado incerto.
+            raise
+        if result.modified_count != 1:
+            try:
+                await photo_bucket.delete(evidence_id)
+            except Exception:
+                pass
+            raise HTTPException(status_code=409, detail='Tarefa atualizada por outra pessoa. Atualize a tela')
+        return {'message': 'Foto recebida! Aguardando aprovação do administrador.',
+                'submission_id': submission_id, 'status': 'pending_review'}
+
+    @api_router.get('/operations/tasks/{task_id}/photos/{photo_id}')
+    async def view_task_photo(task_id: str, photo_id: str, current_user: dict = Depends(staff)):
+        task = await db.operational_tasks.find_one({'id': task_id}, {'_id': 0})
+        if not task:
+            raise HTTPException(status_code=404, detail='Tarefa não encontrada')
+        if not allowed(task, current_user):
+            raise HTTPException(status_code=403, detail='Sem acesso à comprovação desta tarefa')
+        event = next((e for e in task.get('events', [])
+                      if e.get('action') == 'submitted' and e.get('photo_id') == photo_id), None)
+        if not event:
+            raise HTTPException(status_code=404, detail='Foto não vinculada a esta tarefa')
+        try:
+            oid = ObjectId(photo_id)
+        except (InvalidId, TypeError):
+            raise HTTPException(status_code=404, detail='Foto não encontrada')
+        try:
+            stream = await photo_bucket.open_download_stream(oid)
+            data = await stream.read()
+        except NoFile:
+            raise HTTPException(status_code=404, detail='Imagem indisponível no armazenamento')
+        ct = event.get('photo_content_type', 'image/jpeg')
+        if ct not in {'image/jpeg', 'image/png', 'image/webp'}:
+            ct = 'application/octet-stream'
+        return Response(content=data, media_type=ct, headers={
+            'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff',
+            'Content-Disposition': 'inline',
+        })
+
+    @api_router.post('/operations/tasks/{task_id}/review')
+    async def review_task_photo(task_id: str, data: TaskReview, current_user: dict = Depends(admin)):
+        task = await db.operational_tasks.find_one({'id': task_id}, {'_id': 0})
+        if not task:
+            raise HTTPException(status_code=404, detail='Tarefa não encontrada')
+        pending = task.get('pending_review')
+        if not pending or not task.get('active') or task.get('completed'):
+            raise HTTPException(status_code=409, detail='Não há foto pendente de análise')
+        if data.action == 'reject' and len(data.note.strip()) < 5:
+            raise HTTPException(status_code=422, detail='Para rejeitar, informe um motivo com 5 caracteres ou mais')
+        event = {'id': str(uuid.uuid4()), 'action': 'approved' if data.action == 'approve' else 'rejected',
+                 'related_submission_id': pending['submission_id'],
+                 'at': utc_now(), 'by_id': current_user.get('id'),
+                 'by_name': current_user.get('name'), 'cycle_due_on': pending['cycle_due_on'],
+                 'note': data.note.strip()}
+        changes = {}
+        increments = None
+        next_due = None
+        if data.action == 'approve':
+            freq = task.get('frequency')
+            cycle = parsed_day(pending['cycle_due_on'], 'Vencimento')
+            next_due = cycle + timedelta(days=1 if freq == 'daily' else 7) if freq in ('daily', 'weekly') else None
+            changes['last_completed_at'] = event['at']
+            if next_due:
+                changes['due_on'] = next_due.isoformat()
+            else:
+                changes['completed'] = True
+            increments = {'completed_count': 1}
+        update = {'$unset': {'pending_review': ''}, '$push': {'events': event}}
+        if changes:
+            update['$set'] = changes
+        if increments:
+            update['$inc'] = increments
         result = await db.operational_tasks.update_one(
-            {'id': task_id, 'active': True, 'completed': False, 'due_on': t['due_on']},
-            {'$set': changes, '$inc': {'completed_count': 1}, '$push': {'events': event}}
+            {'id': task_id, 'active': True, 'completed': False,
+             'due_on': pending['cycle_due_on'],
+             'pending_review.submission_id': pending['submission_id']}, update,
         )
         if result.modified_count != 1:
-            raise HTTPException(status_code=409, detail='Tarefa atualizada por outro operador. Atualize a tela')
-        return {'message': 'Concluída; histórico registrado', 'next_due_on': new_due.isoformat() if new_due else None}
+            raise HTTPException(status_code=409, detail='Outra pessoa alterou esta tarefa. Atualize a tela')
+        return {'message': 'Comprovação aprovada' if data.action == 'approve' else 'Comprovação rejeitada: nova foto necessária',
+                'status': 'approved' if data.action == 'approve' else 'needs_correction',
+                'next_due_on': next_due.isoformat() if next_due else None}
 
     @api_router.post('/operations/tasks/{task_id}/blocker')
     async def record_blocker(task_id: str, data: TaskNote, current_user: dict = Depends(staff)):
@@ -213,6 +364,8 @@ def register_operational_routes(api_router, db, require_role, UserRole):
             raise HTTPException(status_code=404, detail='Tarefa não encontrada ou finalizada')
         if not allowed(t, current_user):
             raise HTTPException(status_code=403, detail='Sem acesso ao setor')
+        if t.get('pending_review'):
+            raise HTTPException(status_code=409, detail='Foto em análise; aguarde a aprovação')
         event = {'id': str(uuid.uuid4()), 'action': 'blocker', 'cycle_due_on': t['due_on'],
                  'at': utc_now(), 'by_id': current_user.get('id'), 'by_name': current_user.get('name'), 'note': data.note.strip()}
         result = await db.operational_tasks.update_one({'id': task_id, 'active': True, 'completed': False, 'due_on': t['due_on']},
@@ -228,7 +381,8 @@ def register_operational_routes(api_router, db, require_role, UserRole):
             raise HTTPException(status_code=404, detail='Tarefa não encontrada')
         if not allowed(t, current_user):
             raise HTTPException(status_code=403, detail='Sem acesso')
-        return {'task_id': task_id, 'title': t['title'], 'events': list(reversed(t.get('events', [])))}
+        return {'task_id': task_id, 'title': t['title'], 'pending_review': t.get('pending_review'),
+                'events': list(reversed(t.get('events', [])))}
 
     @api_router.get('/invoices/history')
     async def invoice_history(
