@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import Layout from '../components/Layout';
+import AdvancedReportsPanel from '../components/AdvancedReportsPanel';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { Button } from '../components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
@@ -102,6 +103,7 @@ export default function ReportsPage() {
   return (
     <Layout title="Relatórios">
       <div className="space-y-6" data-testid="reports-page">
+    <AdvancedReportsPanel />
         {/* Period Selector */}
         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
           <Tabs value={period} onValueChange={setPeriod}>
