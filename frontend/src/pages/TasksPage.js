@@ -77,7 +77,17 @@ export default function TasksPage() {
     setLoading(true);
     try {
       const res = await api.get('/operations/tasks', { params: { sector, state: view } });
-      setTasks(res.data.tasks || []);
+      // Compatibilidade: algumas versões do backend devolvem um array diretamente,
+      // enquanto o módulo atualizado devolve { tasks: [...], total, today }.
+      const responseData = res.data;
+      if (Array.isArray(responseData)) {
+        setTasks(responseData);
+      } else if (responseData && Array.isArray(responseData.tasks)) {
+        setTasks(responseData.tasks);
+      } else {
+        setTasks([]);
+        toast.error('Formato inesperado na resposta da API de tarefas');
+      }
     } catch (e) { toast.error(errorText(e)); }
     finally { setLoading(false); }
   }, [sector, view]);
