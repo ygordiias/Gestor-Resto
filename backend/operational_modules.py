@@ -150,7 +150,7 @@ def register_operational_routes(api_router, db, require_role, UserRole):
             'last_event': (t.get('events') or [None])[-1],
         }
 
-    @api_router.get('/operations/photo-status')
+    @api_router.get('/operations/v2/photo-status')
     async def photo_status(current_user: dict = Depends(staff)):
         """Indica se o backend ativo possui as rotas de comprovação com foto.
 
@@ -161,13 +161,13 @@ def register_operational_routes(api_router, db, require_role, UserRole):
                 'max_photo_bytes': MAX_PHOTO_BYTES,
                 'storage': 'mongodb_gridfs', 'requires_approval': True}
 
-    @api_router.get('/operations/assignees')
+    @api_router.get('/operations/v2/assignees')
     async def task_assignees(current_user: dict = Depends(admin)):
         users = await db.users.find({'role': {'$in': ['superadmin', 'admin', 'waiter', 'cashier', 'kitchen', 'bar']}},
                                     {'_id': 0, 'id': 1, 'name': 1, 'role': 1}).sort('name', 1).to_list(300)
         return {'users': users}
 
-    @api_router.get('/operations/tasks')
+    @api_router.get('/operations/v2/tasks')
     async def list_tasks(sector: str = 'all', state: str = 'active', current_user: dict = Depends(staff)):
         if sector != 'all' and sector not in SECTORS:
             raise HTTPException(status_code=422, detail='Setor inválido')
@@ -186,7 +186,7 @@ def register_operational_routes(api_router, db, require_role, UserRole):
         docs = await db.operational_tasks.find(qry, {'_id': 0}).sort([('due_on', ASCENDING), ('due_time', ASCENDING)]).to_list(1000)
         return {'tasks': [public_task(x) for x in docs], 'total': await db.operational_tasks.count_documents(qry), 'today': br_today().isoformat()}
 
-    @api_router.post('/operations/tasks')
+    @api_router.post('/operations/v2/tasks')
     async def create_task(data: TaskCreate, current_user: dict = Depends(admin)):
         await validate_task_input(data)
         record = {
@@ -199,7 +199,7 @@ def register_operational_routes(api_router, db, require_role, UserRole):
         await db.operational_tasks.insert_one(record)
         return {'task': public_task(record)}
 
-    @api_router.put('/operations/tasks/{task_id}')
+    @api_router.put('/operations/v2/tasks/{task_id}')
     async def edit_task(task_id: str, data: TaskEdit, current_user: dict = Depends(admin)):
         await validate_task_input(data)
         t = await db.operational_tasks.find_one({'id': task_id}, {'_id': 0})
@@ -219,13 +219,13 @@ def register_operational_routes(api_router, db, require_role, UserRole):
         await db.operational_tasks.update_one({'id': task_id}, {'$set': fields})
         return {'message': 'Tarefa atualizada'}
 
-    @api_router.post('/operations/tasks/{task_id}/complete')
+    @api_router.post('/operations/v2/tasks/{task_id}/complete')
     async def complete_task_legacy(task_id: str, data: TaskNote, current_user: dict = Depends(staff)):
         # No bypass: all new task completions must have photographic evidence.
         raise HTTPException(status_code=409,
                             detail='Foto obrigatória: use a opção Concluir com foto na tela de tarefas')
 
-    @api_router.post('/operations/tasks/{task_id}/complete-photo')
+    @api_router.post('/operations/v2/tasks/{task_id}/complete-photo')
     async def submit_photo_completion(
         task_id: str,
         photo: UploadFile = File(...),
@@ -294,7 +294,7 @@ def register_operational_routes(api_router, db, require_role, UserRole):
         return {'message': 'Foto recebida! Aguardando aprovação do administrador.',
                 'submission_id': submission_id, 'status': 'pending_review'}
 
-    @api_router.get('/operations/tasks/{task_id}/photos/{photo_id}')
+    @api_router.get('/operations/v2/tasks/{task_id}/photos/{photo_id}')
     async def view_task_photo(task_id: str, photo_id: str, current_user: dict = Depends(staff)):
         task = await db.operational_tasks.find_one({'id': task_id}, {'_id': 0})
         if not task:
@@ -322,7 +322,7 @@ def register_operational_routes(api_router, db, require_role, UserRole):
             'Content-Disposition': 'inline',
         })
 
-    @api_router.post('/operations/tasks/{task_id}/review')
+    @api_router.post('/operations/v2/tasks/{task_id}/review')
     async def review_task_photo(task_id: str, data: TaskReview, current_user: dict = Depends(admin)):
         task = await db.operational_tasks.find_one({'id': task_id}, {'_id': 0})
         if not task:
@@ -366,7 +366,7 @@ def register_operational_routes(api_router, db, require_role, UserRole):
                 'status': 'approved' if data.action == 'approve' else 'needs_correction',
                 'next_due_on': next_due.isoformat() if next_due else None}
 
-    @api_router.post('/operations/tasks/{task_id}/blocker')
+    @api_router.post('/operations/v2/tasks/{task_id}/blocker')
     async def record_blocker(task_id: str, data: TaskNote, current_user: dict = Depends(staff)):
         if len(data.note.strip()) < 5:
             raise HTTPException(status_code=422, detail='Explique o motivo da pendência')
@@ -385,7 +385,7 @@ def register_operational_routes(api_router, db, require_role, UserRole):
             raise HTTPException(status_code=409, detail='Tarefa alterada por outro operador')
         return {'message': 'Motivo registrado; tarefa continua pendente'}
 
-    @api_router.get('/operations/tasks/{task_id}/history')
+    @api_router.get('/operations/v2/tasks/{task_id}/history')
     async def task_history(task_id: str, current_user: dict = Depends(staff)):
         t = await db.operational_tasks.find_one({'id': task_id}, {'_id': 0})
         if not t:
