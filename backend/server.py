@@ -3390,11 +3390,21 @@ async def get_public_order_status(codigo: str):
         "delivery_type": order.get("delivery_type"),
         "created_at": order.get("created_at"),
     }
+# Módulo financeiro: 10% e crédito dos funcionários
 from financial_modules import register_finance_routes
 register_finance_routes(api_router, db, require_role, UserRole)
-# Include router and middleware
-app.include_router(api_router)
 
+# Módulo operacional: tarefas e fotografias
+from operational_modules import register_operational_routes
+register_operational_routes(
+    api_router,
+    db,
+    require_role,
+    UserRole
+)
+
+# Registrar todas as rotas na aplicação
+app.include_router(api_router)
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
