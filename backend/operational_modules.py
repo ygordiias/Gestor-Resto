@@ -150,6 +150,17 @@ def register_operational_routes(api_router, db, require_role, UserRole):
             'last_event': (t.get('events') or [None])[-1],
         }
 
+    @api_router.get('/operations/photo-status')
+    async def photo_status(current_user: dict = Depends(staff)):
+        """Indica se o backend ativo possui as rotas de comprovação com foto.
+
+        Usado pelo frontend para impedir que um funcionário tente enviar para
+        uma versão antiga da API, que retornaria 404.
+        """
+        return {'enabled': True, 'version': 'photos-v2',
+                'max_photo_bytes': MAX_PHOTO_BYTES,
+                'storage': 'mongodb_gridfs', 'requires_approval': True}
+
     @api_router.get('/operations/assignees')
     async def task_assignees(current_user: dict = Depends(admin)):
         users = await db.users.find({'role': {'$in': ['superadmin', 'admin', 'waiter', 'cashier', 'kitchen', 'bar']}},
@@ -164,7 +175,7 @@ def register_operational_routes(api_router, db, require_role, UserRole):
             raise HTTPException(status_code=422, detail='Filtro inválido')
         qry = {}
         if state == 'active':
-            qry = {'active': True, 'completed': False}
+            qry = {'active': True, 'completed': {'$ne': True}}
         if state == 'done':
             qry = {'completed': True}
         if sector != 'all':
@@ -237,15 +248,15 @@ def register_operational_routes(api_router, db, require_role, UserRole):
             raise HTTPException(status_code=409, detail='Foto já enviada; aguarde análise do administrador')
         if len(note) > 500:
             raise HTTPException(status_code=422, detail='Observação muito longa (máximo 500 caracteres)')
-        if photo.content_type not in {'image/jpeg', 'image/png', 'image/webp'}:
-            raise HTTPException(status_code=422, detail='Envie uma foto JPG, PNG ou WebP')
+        # Alguns celulares enviam image/jpg ou application/octet-stream;
+        # validar assinatura real do arquivo (não confiar apenas no header).
         raw = await photo.read(MAX_PHOTO_BYTES + 1)
         await photo.close()
         if not raw or len(raw) > MAX_PHOTO_BYTES:
             raise HTTPException(status_code=413, detail='Foto vazia ou maior que 6 MB')
         content_type = detect_photo_type(raw)
-        if content_type != photo.content_type:
-            raise HTTPException(status_code=422, detail='Conteúdo não corresponde a uma foto válida')
+        if not content_type:
+            raise HTTPException(status_code=422, detail='Foto inválida. Use JPG, PNG ou WebP')
 
         submission_id = str(uuid.uuid4())
         now = utc_now()
@@ -265,8 +276,8 @@ def register_operational_routes(api_router, db, require_role, UserRole):
                    'cycle_due_on': task['due_on']}
         try:
             result = await db.operational_tasks.update_one(
-                {'id': task_id, 'active': True, 'completed': False, 'due_on': task['due_on'],
-                 'pending_review': {'$exists': False},
+                {'id': task_id, 'active': True, 'completed': {'$ne': True}, 'due_on': task['due_on'],
+                 '$or': [{'pending_review': {'$exists': False}}, {'pending_review': None}],
                  'sector': task['sector'], 'assignee_id': task.get('assignee_id')},
                 {'$set': {'pending_review': pending}, '$push': {'events': event}},
             )
@@ -345,7 +356,7 @@ def register_operational_routes(api_router, db, require_role, UserRole):
         if increments:
             update['$inc'] = increments
         result = await db.operational_tasks.update_one(
-            {'id': task_id, 'active': True, 'completed': False,
+            {'id': task_id, 'active': True, 'completed': {'$ne': True},
              'due_on': pending['cycle_due_on'],
              'pending_review.submission_id': pending['submission_id']}, update,
         )
@@ -368,7 +379,7 @@ def register_operational_routes(api_router, db, require_role, UserRole):
             raise HTTPException(status_code=409, detail='Foto em análise; aguarde a aprovação')
         event = {'id': str(uuid.uuid4()), 'action': 'blocker', 'cycle_due_on': t['due_on'],
                  'at': utc_now(), 'by_id': current_user.get('id'), 'by_name': current_user.get('name'), 'note': data.note.strip()}
-        result = await db.operational_tasks.update_one({'id': task_id, 'active': True, 'completed': False, 'due_on': t['due_on']},
+        result = await db.operational_tasks.update_one({'id': task_id, 'active': True, 'completed': {'$ne': True}, 'due_on': t['due_on']},
                                                         {'$push': {'events': event}})
         if result.modified_count != 1:
             raise HTTPException(status_code=409, detail='Tarefa alterada por outro operador')
