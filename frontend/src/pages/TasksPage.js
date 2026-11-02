@@ -67,7 +67,7 @@ function EvidencePhoto({ taskId, photoId }) {
     let objectUrl = null;
     setUrl(null);
     setProblem('');
-    api.get(`/operations/tasks/${taskId}/photos/${photoId}`, { responseType: 'blob', timeout: 30000 })
+    api.get(`/operations/v2/tasks/${taskId}/photos/${photoId}`, { responseType: 'blob', timeout: 30000 })
       .then(result => {
         objectUrl = URL.createObjectURL(result.data);
         if (!cancelled) setUrl(objectUrl);
@@ -112,7 +112,7 @@ export default function TasksPage() {
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await api.get('/operations/tasks', { params: { sector, state: view } });
+      const res = await api.get('/operations/v2/tasks', { params: { sector, state: view } });
       // Compatibilidade: algumas versões do backend devolvem um array diretamente,
       // enquanto o módulo atualizado devolve { tasks: [...], total, today }.
       const responseData = res.data;
@@ -129,12 +129,12 @@ export default function TasksPage() {
   }, [sector, view]);
   useEffect(() => { refresh(); }, [refresh]);
   useEffect(() => {
-    if (admin) api.get('/operations/assignees').then(r => setUsers(r.data.users || [])).catch(() => {});
+    if (admin) api.get('/operations/v2/assignees').then(r => setUsers(r.data.users || [])).catch(() => {});
   }, [admin]);
   const checkPhotoBackend = useCallback(async () => {
     try {
       // Parâmetro de verificação evita resposta antiga armazenada no service worker.
-      const result = await api.get('/operations/photo-status', {
+      const result = await api.get('/operations/v2/photo-status', {
         params: { check: Date.now() },
         headers: { 'Cache-Control': 'no-cache' },
         timeout: 15000,
@@ -172,8 +172,8 @@ export default function TasksPage() {
     setSaving(true);
     try {
       const payload = { ...form, assignee_id: form.assignee_id || null };
-      if (editingId) await api.put(`/operations/tasks/${editingId}`, payload);
-      else await api.post('/operations/tasks', payload);
+      if (editingId) await api.put(`/operations/v2/tasks/${editingId}`, payload);
+      else await api.post('/operations/v2/tasks', payload);
       toast.success(editingId ? 'Tarefa atualizada' : 'Tarefa criada');
       setFormOpen(false); await refresh();
     } catch (err) { toast.error(errorText(err)); }
@@ -207,7 +207,7 @@ export default function TasksPage() {
       // Assim não usamos o Content-Type application/json do axios global.
       const base = String(api.defaults.baseURL || '').replace(/\/$/, '');
       if (!base) throw new Error('Endereço da API não configurado no frontend.');
-      const endpoint = `${base}/operations/tasks/${encodeURIComponent(photoTask.id)}/complete-photo`;
+      const endpoint = `${base}/operations/v2/tasks/${encodeURIComponent(photoTask.id)}/complete-photo`;
       const response = await fetch(endpoint, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
@@ -247,7 +247,7 @@ export default function TasksPage() {
     if (action === 'approve' && !window.confirm('Você conferiu a foto e deseja aprovar esta tarefa?')) return;
     setReviewBusy(true);
     try {
-      await api.post(`/operations/tasks/${events.task_id}/review`, { action, note: note || '' });
+      await api.post(`/operations/v2/tasks/${events.task_id}/review`, { action, note: note || '' });
       toast.success(action === 'approve' ? 'Comprovação aprovada' : 'Solicitada nova foto ao funcionário');
       setEvents(null);
       await refresh();
@@ -258,12 +258,12 @@ export default function TasksPage() {
     const reason = window.prompt('Por que esta tarefa não foi concluída? (mínimo 5 caracteres)');
     if (reason === null) return;
     try {
-      await api.post(`/operations/tasks/${task.id}/blocker`, { note: reason.trim() });
+      await api.post(`/operations/v2/tasks/${task.id}/blocker`, { note: reason.trim() });
       toast.success('Motivo salvo. A tarefa continua pendente'); await refresh();
     } catch (e) { toast.error(errorText(e)); }
   };
   const history = async (task) => {
-    try { const r = await api.get(`/operations/tasks/${task.id}/history`); setEvents(r.data); }
+    try { const r = await api.get(`/operations/v2/tasks/${task.id}/history`); setEvents(r.data); }
     catch (e) { toast.error(errorText(e)); }
   };
   return (
