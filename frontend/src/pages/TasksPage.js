@@ -24,6 +24,40 @@ const fmt = (s) => { try { return new Date(s).toLocaleString('pt-BR', { timeZone
 const statusClass = (s) => s === 'overdue' || s === 'needs_correction' ? 'bg-red-100 text-red-800' : s === 'done' ? 'bg-green-100 text-green-800' : s === 'pending_review' ? 'bg-blue-100 text-blue-800' : 'bg-amber-100 text-amber-900';
 const statusText = { overdue: 'Vencida', pending: 'Pendente', done: 'Concluída', inactive: 'Inativa', pending_review: 'Foto aguardando aprovação', needs_correction: 'Refazer comprovação' };
 const MAX_PHOTO = 6 * 1024 * 1024;
+const MAX_CAPTURE = 25 * 1024 * 1024;
+
+/** Reduz fotos grandes para caber no limite do backend e remove metadados EXIF. */
+async function optimizePhoto(file) {
+  if (!file || !file.type.startsWith('image/')) throw new Error('Selecione uma foto válida.');
+  if (file.size > MAX_CAPTURE) throw new Error('Foto muito grande (limite de 25 MB antes da compactação).');
+  if (file.size <= MAX_PHOTO && ['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+    return file;
+  }
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    const img = new window.Image();
+    await new Promise((resolve, reject) => {
+      img.onload = resolve;
+      img.onerror = () => reject(new Error('Não foi possível abrir a foto. Use a câmera no modo JPEG ou selecione JPG/PNG/WebP.'));
+      img.src = objectUrl;
+    });
+    const scale = Math.min(1, 1600 / Math.max(img.naturalWidth, img.naturalHeight));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
+    canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('Não foi possível preparar a imagem neste navegador.');
+    context.fillStyle = '#ffffff';
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(img, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.82));
+    if (!blob || blob.size > MAX_PHOTO) throw new Error('A fotografia ainda ficou acima de 6 MB. Use uma imagem menor.');
+    return new File([blob], 'comprovacao-tarefa.jpg', { type: 'image/jpeg' });
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
 
 function EvidencePhoto({ taskId, photoId }) {
   const [url, setUrl] = useState(null);
@@ -64,6 +98,8 @@ export default function TasksPage() {
   const [photoFile, setPhotoFile] = useState(null);
   const [photoNote, setPhotoNote] = useState('');
   const [photoSending, setPhotoSending] = useState(false);
+  const [photoError, setPhotoError] = useState('');
+  const [photoBackend, setPhotoBackend] = useState({ checked: false, ready: false, detail: '' });
   const [reviewBusy, setReviewBusy] = useState(false);
   const [photoPreview, setPhotoPreview] = useState(null);
   useEffect(() => {
@@ -95,6 +131,31 @@ export default function TasksPage() {
   useEffect(() => {
     if (admin) api.get('/operations/assignees').then(r => setUsers(r.data.users || [])).catch(() => {});
   }, [admin]);
+  const checkPhotoBackend = useCallback(async () => {
+    try {
+      // Parâmetro de verificação evita resposta antiga armazenada no service worker.
+      const result = await api.get('/operations/photo-status', {
+        params: { check: Date.now() },
+        headers: { 'Cache-Control': 'no-cache' },
+        timeout: 15000,
+      });
+      if (result.data?.enabled === true && result.data?.version === 'photos-v2') {
+        setPhotoBackend({ checked: true, ready: true, detail: '' });
+      } else {
+        setPhotoBackend({ checked: true, ready: false, detail: 'A API respondeu, mas o módulo de fotos não está na versão esperada.' });
+      }
+    } catch (err) {
+      const st = err.response?.status;
+      const detail = st === 404
+        ? 'Rota de fotos não encontrada (404). O backend de fotos ainda não está publicado neste servidor.'
+        : st === 401 ? 'Sessão expirada. Faça login novamente.'
+        : st === 403 ? 'Seu perfil não tem permissão para acessar as fotos.'
+        : `Não foi possível verificar o backend de fotos${st ? ` (HTTP ${st})` : ''}.`;
+      setPhotoBackend({ checked: true, ready: false, detail });
+    }
+  }, []);
+  useEffect(() => { checkPhotoBackend(); }, [checkPhotoBackend]);
+
   const counts = useMemo(() => ({ pending: tasks.filter(t => t.status === 'pending').length,
     overdue: tasks.filter(t => t.status === 'overdue' || t.status === 'needs_correction').length,
     reviewing: tasks.filter(t => t.status === 'pending_review').length }), [tasks]);
@@ -122,25 +183,59 @@ export default function TasksPage() {
     setPhotoTask(task);
     setPhotoFile(null);
     setPhotoNote('');
+    setPhotoError('');
   };
   const sendPhoto = async (e) => {
     e.preventDefault();
-    if (!photoFile || !photoTask) { toast.error('Selecione ou tire a foto da tarefa'); return; }
-    if (photoFile.size > MAX_PHOTO) { toast.error('A foto deve ter até 6 MB'); return; }
+    if (photoSending) return;
+    setPhotoError('');
+    if (!photoFile || !photoTask) { setPhotoError('Selecione ou tire uma foto da tarefa.'); return; }
+    if (!photoBackend.ready) {
+      setPhotoError(photoBackend.detail || 'O backend de fotos ainda não foi confirmado. Atualize a conexão.');
+      return;
+    }
     setPhotoSending(true);
     try {
+      const prepared = await optimizePhoto(photoFile);
       const body = new FormData();
-      body.append('photo', photoFile);
+      body.append('photo', prepared, prepared.name || 'foto.jpg');
       body.append('note', photoNote);
-      // api.js defaults to JSON; FormData needs the browser to supply its multipart boundary.
-      await api.post(`/operations/tasks/${photoTask.id}/complete-photo`, body, {
-        headers: { 'Content-Type': undefined }, timeout: 45000,
+      const token = localStorage.getItem('token');
+      if (!token) throw new Error('Sua sessão expirou. Entre novamente no sistema.');
+
+      // Envio nativo: NÃO definir Content-Type; o navegador cria o boundary multipart.
+      // Assim não usamos o Content-Type application/json do axios global.
+      const base = String(api.defaults.baseURL || '').replace(/\/$/, '');
+      if (!base) throw new Error('Endereço da API não configurado no frontend.');
+      const endpoint = `${base}/operations/tasks/${encodeURIComponent(photoTask.id)}/complete-photo`;
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body,
+        cache: 'no-store',
       });
-      toast.success('Foto enviada! Aguarde o administrador aprovar a tarefa.');
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const serverDetail = typeof result.detail === 'string' ? result.detail : '';
+        if (response.status === 404) {
+          throw new Error(serverDetail || 'Rota/tarefa não encontrada (404). Confira a publicação do backend de fotos.');
+        }
+        throw new Error(serverDetail || `Não foi possível enviar a foto (HTTP ${response.status}).`);
+      }
+      if (result.status !== 'pending_review') {
+        throw new Error('O servidor respondeu, mas não confirmou que a foto ficou aguardando aprovação. Confira o histórico antes de reenviar.');
+      }
+      toast.success('Foto enviada! Aguarde a aprovação do administrador.');
       setPhotoTask(null); setPhotoFile(null); setPhotoNote('');
       await refresh();
-    } catch (e) { toast.error(errorText(e)); await refresh(); }
-    finally { setPhotoSending(false); }
+    } catch (err) {
+      // Não fechar modal nem apagar a foto em caso de erro.
+      const message = err.message || 'Falha ao enviar a foto. Tente novamente.';
+      setPhotoError(message);
+      toast.error(message);
+    } finally {
+      setPhotoSending(false);
+    }
   };
   const reviewPhoto = async (action) => {
     if (!events?.pending_review || reviewBusy) return;
@@ -193,6 +288,13 @@ export default function TasksPage() {
           {admin && <label className="text-sm">Setor<select value={sector} onChange={e => setSector(e.target.value)} className="block mt-1 border rounded p-2 bg-background">{SECTORS.map(([v,n]) => <option key={v} value={v}>{n}</option>)}</select></label>}
           <label className="text-sm">Visualização<select value={view} onChange={e => setView(e.target.value)} className="block mt-1 border rounded p-2 bg-background"><option value="active">Pendentes</option><option value="done">Concluídas (únicas)</option><option value="all">Todas</option></select></label>
         </div>
+        {photoBackend.checked && !photoBackend.ready && (
+          <div className="rounded-lg border border-red-300 bg-red-50 p-3 text-red-800 space-y-2" role="alert">
+            <strong>Envio de fotos indisponível</strong>
+            <p className="text-sm">{photoBackend.detail}</p>
+            <button type="button" onClick={checkPhotoBackend} className="rounded border border-red-300 px-3 py-1 text-sm">Verificar novamente</button>
+          </div>
+        )}
         {loading ? <p className="text-muted-foreground">Carregando tarefas...</p> : tasks.length === 0 ?
           <div className="border rounded-lg p-8 text-center text-muted-foreground">Nenhuma tarefa encontrada nesse filtro.</div> :
           <div className="space-y-3">{tasks.map(t => <div className="rounded-lg border bg-card p-4 space-y-3" key={t.id}>
@@ -239,16 +341,23 @@ export default function TasksPage() {
             <div><h2 className="font-heading font-bold text-lg">Comprovação com foto</h2><p className="text-sm text-muted-foreground mt-1">{photoTask.title}</p></div>
             <p className="text-sm">Tire uma foto da tarefa concluída ou selecione uma imagem JPG, PNG ou WebP. Máximo de 6 MB.</p>
             <label className="block text-sm font-medium">Foto obrigatória
-              <input type="file" required accept="image/jpeg,image/png,image/webp" capture="environment"
-                onChange={e => { const chosen = e.target.files?.[0] || null; if (chosen?.size > MAX_PHOTO) { toast.error('Foto maior que 6 MB'); setPhotoFile(null); } else setPhotoFile(chosen); }}
+              <input type="file" required accept="image/jpeg,image/png,image/webp,image/*"
+                onChange={e => {
+                  const chosen = e.target.files?.[0] || null;
+                  setPhotoError('');
+                  if (chosen?.size > MAX_CAPTURE) { setPhotoError('Foto maior que 25 MB. Use uma imagem menor.'); setPhotoFile(null); }
+                  else setPhotoFile(chosen);
+                }}
                 className="mt-2 block w-full text-sm" />
+              <span className="block mt-1 text-xs text-muted-foreground">No celular, você pode tirar uma foto ou escolher da galeria. Fotos grandes são reduzidas antes do envio. Se a câmera fechar a página, tire a foto primeiro e depois selecione da galeria.</span>
             </label>
             {photoPreview && <img src={photoPreview} alt="Prévia da foto" className="max-h-60 max-w-full object-contain rounded-lg border" />}
+            {photoError && <p role="alert" className="rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-800">{photoError}</p>}
             <label className="block text-sm font-medium">Observação (opcional)
               <textarea value={photoNote} onChange={e=>setPhotoNote(e.target.value)} maxLength={500} rows={3} className="mt-1 w-full rounded border p-2 bg-background" placeholder="Ex.: Fritadeira higienizada e óleo trocado" />
             </label>
             <p className="text-xs text-muted-foreground">Depois do envio, o administrador conferirá a foto. A tarefa só ficará concluída após aprovação.</p>
-            <div className="flex justify-end gap-2"><button type="button" onClick={()=>{setPhotoTask(null); setPhotoFile(null);}} disabled={photoSending} className="rounded border px-4 py-2">Cancelar</button><button type="submit" disabled={photoSending || !photoFile} className="rounded bg-primary text-primary-foreground px-4 py-2 flex items-center gap-2"><Camera className="w-4 h-4"/>{photoSending ? 'Enviando...' : 'Enviar foto'}</button></div>
+            <div className="flex justify-end gap-2"><button type="button" onClick={()=>{setPhotoTask(null); setPhotoFile(null);}} disabled={photoSending} className="rounded border px-4 py-2">Cancelar</button><button type="submit" disabled={photoSending || !photoFile || !photoBackend.ready} className="rounded bg-primary text-primary-foreground px-4 py-2 flex items-center gap-2"><Camera className="w-4 h-4"/>{photoSending ? 'Enviando...' : 'Enviar foto'}</button></div>
           </form>
         </div>}
         {events && <div className="fixed inset-0 z-[70] bg-black/50 p-3 overflow-y-auto flex justify-center items-center" role="dialog" aria-modal="true">
