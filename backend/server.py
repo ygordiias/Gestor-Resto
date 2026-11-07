@@ -3402,7 +3402,30 @@ register_operational_routes(
     require_role,
     UserRole
 )
+# Fechamento administrativo com ressalvas
+from cash_admin_exception import register_admin_cash_routes
 
+register_admin_cash_routes(
+    api_router,
+    db,
+    require_role,
+    UserRole,
+    preview_cash_register,
+    jwt,
+    SECRET_KEY,
+    ALGORITHM,
+    verify_password
+)
+
+# Histórico permanente de comandas
+from order_history import register_order_history_routes
+
+register_order_history_routes(
+    api_router,
+    db,
+    require_role,
+    UserRole
+)
 # Registrar todas as rotas na aplicação
 app.include_router(api_router)
 app.add_middleware(
