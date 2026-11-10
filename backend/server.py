@@ -1,193 +1,160 @@
-"""
-Gestor Restô - Sistema de Gestão para Restaurante
-Backend FastAPI com Socket.IO para comunicação em tempo real
-"""
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, status, Query
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from dotenv import load_dotenv
-from starlette.middleware.cors import CORSMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
-import socketio
-import os
-import logging
-import json
-import hashlib
-from pathlib import Path
-from pydantic import BaseModel, Field, ConfigDict
-from typing import List, Optional
-import uuid
-from datetime import datetime, timezone, timedelta
-from passlib.context import CryptContext
-from jose import JWTError, jwt
-from enum import Enum
+    produced_name = produced_stock.get("name") or ""
+    if not produced_name and produced_stock.get("product_id"):
+        produced_product = await db.products.find_one({"id": produced_stock.get("product_id")}, {"_id": 0})
+        produced_name = produced_product["name"] if produced_product else produced_stock.get("product_id", "")
+    if not produced_name:
+        produced_name = produced_id
 
-ROOT_DIR = Path(__file__).parent
-load_dotenv(ROOT_DIR / '.env')
+    production = {
+        "id": str(uuid.uuid4()),
+        "produced_stock_item_id": produced_id,
+        "produced_product_id": produced_stock.get("product_id"),
+        "produced_product_name": produced_name,
+        "quantity": quantity,
+        "ingredients_consumed": detail,
+        "total_cost": round(total_cost, 2),
+        "unit_cost": new_unit_cost,
+        "weighted_unit_cost": weighted,
+        "notes": notes,
+        "user_id": current_user.get("id"),
+        "user_name": current_user.get("name", ""),
+        "created_at": now_iso,
+    }
+    await db.productions.insert_one(production)
+    production.pop("_id", None)
 
-# JWT Configuration
-# Falha imediatamente quando falta uma chave forte; nunca usa segredo fixo no codigo.
-SECRET_KEY = os.environ.get("SECRET_KEY", "")
-if len(SECRET_KEY) < 32:
-    raise RuntimeError("SECRET_KEY deve ter pelo menos 32 caracteres e vir do Environment do Render")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 hours
+    # Emite atualizacao de estoque em tempo real
+    stock_list = await db.stock.find({}, {"_id": 0}).to_list(500)
+    await sio.emit('stock_updated', stock_list)
 
-# Password hashing
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+    logger.info(f"[PRODUCTION] {current_user.get('name','-')} produziu {quantity}x {produced_name} (custo R$ {total_cost:.2f})")
+    return production
 
-# MongoDB connection — Atlas (TLS) com validação real
-mongo_url = os.environ['MONGO_URL']
-db_name = os.environ['DB_NAME']
+@api_router.get("/productions")
+async def list_productions(current_user: dict = Depends(require_role([UserRole.ADMIN]))):
+    productions = await db.productions.find({}, {"_id": 0}).sort("created_at", -1).to_list(500)
+    return productions
 
-# Configuração para Atlas (mongodb+srv) e local
-_mongo_kwargs = {
-    "serverSelectionTimeoutMS": 10000,
-    "connectTimeoutMS": 10000,
-    "socketTimeoutMS": 20000,
-}
-if mongo_url.startswith("mongodb+srv://") or "mongodb.net" in mongo_url:
-    _mongo_kwargs["tls"] = True
-    _mongo_kwargs["tlsAllowInvalidCertificates"] = False
+@api_router.get("/productions/dashboard")
+async def production_dashboard(current_user: dict = Depends(require_role([UserRole.ADMIN]))):
+    """Resumo: produzido x vendido x estoque restante x custo total."""
+    productions = await db.productions.find({}, {"_id": 0}).to_list(2000)
+    # Agrega producao por stock_item_id
+    produced_map = {}  # stock_item_id -> {qty, cost, name}
+    for p in productions:
+        sid = p.get("produced_stock_item_id")
+        if not sid:
+            continue
+        agg = produced_map.setdefault(sid, {"qty": 0, "cost": 0, "name": p.get("produced_product_name", "")})
+        agg["qty"] += float(p.get("quantity", 0) or 0)
+        agg["cost"] += float(p.get("total_cost", 0) or 0)
 
-client = AsyncIOMotorClient(mongo_url, **_mongo_kwargs)
-db = client[db_name]
+    # Estoque atual + consumo via pedidos delivered (apenas items que tem receita usando esses stock_items)
+    stock_items = await db.stock.find({}, {"_id": 0}).to_list(1000)
+    stock_by_id = {s["id"]: s for s in stock_items}
 
-# Socket.IO setup
-sio = socketio.AsyncServer(
-    async_mode='asgi',
-    cors_allowed_origins='*',
-    logger=True,
-    engineio_logger=True
-)
+    # Consumo: percorre pedidos entregues (delivered) e somatoria receitas
+    recipes = await db.recipes.find({}, {"_id": 0}).to_list(1000)
+    recipe_by_product = {r["product_id"]: r for r in recipes}
+    consumption = {}  # stock_item_id -> qty consumida
+    orders = await db.orders.find({"items.status": "delivered"}, {"_id": 0}).to_list(5000)
+    for o in orders:
+        for it in o.get("items", []):
+            if it.get("status") != "delivered":
+                continue
+            recipe = recipe_by_product.get(it.get("product_id"))
+            if not recipe:
+                continue
+            sold_qty = float(it.get("quantity", 0) or 0)
+            for ing in recipe.get("ingredients", []):
+                sid = ing.get("stock_item_id")
+                qty = float(ing.get("quantity", 0) or 0) * sold_qty
+                if sid:
+                    consumption[sid] = consumption.get(sid, 0) + qty
 
-# Create FastAPI app
-app = FastAPI(title="Gestor Restô - Sistema de Gestão para Restaurante")
-api_router = APIRouter(prefix="/api")
-security = HTTPBearer()
+    rows = []
+    total_produced_cost = 0
+    for sid, agg in produced_map.items():
+        s = stock_by_id.get(sid, {})
+        consumed = consumption.get(sid, 0)
+        current = float(s.get("quantity", 0) or 0)
+        total_produced_cost += agg["cost"]
+        rows.append({
+            "stock_item_id": sid,
+            "name": agg["name"] or s.get("product_id", sid),
+            "produced": round(agg["qty"], 2),
+            "consumed": round(consumed, 2),
+            "current_stock": round(current, 2),
+            "total_cost": round(agg["cost"], 2),
+            "unit_cost": float(s.get("unit_cost", 0) or 0),
+        })
 
+    return {
+        "rows": rows,
+        "total_productions": len(productions),
+        "total_produced_cost": round(total_produced_cost, 2),
+    }
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+# ==================== PRODUCTION RECIPES CRUD ====================
+@api_router.get("/production-recipes")
+async def list_production_recipes(current_user: dict = Depends(get_current_user)):
+    recipes = await db.production_recipes.find({}, {"_id": 0}).to_list(500)
+    return recipes
 
-# ==================== STARTUP: validação real do MongoDB ====================
-@app.on_event("startup")
-async def startup_validate_db():
-    """Valida conexão com MongoDB no startup. Se falhar, para o servidor."""
-    try:
-        result = await client.admin.command("ping")
-        if result.get("ok") != 1.0:
-            raise Exception("MongoDB ping retornou status != ok")
-        logger.info("MongoDB conectado com sucesso")
-        # Cadastro automático das comandas físicas 200 a 230
-        # Preserva comandas existentes e seus vínculos com pedidos.
-        created_tabs = 0
+@api_router.get("/production-recipes/by-stock/{stock_id}")
+async def get_production_recipe_by_stock(stock_id: str, current_user: dict = Depends(get_current_user)):
+    recipe = await db.production_recipes.find_one({"produced_stock_item_id": stock_id}, {"_id": 0})
+    if not recipe:
+        raise HTTPException(status_code=404, detail="Receita de produção não encontrada")
+    return recipe
 
-        for tab_number in range(200, 231):
-            result = await db.physical_tabs.update_one(
-                {"number": tab_number},
-                {
-                    "$setOnInsert": {
-                        "number": tab_number,
-                        "active_order_id": None,
-                        "table_id": None
-                    }
-                },
-                upsert=True
-            )
+@api_router.get("/production-recipes/{recipe_id}")
+async def get_production_recipe(recipe_id: str, current_user: dict = Depends(get_current_user)):
+    recipe = await db.production_recipes.find_one({"id": recipe_id}, {"_id": 0})
+    if not recipe:
+        raise HTTPException(status_code=404, detail="Receita não encontrada")
+    return recipe
 
-            if result.upserted_id is not None:
-                created_tabs += 1
+@api_router.post("/production-recipes")
+async def create_production_recipe(data: dict, current_user: dict = Depends(require_role([UserRole.ADMIN]))):
+    produced_id = data.get("produced_stock_item_id")
+    if not produced_id:
+        raise HTTPException(status_code=400, detail="produced_stock_item_id é obrigatório")
+    if not data.get("ingredients"):
+        raise HTTPException(status_code=400, detail="Adicione ao menos um ingrediente")
+    existing = await db.production_recipes.find_one({"produced_stock_item_id": produced_id})
+    if existing:
+        raise HTTPException(status_code=400, detail="Já existe receita de produção para este item. Use PUT.")
+    produced_stock = await db.stock.find_one({"id": produced_id}, {"_id": 0})
+    produced_name = (produced_stock or {}).get("name", "")
+    if not produced_name and produced_stock and produced_stock.get("product_id"):
+        prod = await db.products.find_one({"id": produced_stock["product_id"]}, {"_id": 0})
+        produced_name = prod["name"] if prod else ""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    recipe = {
+        "id": str(uuid.uuid4()),
+        "produced_stock_item_id": produced_id,
+        "produced_name": produced_name or produced_id,
+        "yield_quantity": float(data.get("yield_quantity", 1) or 1),
+        "ingredients": data.get("ingredients", []),
+        "created_at": now_iso,
+        "updated_at": now_iso,
+    }
+    await db.production_recipes.insert_one(recipe)
+    recipe.pop("_id", None)
+    return recipe
 
-        logger.info(
-            f"Comandas físicas 200 a 230 verificadas. "
-            f"Novos cadastros: {created_tabs}"
-        )
+@api_router.put("/production-recipes/{recipe_id}")
+async def update_production_recipe(recipe_id: str, data: dict, current_user: dict = Depends(require_role([UserRole.ADMIN]))):
+    update = {
+        "yield_quantity": float(data.get("yield_quantity", 1) or 1),
+        "ingredients": data.get("ingredients", []),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    result = await db.production_recipes.update_one({"id": recipe_id}, {"$set": update})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Receita não encontrada")
+    return await db.production_recipes.find_one({"id": recipe_id}, {"_id": 0})
 
-        # Cria UMA conta administrativa inicial apenas quando explicitamente
-        # configurada em variaveis de ambiente. Nunca embute senha no codigo.
-        # Depois do primeiro deploy, remova BOOTSTRAP_ADMIN_PASSWORD do Render.
-        bootstrap_email = os.environ.get("BOOTSTRAP_ADMIN_EMAIL", "").strip().lower()
-        bootstrap_password = os.environ.get("BOOTSTRAP_ADMIN_PASSWORD", "")
-        if bool(bootstrap_email) != bool(bootstrap_password):
-            raise RuntimeError("Defina BOOTSTRAP_ADMIN_EMAIL e BOOTSTRAP_ADMIN_PASSWORD juntos")
-        if bootstrap_email:
-            if len(bootstrap_password) < 12 or len(bootstrap_password.encode("utf-8")) > 72:
-                raise RuntimeError("BOOTSTRAP_ADMIN_PASSWORD deve ter 12 a 72 bytes")
-            existing_admin = await db.users.find_one({"email": bootstrap_email})
-            if not existing_admin:
-                account = {
-                    "id": str(uuid.uuid4()),
-                    "name": "Administrador Homologacao",
-                    "email": bootstrap_email,
-                    "role": "superadmin",
-                    "password": pwd_context.hash(bootstrap_password),
-                    "is_active": True,
-                    "created_at": datetime.now(timezone.utc).isoformat(),
-                }
-                await db.users.insert_one(account)
-                logger.info("Conta administrativa inicial criada")
-            else:
-                logger.info("Conta administrativa inicial ja existe; senha e perfil preservados")
-
-    except Exception as e:
-        logger.critical(f"FALHA na conexão com MongoDB: {e}")
-        logger.critical("O servidor NÃO pode operar sem banco de dados. Verifique MONGO_URL no .env")
-        raise SystemExit(1)
-
-# ==================== HEALTH / PING ====================
-@app.get("/health")
-async def health_check():
-    """Health check — verifica se MongoDB está respondendo."""
-    try:
-        result = await client.admin.command("ping")
-        mongo_ok = result.get("ok") == 1.0
-    except Exception:
-        mongo_ok = False
-    if not mongo_ok:
-        raise HTTPException(status_code=503, detail="MongoDB indisponível")
-    return {"status": "healthy", "database": "connected"}
-
-@api_router.get("/health")
-async def health_check_api():
-    """Health check leve via /api/health (liveness probe).
-
-    Retorna sempre 200 se o processo estiver vivo, sem depender do MongoDB.
-    Isso evita falsos negativos por hiccups momentâneos do banco em probes
-    de infra/uptime. Para readiness (com DB), usar GET /health (root).
-    """
-    return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
-
-@api_router.get("/ping")
-async def ping():
-    return {"message": "pong", "timestamp": datetime.now(timezone.utc).isoformat()}
-
-# ==================== ENUMS ====================
-class UserRole(str, Enum):
-    SUPERADMIN = "superadmin"
-    ADMIN = "admin"
-    WAITER = "waiter"
-    CASHIER = "cashier"
-    KITCHEN = "kitchen"
-    BAR = "bar"
-
-class TableStatus(str, Enum):
-    AVAILABLE = "available"
-    OCCUPIED = "occupied"
-    RESERVED = "reserved"
-    CLEANING = "cleaning"
-
-class OrderStatus(str, Enum):
-    PENDING = "pending"
-    PREPARING = "preparing"
-    READY = "ready"
-    DELIVERED = "delivered"
-    CANCELLED = "cancelled"
-
-class OrderItemType(str, Enum):
-    FOOD = "food"
-    DRINK = "drink"
-class PaymentMethod(str, Enum):
-    CASH = "cash"
-    CARD = "card"  # Histórico de pagamentos antigos
-    CREDIT = "credit"
+@api_router.delete("/production-recipes/{recipe_id}")
+async def delete_production_recipe(recipe_id: str, current_user: dict = Depends(require_role([UserRole.ADMIN]))):
