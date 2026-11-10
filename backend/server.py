@@ -160,6 +160,11 @@ async def startup_validate_db():
 
         logger.info("[HOMOLOGACAO] Startup concluído com sucesso")
     except Exception as exc:
+                logger.critical(
+            "[HOMOLOGACAO] CODIGO MONGODB: %s | NOME: %s",
+            getattr(exc, "code", None),
+            (getattr(exc, "details", None) or {}).get("codeName"),
+        )
         # Não imprime MONGO_URL, senha ou SECRET_KEY nos logs.
         logger.critical(
             "[HOMOLOGACAO] FALHA NO STARTUP | etapa=%s | tipo=%s | orientação=%s",
