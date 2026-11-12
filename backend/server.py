@@ -389,6 +389,9 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
         user = await db.users.find_one({"id": user_id}, {"_id": 0})
         if user is None:
             raise HTTPException(status_code=401, detail="User not found")
+        # Conta desativada perde o acesso na hora, mesmo com token ainda válido.
+        if user.get("is_active", True) is False:
+            raise HTTPException(status_code=401, detail="Usuário desativado")
         return user
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
@@ -410,6 +413,10 @@ CASH_ROLES = [UserRole.ADMIN, UserRole.CASHIER]
 TABLE_ROLES = [UserRole.ADMIN, UserRole.WAITER, UserRole.CASHIER]
 ITEM_STATUS_ROLES = [UserRole.ADMIN, UserRole.KITCHEN, UserRole.BAR, UserRole.WAITER]
 
+# Usuários: campos que PUT /users/{id} aceita e tamanho mínimo de senha.
+USER_UPDATE_FIELDS = {"name", "email", "role", "password", "is_active"}
+MIN_USER_PASSWORD_LENGTH = 8
+
 # ==================== AUTH ROUTES ====================
 # Não existe cadastro público. Usuários são criados apenas por admin/superadmin
 # via POST /api/users (ver create_user).
@@ -419,7 +426,10 @@ async def login(login_data: UserLogin):
     user = await db.users.find_one({"email": login_data.email}, {"_id": 0})
     if not user or not verify_password(login_data.password, user["password"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    
+    # Só informa a desativação para quem acertou a senha.
+    if user.get("is_active", True) is False:
+        raise HTTPException(status_code=403, detail="Usuário desativado. Procure o administrador.")
+
     access_token = create_access_token(data={"sub": user["id"]})
     return Token(
         access_token=access_token,
@@ -447,7 +457,9 @@ async def create_user(user_data: UserCreate, current_user: dict = Depends(requir
     # Admin não pode criar superadmin
     if user_data.role == UserRole.SUPERADMIN and current_user["role"] != UserRole.SUPERADMIN.value:
         raise HTTPException(status_code=403, detail="Apenas superadmin pode criar outros superadmins")
-    
+    if len(user_data.password or "") < MIN_USER_PASSWORD_LENGTH:
+        raise HTTPException(status_code=400, detail=f"A senha deve ter pelo menos {MIN_USER_PASSWORD_LENGTH} caracteres")
+
     existing = await db.users.find_one({"email": user_data.email})
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
@@ -461,20 +473,94 @@ async def create_user(user_data: UserCreate, current_user: dict = Depends(requir
     await db.users.insert_one(user_dict)
     return {k: v for k, v in user_dict.items() if k not in ["password", "_id"]}
 
+async def _get_user_target(user_id: str, current_user: dict) -> dict:
+    """Busca o usuário-alvo e aplica: só superadmin mexe em superadmin."""
+    target = await db.users.find_one({"id": user_id}, {"_id": 0})
+    if not target:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado")
+    if (target.get("role") == UserRole.SUPERADMIN.value
+            and current_user["role"] != UserRole.SUPERADMIN.value):
+        raise HTTPException(status_code=403, detail="Apenas superadmin pode alterar um superadmin")
+    return target
+
+
 @api_router.put("/users/{user_id}")
 async def update_user(user_id: str, user_data: dict, current_user: dict = Depends(require_role([UserRole.ADMIN]))):
-    # Admin não pode promover para superadmin
-    if user_data.get("role") == "superadmin" and current_user["role"] != "superadmin":
-        raise HTTPException(status_code=403, detail="Apenas superadmin pode definir role superadmin")
+    if not user_data:
+        raise HTTPException(status_code=400, detail="Nenhum campo para atualizar")
+    unknown = sorted(set(user_data) - USER_UPDATE_FIELDS)
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Campos não permitidos: {', '.join(unknown)}")
+
+    target = await _get_user_target(user_id, current_user)
+    is_self = target["id"] == current_user["id"]
+    is_superadmin = current_user["role"] == UserRole.SUPERADMIN.value
+    updates = {}
+
+    if "name" in user_data:
+        name = user_data["name"]
+        if not isinstance(name, str) or not name.strip() or len(name.strip()) > 100:
+            raise HTTPException(status_code=400, detail="Nome inválido (1 a 100 caracteres)")
+        updates["name"] = name.strip()
+
+    if "email" in user_data:
+        email = user_data["email"]
+        if not isinstance(email, str) or "@" not in email.strip() or len(email.strip()) > 254:
+            raise HTTPException(status_code=400, detail="E-mail inválido")
+        email = email.strip()
+        if await db.users.find_one({"email": email, "id": {"$ne": user_id}}, {"_id": 0, "id": 1}):
+            raise HTTPException(status_code=409, detail="E-mail já usado por outra conta")
+        updates["email"] = email
+
+    if "role" in user_data:
+        role = user_data["role"]
+        if role not in {r.value for r in UserRole}:
+            raise HTTPException(status_code=400, detail="Perfil inválido")
+        if role == UserRole.SUPERADMIN.value and not is_superadmin:
+            raise HTTPException(status_code=403, detail="Apenas superadmin pode definir role superadmin")
+        if is_self and role != target.get("role"):
+            raise HTTPException(status_code=403, detail="Você não pode alterar o seu próprio perfil")
+        updates["role"] = role
+
+    if "is_active" in user_data:
+        is_active = user_data["is_active"]
+        if not isinstance(is_active, bool):
+            raise HTTPException(status_code=400, detail="is_active deve ser verdadeiro ou falso")
+        if is_self and is_active != target.get("is_active", True):
+            raise HTTPException(status_code=403, detail="Você não pode desativar ou reativar a sua própria conta")
+        updates["is_active"] = is_active
+
     if "password" in user_data:
-        user_data["password"] = get_password_hash(user_data["password"])
-    await db.users.update_one({"id": user_id}, {"$set": user_data})
-    return {"message": "User updated"}
+        password = user_data["password"]
+        if not isinstance(password, str) or len(password) < MIN_USER_PASSWORD_LENGTH:
+            raise HTTPException(status_code=400, detail=f"A senha deve ter pelo menos {MIN_USER_PASSWORD_LENGTH} caracteres")
+        updates["password"] = get_password_hash(password)
+
+    change = {"$set": updates}
+    # Reativação: apaga as marcas da desativação anterior.
+    if updates.get("is_active") is True and target.get("is_active", True) is False:
+        change["$unset"] = {"deactivated_at": "", "deactivated_by_id": ""}
+    await db.users.update_one({"id": user_id}, change)
+    updated = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
+    return updated
 
 @api_router.delete("/users/{user_id}")
 async def delete_user(user_id: str, current_user: dict = Depends(require_role([UserRole.ADMIN]))):
-    await db.users.delete_one({"id": user_id})
-    return {"message": "User deleted"}
+    """Desativa o usuário (is_active = false). Não apaga: preserva o histórico
+    de quem fez cada pedido, cancelamento e fechamento de caixa."""
+    target = await _get_user_target(user_id, current_user)
+    if target["id"] == current_user["id"]:
+        raise HTTPException(status_code=403, detail="Você não pode desativar a sua própria conta")
+    if target.get("is_active", True) is not False:
+        await db.users.update_one(
+            {"id": user_id},
+            {"$set": {
+                "is_active": False,
+                "deactivated_at": datetime.now(timezone.utc).isoformat(),
+                "deactivated_by_id": current_user["id"],
+            }},
+        )
+    return {"message": "Usuário desativado"}
 
 # ==================== CATEGORY ROUTES ====================
 @api_router.get("/categories", response_model=List[dict], dependencies=[Depends(require_role(STAFF_ROLES))])
