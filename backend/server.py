@@ -7,11 +7,13 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo.errors import PyMongoError
 import socketio
 import os
 import logging
 import json
 import hashlib
+import math
 from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional
@@ -1359,8 +1361,75 @@ async def complete_online_order(
     }
 
 
-@api_router.post("/orders/{order_id}/close", dependencies=[Depends(require_role(CASH_ROLES))])
-async def close_order(order_id: str, payment_data: dict):
+# Formas aceitas no fechamento da comanda: as mesmas do fechamento do caixa.
+CLOSE_PAYMENT_METHODS = ("cash", "pix", "credit", "debit", "card", "voucher")
+
+
+def _close_cents(value) -> int:
+    """Centavos com o MESMO arredondamento do fechamento do caixa."""
+    return round(float(value or 0) * 100)
+
+
+def _validate_close_payments(total_cents: int, payments, is_comp: bool) -> list:
+    """Valida os pagamentos ANTES de gravar qualquer coisa.
+
+    Devolve a lista normalizada [{"method", "amount_cents"}], sem linhas de
+    R$ 0,00 (a tela cria linhas zeradas no botão "+"). Levanta 422 com
+    mensagem clara quando o pagamento travaria o fechamento do caixa.
+    """
+    if payments is None:
+        payments = []
+    if not isinstance(payments, list):
+        raise HTTPException(status_code=422, detail="Pagamentos inválidos")
+
+    normalized = []
+    for p in payments:
+        if not isinstance(p, dict):
+            raise HTTPException(status_code=422, detail="Pagamento inválido")
+        method = p.get("method")
+        if method not in CLOSE_PAYMENT_METHODS:
+            raise HTTPException(status_code=422, detail=f"Forma de pagamento inválida: {method}")
+        amount = p.get("amount")
+        if isinstance(amount, bool) or not isinstance(amount, (int, float)) or not math.isfinite(amount):
+            raise HTTPException(status_code=422, detail="Valor de pagamento inválido")
+        amount_cents = _close_cents(amount)
+        if amount_cents < 0:
+            raise HTTPException(status_code=422, detail="Valor de pagamento não pode ser negativo")
+        if amount_cents == 0:
+            continue
+        normalized.append({"method": method, "amount_cents": amount_cents})
+
+    # Cortesia/permuta não entra no faturamento nem na conferência do caixa.
+    if is_comp:
+        return normalized
+
+    paid = sum(p["amount_cents"] for p in normalized)
+    cash = sum(p["amount_cents"] for p in normalized if p["method"] == "cash")
+    if total_cents > 0 and not normalized:
+        raise HTTPException(status_code=422, detail="Informe o pagamento da comanda")
+    if paid < total_cents:
+        falta = (total_cents - paid) / 100
+        raise HTTPException(status_code=422, detail=f"Pagamento insuficiente: faltam R$ {falta:.2f}".replace(".", ","))
+    if paid - total_cents > cash:
+        raise HTTPException(
+            status_code=422,
+            detail="Troco maior que o valor em dinheiro. Ajuste os valores: só pagamento em dinheiro pode ter troco",
+        )
+    return normalized
+
+
+class _OrderAlreadyClosed(Exception):
+    pass
+
+
+def _transaction_unsupported(exc: Exception) -> bool:
+    code = getattr(exc, "code", None)
+    text = str(exc).lower()
+    return code in (20, 263) or "replica set" in text or "transaction numbers" in text
+
+
+@api_router.post("/orders/{order_id}/close")
+async def close_order(order_id: str, payment_data: dict, current_user: dict = Depends(require_role(CASH_ROLES))):
     order = await db.orders.find_one({"id": order_id}, {"_id": 0})
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
@@ -1369,14 +1438,66 @@ async def close_order(order_id: str, payment_data: dict):
     if order.get("source") == "online":
         raise HTTPException(status_code=409, detail="Pedido online deve usar Finalizar pedido online (aguardando repasse)")
 
-    # Register payments
-    for payment in payment_data.get("payments", []):
-        payment_obj = Payment(order_id=order_id, amount=payment["amount"], method=payment["method"])
-        pay_dict = payment_obj.model_dump()
-        pay_dict["created_at"] = pay_dict["created_at"].isoformat()
-        await db.payments.insert_one(pay_dict)
-    
-    # Baixa automatica de estoque: itens ainda nao deduzidos (garantia no fechamento).
+    # Total SEMPRE o do banco, em centavos (nunca o enviado pelo navegador).
+    total_cents = _close_cents(order.get("total"))
+    is_comp = bool(order.get("is_comp"))
+    payments = _validate_close_payments(total_cents, payment_data.get("payments"), is_comp)
+
+    closed_at = datetime.now(timezone.utc).isoformat()
+    payment_docs = []
+
+    # Fechamento, pagamentos e total_sales: juntos ou nada (transação).
+    # Sem suporte a transação no banco, a rota falha e NÃO grava nada.
+    try:
+        async with await client.start_session() as session:
+            async with session.start_transaction():
+                claimed = await db.orders.update_one(
+                    {"id": order_id, "is_closed": False, "source": {"$ne": "online"}},
+                    {"$set": {
+                        "is_closed": True,
+                        "closed_at": closed_at,
+                        "status": OrderStatus.DELIVERED.value,
+                        "closed_by_id": current_user["id"],
+                    }},
+                    session=session,
+                )
+                if claimed.modified_count != 1:
+                    # Duplo clique / outra aba: outro pedido já fechou esta comanda.
+                    raise _OrderAlreadyClosed()
+
+                register = await db.cash_registers.find_one({"is_open": True}, {"_id": 0}, session=session)
+                for p in payments:
+                    payment_obj = Payment(order_id=order_id, amount=p["amount_cents"] / 100, method=p["method"])
+                    pay_dict = payment_obj.model_dump()
+                    pay_dict["created_at"] = pay_dict["created_at"].isoformat()
+                    pay_dict["created_by_id"] = current_user["id"]
+                    pay_dict["register_id"] = register["id"] if register else None
+                    payment_docs.append(pay_dict)
+                if payment_docs:
+                    await db.payments.insert_many(payment_docs, session=session)
+
+                # Atualiza o caixa uma única vez (não conta cortesia/permuta).
+                if register and not is_comp:
+                    await db.cash_registers.update_one(
+                        {"id": register["id"], "is_open": True},
+                        {"$inc": {"total_sales": total_cents / 100}},
+                        session=session,
+                    )
+    except _OrderAlreadyClosed:
+        raise HTTPException(status_code=409, detail="Pedido já está fechado")
+    except PyMongoError as exc:
+        if _transaction_unsupported(exc):
+            logger.error("[close_order] banco sem suporte a transação (%s); nada foi gravado", type(exc).__name__)
+            raise HTTPException(
+                status_code=503,
+                detail="Fechamento indisponível: o banco de dados não aceita transações. Nada foi gravado.",
+            )
+        logger.error("[close_order] falha na transação (%s); nada foi gravado", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Falha ao fechar a comanda. Nada foi gravado; tente novamente.")
+
+    # Daqui em diante a comanda já está fechada e paga (transação confirmada).
+    # Baixa automática de estoque dos itens ainda não deduzidos. Só quem fechou
+    # a comanda chega aqui, então não há baixa em dobro por duplo clique.
     # Cortesia TAMBEM consome estoque (mesmo com preco zero).
     changed = False
     for item in order.get("items", []):
@@ -1392,29 +1513,14 @@ async def close_order(order_id: str, payment_data: dict):
     if changed:
         await db.orders.update_one({"id": order_id}, {"$set": {"items": order["items"]}})
 
-    # Close order
-    closed_at = datetime.now(timezone.utc).isoformat()
-    await db.orders.update_one(
-        {"id": order_id},
-        {"$set": {"is_closed": True, "closed_at": closed_at, "status": OrderStatus.DELIVERED.value}}
-    )
-    
     # Update table
     await release_physical_tab(order)
     await refresh_table_after_order(order.get("table_id"))
-    
-    # Update cash register (nao conta cortesia/permuta)
-    register = await db.cash_registers.find_one({"is_open": True}, {"_id": 0})
-    if register and not order.get("is_comp"):
-        await db.cash_registers.update_one(
-            {"id": register["id"]},
-            {"$inc": {"total_sales": order["total"]}}
-        )
-    
+
     # Emit updates
     await sio.emit('tables_updated', await get_tables())
     await sio.emit('order_closed', {"order_id": order_id})
-    
+
     return {"message": "Order closed successfully"}
 
 @api_router.patch("/orders/{order_id}/comp")
