@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
 """
+LEGADO: script antigo gerado pela plataforma Emergent. NÃO faz parte da suíte
+atual (use backend/tests/ com pytest). Mantido só como referência.
+
+A rota POST /api/setup/seed foi removida por segurança; o passo de seed
+deste script foi retirado. Ele espera um banco de TESTE já populado.
+
 Backend API Testing for Digital Codex Restaurant Management System
 Tests all API endpoints for functionality and integration
 """
@@ -77,17 +83,6 @@ class RestaurantAPITester:
                 'error': str(e)
             })
             return False, {}
-
-    def test_database_seed(self):
-        """Test database seeding"""
-        self.log("=== Testing Database Setup ===")
-        success, response = self.run_test(
-            "Database Seed",
-            "POST",
-            "setup/seed",
-            200
-        )
-        return success
 
     def test_authentication(self):
         """Test authentication endpoints"""
@@ -346,11 +341,7 @@ class RestaurantAPITester:
         self.log(f"Testing against: {self.base_url}")
         
         try:
-            # Core setup tests
-            if not self.test_database_seed():
-                self.log("❌ Database seed failed - stopping tests", "ERROR")
-                return False
-            
+            # Seed removido (rota /setup/seed não existe mais).
             if not self.test_authentication():
                 self.log("❌ Authentication failed - stopping tests", "ERROR")
                 return False

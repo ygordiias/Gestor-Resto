@@ -44,7 +44,7 @@ def tokens():
 @pytest.fixture(scope="module")
 def coca_product(tokens):
     """Ensure Coca-Cola product exists and has stock=50."""
-    r = requests.get(f"{API}/products", timeout=30)
+    r = requests.get(f"{API}/products", headers=_headers(tokens["admin"]), timeout=30)
     assert r.status_code == 200
     products = r.json()
     coca = next((p for p in products if p.get("name", "").lower().startswith("coca")), None)
@@ -94,7 +94,7 @@ def _get_stock_qty(stock_id, tok):
 
 def _free_table(tok):
     """Get an available table or free one occupied."""
-    r = requests.get(f"{API}/tables", timeout=30)
+    r = requests.get(f"{API}/tables", headers=_headers(tok), timeout=30)
     tables = r.json()
     # Prefer any available
     for t in tables:
@@ -102,12 +102,13 @@ def _free_table(tok):
             return t
     # Force one free: pick first, cancel its open order
     t = tables[0]
-    open_o = requests.get(f"{API}/orders/table/{t['id']}", timeout=30)
+    open_o = requests.get(f"{API}/orders/table/{t['id']}", headers=_headers(tok), timeout=30)
     if open_o.status_code == 200 and open_o.json():
         oid = open_o.json()["id"]
         # cancel-quick as admin
         requests.post(f"{API}/orders/{oid}/cancel-quick", headers=_headers(tok), timeout=30)
-    requests.put(f"{API}/tables/{t['id']}/status", json={"status": "available"}, timeout=30)
+    requests.put(f"{API}/tables/{t['id']}/status", json={"status": "available"},
+                 headers=_headers(tok), timeout=30)
     return t
 
 
@@ -142,7 +143,8 @@ def test_stock_deducted_on_delivered(coca_product, tokens):
     r = requests.put(
         f"{API}/orders/{order_id}/item/{item_id}/status",
         json={"status": "delivered"},
-        headers=_headers(tokens["cashier"]),
+        # Caixa não altera status de item (só admin, cozinha, bar e garçom).
+        headers=_headers(tokens["waiter"]),
         timeout=30,
     )
     assert r.status_code == 200, r.text
@@ -151,7 +153,7 @@ def test_stock_deducted_on_delivered(coca_product, tokens):
     assert after == before - 1, f"Expected stock {before-1}, got {after}"
 
     # Confirm item.stock_deducted True
-    ordr = requests.get(f"{API}/orders/{order_id}", timeout=30).json()
+    ordr = requests.get(f"{API}/orders/{order_id}", headers=_headers(tokens["admin"]), timeout=30).json()
     it = next(i for i in ordr["items"] if i["id"] == item_id)
     assert it.get("stock_deducted") is True
 
@@ -183,7 +185,7 @@ def test_stock_deducted_on_close_without_delivered(coca_product, tokens):
     after = _get_stock_qty(coca_product["stock"]["id"], tokens["admin"])
     assert after == before - 1, f"Expected stock {before-1}, got {after}"
 
-    ordr = requests.get(f"{API}/orders/{order_id}", timeout=30).json()
+    ordr = requests.get(f"{API}/orders/{order_id}", headers=_headers(tokens["admin"]), timeout=30).json()
     it = next(i for i in ordr["items"] if i["id"] == item_id)
     assert it.get("stock_deducted") is True
 
@@ -278,14 +280,14 @@ def test_cancel_success(coca_product, tokens):
     )
     assert r.status_code == 200, r.text
 
-    ordr = requests.get(f"{API}/orders/{order_id}", timeout=30).json()
+    ordr = requests.get(f"{API}/orders/{order_id}", headers=_headers(tokens["admin"]), timeout=30).json()
     assert ordr["status"] == "cancelled"
     assert ordr["is_closed"] is True
     assert ordr.get("cancelled_by_name")
     assert ordr.get("cancellation_reason") == "cliente desistiu"
 
     # Table should be available
-    tables = requests.get(f"{API}/tables", timeout=30).json()
+    tables = requests.get(f"{API}/tables", headers=_headers(tokens["admin"]), timeout=30).json()
     tbl = next(t for t in tables if t["id"] == table_id)
     assert tbl["status"] == "available"
 

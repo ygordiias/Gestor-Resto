@@ -107,6 +107,7 @@
 - [ ] Transferência/junção de mesa
 - [ ] Divisão de conta por pessoa
 ### P2
+- [ ] Normalizar e-mail de usuário (minúsculas/sem espaços) no cadastro e no login; checar duplicados existentes antes
 - [ ] Integração real NF-e e WhatsApp API
 - [ ] Exportação relatórios (PDF/Excel)
 ### P3

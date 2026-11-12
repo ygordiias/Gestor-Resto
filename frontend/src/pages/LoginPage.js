@@ -1,7 +1,6 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
-import { setupAPI } from '../lib/api';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
@@ -14,7 +13,6 @@ export default function LoginPage() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
-  const [seeding, setSeeding] = useState(false);
   const { login, user } = useAuth();
   const navigate = useNavigate();
 
@@ -52,23 +50,6 @@ export default function LoginPage() {
       toast.error(error.response?.data?.detail || 'Erro ao fazer login');
     } finally {
       setLoading(false);
-    }
-  };
-
-  const handleSeedDatabase = async () => {
-    setSeeding(true);
-    try {
-      await setupAPI.seed();
-      toast.success('Banco de dados inicializado com sucesso!');
-      toast.info('Use admin@digitalcodex.com / admin123 para entrar');
-    } catch (error) {
-      if (error.response?.data?.message === 'Database already seeded') {
-        toast.info('Banco de dados já foi inicializado');
-      } else {
-        toast.error('Erro ao inicializar banco de dados');
-      }
-    } finally {
-      setSeeding(false);
     }
   };
 
@@ -137,28 +118,6 @@ export default function LoginPage() {
                 )}
               </Button>
             </form>
-
-            <div className="mt-6 pt-6 border-t border-border">
-              <p className="text-sm text-muted-foreground text-center mb-4">
-                Primeira vez? Inicialize o banco de dados com dados de exemplo.
-              </p>
-              <Button
-                variant="outline"
-                className="w-full"
-                onClick={handleSeedDatabase}
-                disabled={seeding}
-                data-testid="seed-database-btn"
-              >
-                {seeding ? (
-                  <>
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    Inicializando...
-                  </>
-                ) : (
-                  'Inicializar Banco de Dados'
-                )}
-              </Button>
-            </div>
 
             <div className="mt-4 p-4 bg-muted rounded-lg">
               <p className="text-xs text-muted-foreground text-center font-medium mb-2">

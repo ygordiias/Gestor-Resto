@@ -114,8 +114,9 @@ def _stock_qty(admin_token, stock_id):
     raise AssertionError(f"stock {stock_id} nao encontrado")
 
 
-def _mark_item_delivered(order_id, item_id):
+def _mark_item_delivered(admin_token, order_id, item_id):
     r = requests.put(f"{API}/orders/{order_id}/item/{item_id}/status",
+                     headers=_auth_headers(admin_token),
                      json={"status": "delivered"}, timeout=5)
     r.raise_for_status()
 
@@ -158,7 +159,7 @@ def test_b_cancel_after_delivery_choose_no_keeps_deduction(admin, cashier):
     table = _create_table(admin)
     order = _create_order(cashier, table, prod, 2)
     item_id = order["items"][0]["id"]
-    _mark_item_delivered(order["id"], item_id)
+    _mark_item_delivered(admin, order["id"], item_id)
     assert _stock_qty(admin, stock["id"]) == 8
     r = _cancel_item(cashier, order["id"], item_id, 2, reason="test B", restore=False)
     assert r.status_code == 200, r.text
@@ -172,7 +173,7 @@ def test_c_cancel_after_delivery_choose_yes_restores_stock_exactly_once(admin, c
     table = _create_table(admin)
     order = _create_order(cashier, table, prod, 3)
     item_id = order["items"][0]["id"]
-    _mark_item_delivered(order["id"], item_id)
+    _mark_item_delivered(admin, order["id"], item_id)
     assert _stock_qty(admin, stock["id"]) == 7
     r = _cancel_item(cashier, order["id"], item_id, 3, reason="test C", restore=True)
     assert r.status_code == 200, r.text
@@ -215,7 +216,7 @@ def test_d_recipe_product_restore_ingredients_correctly(admin, cashier):
     table = _create_table(admin)
     order = _create_order(cashier, table, prod, 2)
     item_id = order["items"][0]["id"]
-    _mark_item_delivered(order["id"], item_id)
+    _mark_item_delivered(admin, order["id"], item_id)
     assert _stock_qty(admin, ing1["id"]) == 96
     assert _stock_qty(admin, ing2["id"]) == 48
     r = _cancel_item(cashier, order["id"], item_id, 2, reason="test D recipe", restore=True)
@@ -283,7 +284,7 @@ def test_h_closed_order_is_read_only(admin, cashier):
     table = _create_table(admin)
     order = _create_order(cashier, table, prod, 1)
     item_id = order["items"][0]["id"]
-    _mark_item_delivered(order["id"], item_id)
+    _mark_item_delivered(admin, order["id"], item_id)
     rc = requests.post(f"{API}/orders/{order['id']}/close",
                        headers=_auth_headers(cashier),
                        json={"payments": [{"method": "cash", "amount": 11.0}]}, timeout=5)
