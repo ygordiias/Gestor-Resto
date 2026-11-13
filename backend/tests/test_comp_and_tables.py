@@ -12,10 +12,13 @@ import requests
 BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://digital-orders-3.preview.emergentagent.com").rstrip("/")
 API = f"{BASE_URL}/api"
 
-ADMIN = {"email": "admin@teste.com", "password": "123456"}
-WAITER = {"email": "yuri@digitalcodex.com", "password": "123456"}
-CASHIER_EMAIL = "caixa@digitalcodex.com"
-CASHIER_PWD = "caixa123"
+from _credenciais import credencial
+
+ADMIN = credencial("admin")
+WAITER = credencial("waiter")
+_CASHIER = credencial("cashier")
+CASHIER_EMAIL = _CASHIER["email"]
+CASHIER_PWD = _CASHIER["password"]
 
 
 def _login(cred):
@@ -40,19 +43,9 @@ def waiter_token():
 
 @pytest.fixture(scope="module")
 def cashier_token(admin_token):
-    # Try login; if fails, reset password via admin
+    # Não troca a senha de ninguém: se o login falhar, o teste falha com o motivo.
     r = requests.post(f"{API}/auth/login", json={"email": CASHIER_EMAIL, "password": CASHIER_PWD}, timeout=15)
-    if r.status_code != 200:
-        # find user id
-        ur = requests.get(f"{API}/users", headers=_h(admin_token), timeout=15)
-        assert ur.status_code == 200, ur.text
-        target = next((u for u in ur.json() if u.get("email") == CASHIER_EMAIL), None)
-        assert target, f"cashier {CASHIER_EMAIL} not found in DB"
-        up = requests.put(f"{API}/users/{target['id']}", json={"password": CASHIER_PWD},
-                          headers=_h(admin_token), timeout=15)
-        assert up.status_code in (200, 204), up.text
-        r = requests.post(f"{API}/auth/login", json={"email": CASHIER_EMAIL, "password": CASHIER_PWD}, timeout=15)
-        assert r.status_code == 200, r.text
+    assert r.status_code == 200, f"login do caixa de teste falhou ({r.status_code}); confira TEST_CASHIER_*"
     return r.json()["access_token"]
 
 

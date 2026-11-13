@@ -6,8 +6,9 @@
 - **Banco**: MongoDB Atlas (TLS) | **Auth**: JWT | **PWA**: Service Worker
 
 ## Credenciais
-- admin@teste.com / 123456 (auto-criado no startup)
-- admin@digitalcodex.com / admin123 (via seed)
+- Nenhuma senha fica no repositório.
+- Primeiro superadmin: variáveis `INITIAL_SUPERADMIN_EMAIL` / `INITIAL_SUPERADMIN_PASSWORD` (só se não existir nenhum superadmin).
+- Testes de integração: `TEST_<PERFIL>_EMAIL` / `TEST_<PERFIL>_PASSWORD` (ver `backend/tests/_credenciais.py`), sempre em banco de teste.
 
 ## URLs
 - Admin: `/login`, `/dashboard`, `/kitchen`, `/bar`, `/cashier`...

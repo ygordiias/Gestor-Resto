@@ -5,10 +5,12 @@ import requests
 
 BASE_URL = os.environ.get('REACT_APP_BACKEND_URL', 'https://digital-orders-3.preview.emergentagent.com').rstrip('/')
 
-WAITER_EMAIL = "yuri@digitalcodex.com"
-WAITER_PASS = "123456"
-ADMIN_EMAIL = "admin@teste.com"
-ADMIN_PASS = "123456"
+from _credenciais import credencial
+
+_WAITER = credencial("waiter")
+_ADMIN = credencial("admin")
+WAITER_EMAIL, WAITER_PASS = _WAITER["email"], _WAITER["password"]
+ADMIN_EMAIL, ADMIN_PASS = _ADMIN["email"], _ADMIN["password"]
 
 
 def _login(email, password):

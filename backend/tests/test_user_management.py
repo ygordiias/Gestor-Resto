@@ -106,7 +106,7 @@ def test_login_inactive_right_password_is_403(db):
 
 
 def test_login_inactive_wrong_password_is_401(db):
-    status, _ = call("POST", "/api/auth/login", body={"email": "inactive@example.invalid", "password": "errada-123456"})
+    status, _ = call("POST", "/api/auth/login", body={"email": "inactive@example.invalid", "password": "senha-errada-proposital"})
     assert status == 401
 
 
@@ -122,7 +122,7 @@ def test_login_alias_inactive_right_password_is_403(db):
 
 
 def test_login_alias_inactive_wrong_password_is_401(db):
-    status, _ = call("POST", "/api/login", body={"email": "inactive@example.invalid", "password": "errada-123456"})
+    status, _ = call("POST", "/api/login", body={"email": "inactive@example.invalid", "password": "senha-errada-proposital"})
     assert status == 401
 
 

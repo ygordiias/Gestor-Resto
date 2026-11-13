@@ -16,10 +16,12 @@ import pytest
 BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://digital-orders-3.preview.emergentagent.com").rstrip("/")
 API = f"{BASE_URL}/api"
 
-ADMIN = {"email": "admin@teste.com", "password": "123456"}
-WAITER = {"email": "yuri@digitalcodex.com", "password": "123456"}
-CASHIER = {"email": "caixa@digitalcodex.com", "password": "caixa123"}
-BAR = {"email": "bar@digitalcodex.com", "password": "bar123"}
+from _credenciais import credencial
+
+ADMIN = credencial("admin")
+WAITER = credencial("waiter")
+CASHIER = credencial("cashier")
+BAR = credencial("bar")
 
 
 def _login(creds):

@@ -18,10 +18,12 @@ import requests
 BASE_URL = os.environ.get("TEST_BACKEND_URL", "http://localhost:8001")
 API = f"{BASE_URL}/api"
 
-ADMIN_EMAIL = "admin@teste.com"
-ADMIN_PASSWORD = "123456"
-CASHIER_EMAIL = "caixa@digitalcodex.com"
-CASHIER_PASSWORD = "caixa123"
+from _credenciais import credencial
+
+_ADMIN = credencial("admin")
+_CASHIER = credencial("cashier")
+ADMIN_EMAIL, ADMIN_PASSWORD = _ADMIN["email"], _ADMIN["password"]
+CASHIER_EMAIL, CASHIER_PASSWORD = _CASHIER["email"], _CASHIER["password"]
 
 
 def _login(email, password):

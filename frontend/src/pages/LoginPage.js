@@ -119,23 +119,6 @@ export default function LoginPage() {
               </Button>
             </form>
 
-            <div className="mt-4 p-4 bg-muted rounded-lg">
-              <p className="text-xs text-muted-foreground text-center font-medium mb-2">
-                Credenciais de teste:
-              </p>
-              <div className="grid grid-cols-2 gap-2 text-xs">
-                <div className="text-muted-foreground">Admin:</div>
-                <div>admin@digitalcodex.com / admin123</div>
-                <div className="text-muted-foreground">Garçom:</div>
-                <div>garcom@digitalcodex.com / garcom123</div>
-                <div className="text-muted-foreground">Caixa:</div>
-                <div>caixa@digitalcodex.com / caixa123</div>
-                <div className="text-muted-foreground">Cozinha:</div>
-                <div>cozinha@digitalcodex.com / cozinha123</div>
-                <div className="text-muted-foreground">Bar:</div>
-                <div>bar@digitalcodex.com / bar123</div>
-              </div>
-            </div>
           </CardContent>
         </Card>
       </div>

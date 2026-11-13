@@ -5,7 +5,9 @@ import pytest
 import requests
 
 BASE_URL = os.environ.get("REACT_APP_BACKEND_URL").rstrip("/")
-ADMIN = {"email": "admin@teste.com", "password": "123456"}
+from _credenciais import credencial
+
+ADMIN = credencial("admin")
 
 
 @pytest.fixture(scope="module")
