@@ -24,7 +24,7 @@
     "/app/backend/tests/test_orders_waiter.py (new)"
   ],
   "success_rate": {"backend": "100%", "frontend": "100%"},
-  "test_credentials": "admin@teste.com/123456 (admin), yuri@digitalcodex.com/123456 (waiter)",
+  "test_credentials": "admin@teste.com/<senha removida> (admin), yuri@digitalcodex.com/<senha removida> (waiter)",
   "seed_data_creation": "Temporary test table (number 999 or lower unused) created & cleaned up per test run.",
   "retest_needed": false,
   "should_main_agent_self_test": false,

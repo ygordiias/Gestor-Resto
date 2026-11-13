@@ -7,11 +7,13 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo.errors import PyMongoError
 import socketio
 import os
 import logging
 import json
 import hashlib
+import math
 from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional
@@ -20,12 +22,14 @@ from datetime import datetime, timezone, timedelta
 from passlib.context import CryptContext
 from jose import JWTError, jwt
 from enum import Enum
+from bootstrap import ensure_initial_superadmin, require_secret_key
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
 # JWT Configuration
-SECRET_KEY = os.environ.get('SECRET_KEY', 'digital-codex-secret-key-2024')
+# Obrigatória, sem valor padrão, mínimo de 32 caracteres. Se faltar, o servidor não sobe.
+SECRET_KEY = require_secret_key()
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 hours
 
@@ -74,7 +78,8 @@ async def startup_validate_db():
         result = await client.admin.command("ping")
         if result.get("ok") != 1.0:
             raise Exception("MongoDB ping retornou status != ok")
-        logger.info(f"MongoDB conectado com sucesso: {mongo_url[:30]}...")
+        # Não registrar nenhum trecho do MONGO_URL (contém usuário e senha do banco).
+        logger.info(f"MongoDB conectado com sucesso (db={db_name})")
                 # Cadastro automático das comandas físicas 200 a 230
         # Preserva comandas existentes e seus vínculos com pedidos.
         created_tabs = 0
@@ -100,51 +105,20 @@ async def startup_validate_db():
             f"Novos cadastros: {created_tabs}"
         )
 
-        # Auto-create superadmin
-        superadmin = await db.users.find_one({"email": "ygor@gestorresto.com"})
-        if not superadmin:
-            from passlib.context import CryptContext as _PC
-            _pwd = _PC(schemes=["bcrypt"], deprecated="auto")
-            sa_dict = {
-                "id": str(uuid.uuid4()),
-                "name": "Ygor - Super Admin",
-                "email": "ygor@gestorresto.com",
-                "role": "superadmin",
-                "password": _pwd.hash("87yOY4f@"),
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            }
-            await db.users.insert_one(sa_dict)
-            logger.info("Superadmin ygor@gestorresto.com criado")
-        elif superadmin.get("role") != "superadmin":
-            await db.users.update_one(
-                {"email": "ygor@gestorresto.com"},
-                {"$set": {"role": "superadmin"}}
-            )
-            logger.info("Superadmin ygor@gestorresto.com role corrigido")
-        else:
-            logger.info("Superadmin ygor@gestorresto.com ja existe")
-
-        # Auto-create admin user se não existir
-        admin = await db.users.find_one({"email": "admin@teste.com"})
-        if not admin:
-            from passlib.context import CryptContext as _PC
-            _pwd = _PC(schemes=["bcrypt"], deprecated="auto")
-            admin_dict = {
-                "id": str(uuid.uuid4()),
-                "name": "Administrador",
-                "email": "admin@teste.com",
-                "role": "admin",
-                "password": _pwd.hash("123456"),
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            }
-            await db.users.insert_one(admin_dict)
-            logger.info("Usuário admin@teste.com criado automaticamente")
-        else:
-            logger.info("Usuário admin@teste.com já existe")
+        # Superadmin inicial: só via variáveis de ambiente e só se não existir
+        # nenhum superadmin. Nunca derruba o servidor (ver bootstrap.py).
+        await ensure_initial_superadmin(db, logger)
 
     except Exception as e:
-        logger.critical(f"FALHA na conexão com MongoDB: {e}")
-        logger.critical("O servidor NÃO pode operar sem banco de dados. Verifique MONGO_URL no .env")
+        # Só o tipo do erro: a mensagem do driver pode conter o endereço do banco.
+        logger.critical(
+            f"FALHA ao iniciar com o MongoDB ({type(e).__name__}). "
+            "O servidor NÃO pode operar sem banco de dados."
+        )
+        logger.critical(
+            "Verifique MONGO_URL e DB_NAME no ambiente e se o IP do servidor "
+            "está liberado no Atlas (Network Access)."
+        )
         raise SystemExit(1)
 
 # ==================== HEALTH / PING ====================
@@ -417,6 +391,9 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
         user = await db.users.find_one({"id": user_id}, {"_id": 0})
         if user is None:
             raise HTTPException(status_code=401, detail="User not found")
+        # Conta desativada perde o acesso na hora, mesmo com token ainda válido.
+        if user.get("is_active", True) is False:
+            raise HTTPException(status_code=401, detail="Usuário desativado")
         return user
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
@@ -432,34 +409,29 @@ def require_role(allowed_roles: List[UserRole]):
         return current_user
     return role_checker
 
+# Grupos de perfis (superadmin sempre passa via require_role).
+STAFF_ROLES = [UserRole.ADMIN, UserRole.WAITER, UserRole.CASHIER, UserRole.KITCHEN, UserRole.BAR]
+CASH_ROLES = [UserRole.ADMIN, UserRole.CASHIER]
+TABLE_ROLES = [UserRole.ADMIN, UserRole.WAITER, UserRole.CASHIER]
+ITEM_STATUS_ROLES = [UserRole.ADMIN, UserRole.KITCHEN, UserRole.BAR, UserRole.WAITER]
+
+# Usuários: campos que PUT /users/{id} aceita e tamanho mínimo de senha.
+USER_UPDATE_FIELDS = {"name", "email", "role", "password", "is_active"}
+MIN_USER_PASSWORD_LENGTH = 8
+
 # ==================== AUTH ROUTES ====================
-@api_router.post("/auth/register", response_model=Token)
-async def register(user_data: UserCreate):
-    existing = await db.users.find_one({"email": user_data.email})
-    if existing:
-        raise HTTPException(status_code=400, detail="Email already registered")
-    
-    hashed_password = get_password_hash(user_data.password)
-    user = User(**user_data.model_dump(exclude={"password"}))
-    user_dict = user.model_dump()
-    user_dict["password"] = hashed_password
-    user_dict["created_at"] = user_dict["created_at"].isoformat()
-    
-    await db.users.insert_one(user_dict)
-    access_token = create_access_token(data={"sub": user.id})
-    
-    return Token(
-        access_token=access_token,
-        token_type="bearer",
-        user={"id": user.id, "name": user.name, "email": user.email, "role": user.role}
-    )
+# Não existe cadastro público. Usuários são criados apenas por admin/superadmin
+# via POST /api/users (ver create_user).
 
 @api_router.post("/auth/login", response_model=Token)
 async def login(login_data: UserLogin):
     user = await db.users.find_one({"email": login_data.email}, {"_id": 0})
     if not user or not verify_password(login_data.password, user["password"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    
+    # Só informa a desativação para quem acertou a senha.
+    if user.get("is_active", True) is False:
+        raise HTTPException(status_code=403, detail="Usuário desativado. Procure o administrador.")
+
     access_token = create_access_token(data={"sub": user["id"]})
     return Token(
         access_token=access_token,
@@ -471,14 +443,10 @@ async def login(login_data: UserLogin):
 async def get_me(current_user: dict = Depends(get_current_user)):
     return {k: v for k, v in current_user.items() if k != "password"}
 
-# Alias diretos: POST /api/login e POST /api/register
+# Alias direto: POST /api/login
 @api_router.post("/login", response_model=Token)
 async def login_alias(login_data: UserLogin):
     return await login(login_data)
-
-@api_router.post("/register", response_model=Token)
-async def register_alias(user_data: UserCreate):
-    return await register(user_data)
 
 # ==================== USER ROUTES ====================
 @api_router.get("/users", response_model=List[dict])
@@ -491,7 +459,9 @@ async def create_user(user_data: UserCreate, current_user: dict = Depends(requir
     # Admin não pode criar superadmin
     if user_data.role == UserRole.SUPERADMIN and current_user["role"] != UserRole.SUPERADMIN.value:
         raise HTTPException(status_code=403, detail="Apenas superadmin pode criar outros superadmins")
-    
+    if len(user_data.password or "") < MIN_USER_PASSWORD_LENGTH:
+        raise HTTPException(status_code=400, detail=f"A senha deve ter pelo menos {MIN_USER_PASSWORD_LENGTH} caracteres")
+
     existing = await db.users.find_one({"email": user_data.email})
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
@@ -505,23 +475,97 @@ async def create_user(user_data: UserCreate, current_user: dict = Depends(requir
     await db.users.insert_one(user_dict)
     return {k: v for k, v in user_dict.items() if k not in ["password", "_id"]}
 
+async def _get_user_target(user_id: str, current_user: dict) -> dict:
+    """Busca o usuário-alvo e aplica: só superadmin mexe em superadmin."""
+    target = await db.users.find_one({"id": user_id}, {"_id": 0})
+    if not target:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado")
+    if (target.get("role") == UserRole.SUPERADMIN.value
+            and current_user["role"] != UserRole.SUPERADMIN.value):
+        raise HTTPException(status_code=403, detail="Apenas superadmin pode alterar um superadmin")
+    return target
+
+
 @api_router.put("/users/{user_id}")
 async def update_user(user_id: str, user_data: dict, current_user: dict = Depends(require_role([UserRole.ADMIN]))):
-    # Admin não pode promover para superadmin
-    if user_data.get("role") == "superadmin" and current_user["role"] != "superadmin":
-        raise HTTPException(status_code=403, detail="Apenas superadmin pode definir role superadmin")
+    if not user_data:
+        raise HTTPException(status_code=400, detail="Nenhum campo para atualizar")
+    unknown = sorted(set(user_data) - USER_UPDATE_FIELDS)
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Campos não permitidos: {', '.join(unknown)}")
+
+    target = await _get_user_target(user_id, current_user)
+    is_self = target["id"] == current_user["id"]
+    is_superadmin = current_user["role"] == UserRole.SUPERADMIN.value
+    updates = {}
+
+    if "name" in user_data:
+        name = user_data["name"]
+        if not isinstance(name, str) or not name.strip() or len(name.strip()) > 100:
+            raise HTTPException(status_code=400, detail="Nome inválido (1 a 100 caracteres)")
+        updates["name"] = name.strip()
+
+    if "email" in user_data:
+        email = user_data["email"]
+        if not isinstance(email, str) or "@" not in email.strip() or len(email.strip()) > 254:
+            raise HTTPException(status_code=400, detail="E-mail inválido")
+        email = email.strip()
+        if await db.users.find_one({"email": email, "id": {"$ne": user_id}}, {"_id": 0, "id": 1}):
+            raise HTTPException(status_code=409, detail="E-mail já usado por outra conta")
+        updates["email"] = email
+
+    if "role" in user_data:
+        role = user_data["role"]
+        if role not in {r.value for r in UserRole}:
+            raise HTTPException(status_code=400, detail="Perfil inválido")
+        if role == UserRole.SUPERADMIN.value and not is_superadmin:
+            raise HTTPException(status_code=403, detail="Apenas superadmin pode definir role superadmin")
+        if is_self and role != target.get("role"):
+            raise HTTPException(status_code=403, detail="Você não pode alterar o seu próprio perfil")
+        updates["role"] = role
+
+    if "is_active" in user_data:
+        is_active = user_data["is_active"]
+        if not isinstance(is_active, bool):
+            raise HTTPException(status_code=400, detail="is_active deve ser verdadeiro ou falso")
+        if is_self and is_active != target.get("is_active", True):
+            raise HTTPException(status_code=403, detail="Você não pode desativar ou reativar a sua própria conta")
+        updates["is_active"] = is_active
+
     if "password" in user_data:
-        user_data["password"] = get_password_hash(user_data["password"])
-    await db.users.update_one({"id": user_id}, {"$set": user_data})
-    return {"message": "User updated"}
+        password = user_data["password"]
+        if not isinstance(password, str) or len(password) < MIN_USER_PASSWORD_LENGTH:
+            raise HTTPException(status_code=400, detail=f"A senha deve ter pelo menos {MIN_USER_PASSWORD_LENGTH} caracteres")
+        updates["password"] = get_password_hash(password)
+
+    change = {"$set": updates}
+    # Reativação: apaga as marcas da desativação anterior.
+    if updates.get("is_active") is True and target.get("is_active", True) is False:
+        change["$unset"] = {"deactivated_at": "", "deactivated_by_id": ""}
+    await db.users.update_one({"id": user_id}, change)
+    updated = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
+    return updated
 
 @api_router.delete("/users/{user_id}")
 async def delete_user(user_id: str, current_user: dict = Depends(require_role([UserRole.ADMIN]))):
-    await db.users.delete_one({"id": user_id})
-    return {"message": "User deleted"}
+    """Desativa o usuário (is_active = false). Não apaga: preserva o histórico
+    de quem fez cada pedido, cancelamento e fechamento de caixa."""
+    target = await _get_user_target(user_id, current_user)
+    if target["id"] == current_user["id"]:
+        raise HTTPException(status_code=403, detail="Você não pode desativar a sua própria conta")
+    if target.get("is_active", True) is not False:
+        await db.users.update_one(
+            {"id": user_id},
+            {"$set": {
+                "is_active": False,
+                "deactivated_at": datetime.now(timezone.utc).isoformat(),
+                "deactivated_by_id": current_user["id"],
+            }},
+        )
+    return {"message": "Usuário desativado"}
 
 # ==================== CATEGORY ROUTES ====================
-@api_router.get("/categories", response_model=List[dict])
+@api_router.get("/categories", response_model=List[dict], dependencies=[Depends(require_role(STAFF_ROLES))])
 async def get_categories():
     categories = await db.categories.find({}, {"_id": 0}).to_list(100)
     return categories
@@ -545,12 +589,12 @@ async def delete_category(category_id: str, current_user: dict = Depends(require
     return {"message": "Category deleted"}
 
 # ==================== PRODUCT ROUTES ====================
-@api_router.get("/products", response_model=List[dict])
+@api_router.get("/products", response_model=List[dict], dependencies=[Depends(require_role(STAFF_ROLES))])
 async def get_products():
     products = await db.products.find({}, {"_id": 0}).to_list(500)
     return products
 
-@api_router.get("/products/{product_id}")
+@api_router.get("/products/{product_id}", dependencies=[Depends(require_role(STAFF_ROLES))])
 async def get_product(product_id: str):
     product = await db.products.find_one({"id": product_id}, {"_id": 0})
     if not product:
@@ -576,7 +620,7 @@ async def delete_product(product_id: str, current_user: dict = Depends(require_r
     return {"message": "Product deleted"}
 
 # ==================== TABLE ROUTES ====================
-@api_router.get("/tables", response_model=List[dict])
+@api_router.get("/tables", response_model=List[dict], dependencies=[Depends(require_role(STAFF_ROLES))])
 async def get_tables():
     tables = await db.tables.find({}, {"_id": 0}).to_list(100)
     return tables
@@ -611,7 +655,12 @@ async def validate_table_status_change(table_id: str, new_status: str):
 
 
 @api_router.put("/tables/{table_id}")
-async def update_table(table_id: str, table_data: dict):
+async def update_table(table_id: str, table_data: dict, current_user: dict = Depends(require_role(TABLE_ROLES))):
+    # Garçom e caixa só alteram o status; capacidade, tipo e observação só admin.
+    if current_user["role"] not in (UserRole.ADMIN.value, UserRole.SUPERADMIN.value):
+        if set(table_data) - {"status"}:
+            raise HTTPException(status_code=403, detail="Garçom e caixa só podem alterar o status da mesa")
+
     new_status = table_data.get("status")
 
     if new_status is not None:
@@ -642,7 +691,7 @@ async def update_table(table_id: str, table_data: dict):
     return {"message": "Table updated"}
 
 
-@api_router.put("/tables/{table_id}/status")
+@api_router.put("/tables/{table_id}/status", dependencies=[Depends(require_role(TABLE_ROLES))])
 async def update_table_status(table_id: str, status_data: dict):
     """Atualiza o status sem permitir liberar mesas com comandas abertas."""
     new_status = status_data.get("status")
@@ -661,7 +710,7 @@ async def update_table_status(table_id: str, status_data: dict):
     return {"message": f"Status atualizado para {new_status}"}
 
 
-@api_router.post("/tables/{table_id}/request-cleaning")
+@api_router.post("/tables/{table_id}/request-cleaning", dependencies=[Depends(require_role(TABLE_ROLES))])
 async def request_table_cleaning(table_id: str):
     """Solicita limpeza somente após todas as comandas serem fechadas."""
     await validate_table_status_change(table_id, "cleaning")
@@ -768,7 +817,7 @@ async def link_physical_tab(table_id: str, data: TabLinkCreate, current_user: di
     return {k: v for k, v in order_doc.items() if k != "_id"}
 
 # ==================== ORDER ROUTES ====================
-@api_router.get("/orders", response_model=List[dict])
+@api_router.get("/orders", response_model=List[dict], dependencies=[Depends(require_role([UserRole.ADMIN]))])
 async def get_orders(status_filter: Optional[str] = Query(None, alias="status"), is_closed: Optional[bool] = None):
     query = {}
     if status_filter:
@@ -778,17 +827,17 @@ async def get_orders(status_filter: Optional[str] = Query(None, alias="status"),
     orders = await db.orders.find(query, {"_id": 0}).to_list(500)
     return orders
 
-@api_router.get("/orders/open")
+@api_router.get("/orders/open", dependencies=[Depends(require_role(STAFF_ROLES))])
 async def get_open_orders():
     orders = await db.orders.find({"is_closed": False}, {"_id": 0}).to_list(100)
     return orders
 
-@api_router.get("/orders/table/{table_id}")
+@api_router.get("/orders/table/{table_id}", dependencies=[Depends(require_role(STAFF_ROLES))])
 async def get_table_order(table_id: str):
     order = await db.orders.find_one({"table_id": table_id, "is_closed": False}, {"_id": 0})
     return order
 
-@api_router.get("/orders/{order_id}")
+@api_router.get("/orders/{order_id}", dependencies=[Depends(require_role(STAFF_ROLES))])
 async def get_order(order_id: str):
     order = await db.orders.find_one({"id": order_id}, {"_id": 0})
     if not order:
@@ -986,7 +1035,7 @@ async def emit_order_updates(items):
         bar_orders = await db.orders.find({"is_closed": False}, {"_id": 0}).to_list(100)
         await sio.emit('bar_update', bar_orders)
 
-@api_router.put("/orders/{order_id}/item/{item_id}/status")
+@api_router.put("/orders/{order_id}/item/{item_id}/status", dependencies=[Depends(require_role(ITEM_STATUS_ROLES))])
 async def update_item_status(order_id: str, item_id: str, status_data: dict):
     order = await db.orders.find_one({"id": order_id}, {"_id": 0})
     if not order:
@@ -1312,8 +1361,75 @@ async def complete_online_order(
     }
 
 
+# Formas aceitas no fechamento da comanda: as mesmas do fechamento do caixa.
+CLOSE_PAYMENT_METHODS = ("cash", "pix", "credit", "debit", "card", "voucher")
+
+
+def _close_cents(value) -> int:
+    """Centavos com o MESMO arredondamento do fechamento do caixa."""
+    return round(float(value or 0) * 100)
+
+
+def _validate_close_payments(total_cents: int, payments, is_comp: bool) -> list:
+    """Valida os pagamentos ANTES de gravar qualquer coisa.
+
+    Devolve a lista normalizada [{"method", "amount_cents"}], sem linhas de
+    R$ 0,00 (a tela cria linhas zeradas no botão "+"). Levanta 422 com
+    mensagem clara quando o pagamento travaria o fechamento do caixa.
+    """
+    if payments is None:
+        payments = []
+    if not isinstance(payments, list):
+        raise HTTPException(status_code=422, detail="Pagamentos inválidos")
+
+    normalized = []
+    for p in payments:
+        if not isinstance(p, dict):
+            raise HTTPException(status_code=422, detail="Pagamento inválido")
+        method = p.get("method")
+        if method not in CLOSE_PAYMENT_METHODS:
+            raise HTTPException(status_code=422, detail=f"Forma de pagamento inválida: {method}")
+        amount = p.get("amount")
+        if isinstance(amount, bool) or not isinstance(amount, (int, float)) or not math.isfinite(amount):
+            raise HTTPException(status_code=422, detail="Valor de pagamento inválido")
+        amount_cents = _close_cents(amount)
+        if amount_cents < 0:
+            raise HTTPException(status_code=422, detail="Valor de pagamento não pode ser negativo")
+        if amount_cents == 0:
+            continue
+        normalized.append({"method": method, "amount_cents": amount_cents})
+
+    # Cortesia/permuta não entra no faturamento nem na conferência do caixa.
+    if is_comp:
+        return normalized
+
+    paid = sum(p["amount_cents"] for p in normalized)
+    cash = sum(p["amount_cents"] for p in normalized if p["method"] == "cash")
+    if total_cents > 0 and not normalized:
+        raise HTTPException(status_code=422, detail="Informe o pagamento da comanda")
+    if paid < total_cents:
+        falta = (total_cents - paid) / 100
+        raise HTTPException(status_code=422, detail=f"Pagamento insuficiente: faltam R$ {falta:.2f}".replace(".", ","))
+    if paid - total_cents > cash:
+        raise HTTPException(
+            status_code=422,
+            detail="Troco maior que o valor em dinheiro. Ajuste os valores: só pagamento em dinheiro pode ter troco",
+        )
+    return normalized
+
+
+class _OrderAlreadyClosed(Exception):
+    pass
+
+
+def _transaction_unsupported(exc: Exception) -> bool:
+    code = getattr(exc, "code", None)
+    text = str(exc).lower()
+    return code in (20, 263) or "replica set" in text or "transaction numbers" in text
+
+
 @api_router.post("/orders/{order_id}/close")
-async def close_order(order_id: str, payment_data: dict):
+async def close_order(order_id: str, payment_data: dict, current_user: dict = Depends(require_role(CASH_ROLES))):
     order = await db.orders.find_one({"id": order_id}, {"_id": 0})
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
@@ -1322,14 +1438,66 @@ async def close_order(order_id: str, payment_data: dict):
     if order.get("source") == "online":
         raise HTTPException(status_code=409, detail="Pedido online deve usar Finalizar pedido online (aguardando repasse)")
 
-    # Register payments
-    for payment in payment_data.get("payments", []):
-        payment_obj = Payment(order_id=order_id, amount=payment["amount"], method=payment["method"])
-        pay_dict = payment_obj.model_dump()
-        pay_dict["created_at"] = pay_dict["created_at"].isoformat()
-        await db.payments.insert_one(pay_dict)
-    
-    # Baixa automatica de estoque: itens ainda nao deduzidos (garantia no fechamento).
+    # Total SEMPRE o do banco, em centavos (nunca o enviado pelo navegador).
+    total_cents = _close_cents(order.get("total"))
+    is_comp = bool(order.get("is_comp"))
+    payments = _validate_close_payments(total_cents, payment_data.get("payments"), is_comp)
+
+    closed_at = datetime.now(timezone.utc).isoformat()
+    payment_docs = []
+
+    # Fechamento, pagamentos e total_sales: juntos ou nada (transação).
+    # Sem suporte a transação no banco, a rota falha e NÃO grava nada.
+    try:
+        async with await client.start_session() as session:
+            async with session.start_transaction():
+                claimed = await db.orders.update_one(
+                    {"id": order_id, "is_closed": False, "source": {"$ne": "online"}},
+                    {"$set": {
+                        "is_closed": True,
+                        "closed_at": closed_at,
+                        "status": OrderStatus.DELIVERED.value,
+                        "closed_by_id": current_user["id"],
+                    }},
+                    session=session,
+                )
+                if claimed.modified_count != 1:
+                    # Duplo clique / outra aba: outro pedido já fechou esta comanda.
+                    raise _OrderAlreadyClosed()
+
+                register = await db.cash_registers.find_one({"is_open": True}, {"_id": 0}, session=session)
+                for p in payments:
+                    payment_obj = Payment(order_id=order_id, amount=p["amount_cents"] / 100, method=p["method"])
+                    pay_dict = payment_obj.model_dump()
+                    pay_dict["created_at"] = pay_dict["created_at"].isoformat()
+                    pay_dict["created_by_id"] = current_user["id"]
+                    pay_dict["register_id"] = register["id"] if register else None
+                    payment_docs.append(pay_dict)
+                if payment_docs:
+                    await db.payments.insert_many(payment_docs, session=session)
+
+                # Atualiza o caixa uma única vez (não conta cortesia/permuta).
+                if register and not is_comp:
+                    await db.cash_registers.update_one(
+                        {"id": register["id"], "is_open": True},
+                        {"$inc": {"total_sales": total_cents / 100}},
+                        session=session,
+                    )
+    except _OrderAlreadyClosed:
+        raise HTTPException(status_code=409, detail="Pedido já está fechado")
+    except PyMongoError as exc:
+        if _transaction_unsupported(exc):
+            logger.error("[close_order] banco sem suporte a transação (%s); nada foi gravado", type(exc).__name__)
+            raise HTTPException(
+                status_code=503,
+                detail="Fechamento indisponível: o banco de dados não aceita transações. Nada foi gravado.",
+            )
+        logger.error("[close_order] falha na transação (%s); nada foi gravado", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Falha ao fechar a comanda. Nada foi gravado; tente novamente.")
+
+    # Daqui em diante a comanda já está fechada e paga (transação confirmada).
+    # Baixa automática de estoque dos itens ainda não deduzidos. Só quem fechou
+    # a comanda chega aqui, então não há baixa em dobro por duplo clique.
     # Cortesia TAMBEM consome estoque (mesmo com preco zero).
     changed = False
     for item in order.get("items", []):
@@ -1345,29 +1513,14 @@ async def close_order(order_id: str, payment_data: dict):
     if changed:
         await db.orders.update_one({"id": order_id}, {"$set": {"items": order["items"]}})
 
-    # Close order
-    closed_at = datetime.now(timezone.utc).isoformat()
-    await db.orders.update_one(
-        {"id": order_id},
-        {"$set": {"is_closed": True, "closed_at": closed_at, "status": OrderStatus.DELIVERED.value}}
-    )
-    
     # Update table
     await release_physical_tab(order)
     await refresh_table_after_order(order.get("table_id"))
-    
-    # Update cash register (nao conta cortesia/permuta)
-    register = await db.cash_registers.find_one({"is_open": True}, {"_id": 0})
-    if register and not order.get("is_comp"):
-        await db.cash_registers.update_one(
-            {"id": register["id"]},
-            {"$inc": {"total_sales": order["total"]}}
-        )
-    
+
     # Emit updates
     await sio.emit('tables_updated', await get_tables())
     await sio.emit('order_closed', {"order_id": order_id})
-    
+
     return {"message": "Order closed successfully"}
 
 @api_router.patch("/orders/{order_id}/comp")
@@ -1422,7 +1575,7 @@ async def sales_by_table(period: str = "daily", current_user: dict = Depends(req
         })
     return {"period": period, "start": start_iso, "rows": rows}
 
-@api_router.post("/orders/{order_id}/cancel-quick")
+@api_router.post("/orders/{order_id}/cancel-quick", dependencies=[Depends(require_role([UserRole.ADMIN]))])
 async def quick_cancel_order(order_id: str):
     order = await db.orders.find_one({"id": order_id}, {"_id": 0})
     if not order:
@@ -1674,7 +1827,7 @@ async def restore_stock(product_id: str, quantity: int, order_code: str = ""):
     await check_stock_alert(stock_item["id"])
     logger.info(f"[STOCK] Devolucao direta - Pedido {order_code or '-'} produto={product_id} x{quantity}")
 
-@api_router.get("/stock", response_model=List[dict])
+@api_router.get("/stock", response_model=List[dict], dependencies=[Depends(require_role([UserRole.ADMIN]))])
 async def get_stock(stock_type: Optional[str] = None):
     query = {}
     if stock_type:
@@ -1699,7 +1852,7 @@ async def update_stock(stock_id: str, stock_data: dict, current_user: dict = Dep
     await db.stock.update_one({"id": stock_id}, {"$set": stock_data})
     return {"message": "Stock updated"}
 
-@api_router.get("/stock/alerts")
+@api_router.get("/stock/alerts", dependencies=[Depends(require_role([UserRole.ADMIN]))])
 async def get_stock_alerts():
     pipeline = [
         {"$match": {"$expr": {"$lte": ["$quantity", "$min_quantity"]}}},
@@ -1757,7 +1910,7 @@ async def get_stock_risk_alerts(current_user: dict = Depends(require_role([UserR
     return risk_alerts
 
 # ==================== CASH REGISTER ROUTES ====================
-@api_router.get("/cash-register/current")
+@api_router.get("/cash-register/current", dependencies=[Depends(require_role(CASH_ROLES))])
 async def get_current_register():
     register = await db.cash_registers.find_one({"is_open": True}, {"_id": 0})
     return register
@@ -2276,12 +2429,12 @@ async def register_deposit(movement_data: dict, current_user: dict = Depends(req
     return {"message": "Deposit registered"}
 
 # ==================== INVOICE ROUTES (MOCK) ====================
-@api_router.get("/invoices", response_model=List[dict])
+@api_router.get("/invoices", response_model=List[dict], dependencies=[Depends(require_role(CASH_ROLES))])
 async def get_invoices():
     invoices = await db.invoices.find({}, {"_id": 0}).to_list(500)
     return invoices
 
-@api_router.post("/invoices")
+@api_router.post("/invoices", dependencies=[Depends(require_role(CASH_ROLES))])
 async def create_invoice(invoice_data: InvoiceBase):
     order = await db.orders.find_one({"id": invoice_data.order_id}, {"_id": 0})
     if not order:
@@ -3111,98 +3264,6 @@ async def delete_operation_task(
 @api_router.get("/")
 async def root():
     return {"message": "Gestor Restô - API de Gestão para Restaurante"}
-
-@api_router.post("/setup/seed")
-async def seed_database():
-    """Seed database with initial data"""
-    # Check if admin exists
-    admin = await db.users.find_one({"email": "admin@digitalcodex.com"})
-    if admin:
-        return {"message": "Database already seeded"}
-    
-    # Create admin user
-    admin_user = User(name="Administrador", email="admin@digitalcodex.com", role=UserRole.ADMIN)
-    admin_dict = admin_user.model_dump()
-    admin_dict["password"] = get_password_hash("admin123")
-    admin_dict["created_at"] = admin_dict["created_at"].isoformat()
-    await db.users.insert_one(admin_dict)
-    
-    # Create sample users
-    users = [
-        {"name": "João Garçom", "email": "garcom@digitalcodex.com", "role": "waiter", "password": get_password_hash("garcom123")},
-        {"name": "Maria Caixa", "email": "caixa@digitalcodex.com", "role": "cashier", "password": get_password_hash("caixa123")},
-        {"name": "Pedro Cozinha", "email": "cozinha@digitalcodex.com", "role": "kitchen", "password": get_password_hash("cozinha123")},
-        {"name": "Ana Bar", "email": "bar@digitalcodex.com", "role": "bar", "password": get_password_hash("bar123")},
-    ]
-    for u in users:
-        user = User(name=u["name"], email=u["email"], role=u["role"])
-        user_dict = user.model_dump()
-        user_dict["password"] = u["password"]
-        user_dict["created_at"] = user_dict["created_at"].isoformat()
-        await db.users.insert_one(user_dict)
-    
-    # Create categories
-    categories = [
-        {"name": "Hambúrgueres", "type": "food", "icon": "🍔"},
-        {"name": "Pratos Principais", "type": "food", "icon": "🍽️"},
-        {"name": "Petiscos", "type": "food", "icon": "🍟"},
-        {"name": "Sobremesas", "type": "food", "icon": "🍰"},
-        {"name": "Refrigerantes", "type": "drink", "icon": "🥤"},
-        {"name": "Sucos", "type": "drink", "icon": "🧃"},
-        {"name": "Cervejas", "type": "drink", "icon": "🍺"},
-        {"name": "Vinhos", "type": "drink", "icon": "🍷"},
-        {"name": "Coquetéis", "type": "drink", "icon": "🍹"},
-    ]
-    category_ids = {}
-    for c in categories:
-        cat = Category(name=c["name"], type=c["type"], icon=c["icon"])
-        cat_dict = cat.model_dump()
-        cat_dict["created_at"] = cat_dict["created_at"].isoformat()
-        await db.categories.insert_one(cat_dict)
-        category_ids[c["name"]] = cat.id
-    
-    # Create products
-    products = [
-        {"name": "X-Burguer Clássico", "category": "Hambúrgueres", "price": 28.90, "cost": 10, "type": "food", "image_url": "https://images.unsplash.com/photo-1568901346375-23c9450c58cd?w=400"},
-        {"name": "X-Bacon Especial", "category": "Hambúrgueres", "price": 34.90, "cost": 12, "type": "food", "image_url": "https://images.unsplash.com/photo-1553979459-d2229ba7433b?w=400"},
-        {"name": "X-Salada", "category": "Hambúrgueres", "price": 26.90, "cost": 9, "type": "food", "image_url": "https://images.unsplash.com/photo-1572802419224-296b0aeee0d9?w=400"},
-        {"name": "Filé à Parmegiana", "category": "Pratos Principais", "price": 52.90, "cost": 20, "type": "food", "image_url": "https://images.unsplash.com/photo-1632778149955-e80f8ceca2e8?w=400"},
-        {"name": "Picanha Grelhada", "category": "Pratos Principais", "price": 68.90, "cost": 30, "type": "food", "image_url": "https://images.unsplash.com/photo-1594041680534-e8c8cdebd659?w=400"},
-        {"name": "Frango Grelhado", "category": "Pratos Principais", "price": 38.90, "cost": 15, "type": "food", "image_url": "https://images.unsplash.com/photo-1598515214211-89d3c73ae83b?w=400"},
-        {"name": "Batata Frita", "category": "Petiscos", "price": 18.90, "cost": 5, "type": "food", "image_url": "https://images.unsplash.com/photo-1573080496219-bb080dd4f877?w=400"},
-        {"name": "Onion Rings", "category": "Petiscos", "price": 22.90, "cost": 6, "type": "food", "image_url": "https://images.unsplash.com/photo-1639024471283-03518883512d?w=400"},
-        {"name": "Pudim", "category": "Sobremesas", "price": 14.90, "cost": 4, "type": "food", "image_url": "https://images.unsplash.com/photo-1624353365286-3f8d62daad51?w=400"},
-        {"name": "Petit Gateau", "category": "Sobremesas", "price": 24.90, "cost": 8, "type": "food", "image_url": "https://images.unsplash.com/photo-1606313564200-e75d5e30476c?w=400"},
-        {"name": "Coca-Cola", "category": "Refrigerantes", "price": 7.90, "cost": 2, "type": "drink", "image_url": "https://images.unsplash.com/photo-1554866585-cd94860890b7?w=400"},
-        {"name": "Guaraná", "category": "Refrigerantes", "price": 7.90, "cost": 2, "type": "drink", "image_url": "https://images.unsplash.com/photo-1625772299848-391b6a87d7b3?w=400"},
-        {"name": "Suco de Laranja", "category": "Sucos", "price": 9.90, "cost": 3, "type": "drink", "image_url": "https://images.unsplash.com/photo-1621506289937-a8e4df240d0b?w=400"},
-        {"name": "Suco de Maracujá", "category": "Sucos", "price": 9.90, "cost": 3, "type": "drink", "image_url": "https://images.unsplash.com/photo-1546173159-315724a31696?w=400"},
-        {"name": "Heineken", "category": "Cervejas", "price": 14.90, "cost": 6, "type": "drink", "image_url": "https://images.unsplash.com/photo-1608270586620-248524c67de9?w=400"},
-        {"name": "Brahma", "category": "Cervejas", "price": 9.90, "cost": 4, "type": "drink", "image_url": "https://images.unsplash.com/photo-1535958636474-b021ee887b13?w=400"},
-        {"name": "Vinho Tinto", "category": "Vinhos", "price": 89.90, "cost": 35, "type": "drink", "image_url": "https://images.unsplash.com/photo-1510812431401-41d2bd2722f3?w=400"},
-        {"name": "Vinho Branco", "category": "Vinhos", "price": 79.90, "cost": 30, "type": "drink", "image_url": "https://images.unsplash.com/photo-1558001373-7b93ee48ffa0?w=400"},
-        {"name": "Caipirinha", "category": "Coquetéis", "price": 19.90, "cost": 6, "type": "drink", "image_url": "https://images.unsplash.com/photo-1536935338788-846bb9981813?w=400"},
-        {"name": "Mojito", "category": "Coquetéis", "price": 24.90, "cost": 8, "type": "drink", "image_url": "https://images.unsplash.com/photo-1551538827-9c037cb4f32a?w=400"},
-    ]
-    for p in products:
-        prod = Product(
-            name=p["name"],
-            category_id=category_ids[p["category"]],
-            price=p["price"],
-            cost=p["cost"],
-            type=p["type"],
-            image_url=p.get("image_url")
-        )
-        prod_dict = prod.model_dump()
-        prod_dict["created_at"] = prod_dict["created_at"].isoformat()
-        await db.products.insert_one(prod_dict)
-    
-    # Create tables
-    for i in range(1, 16):
-        table = Table(number=i, capacity=4 if i <= 10 else 6)
-        await db.tables.insert_one(table.model_dump())
-    
-    return {"message": "Database seeded successfully"}
 
 # ==================== PUBLIC ROUTES (Cliente Online) ====================
 # Rotas sem autenticação — acessíveis pelo frontend do cliente

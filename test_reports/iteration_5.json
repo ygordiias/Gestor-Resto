@@ -1,5 +1,5 @@
 {
-  "summary": "Iteration 5 (stock deduction idempotency + cancel-with-admin-auth + item courtesy + Bar keyboard nav). Backend: 10/11 tests PASSED — all critical flows verified (stock deducted on delivered, stock guaranteed on close_order without delivered, idempotent double-close, cancel 400/403/200 flows, courtesy per item recalculates totals). Only failure = 'bar@digitalcodex.com/bar123' login returns 401 (seed data not present). Frontend: /cashier shows mark-comp-btn and cancel-order-btn on selected order; /bar renders with bar-keyboard-hint, ring-4 + '▶ SELECIONADO' badge on ArrowDown, and 'Garçom: <name>' present on every card. Regression: /dashboard /kitchen /tables /menu all load OK; admin/waiter/cashier logins fine.",
+  "summary": "Iteration 5 (stock deduction idempotency + cancel-with-admin-auth + item courtesy + Bar keyboard nav). Backend: 10/11 tests PASSED — all critical flows verified (stock deducted on delivered, stock guaranteed on close_order without delivered, idempotent double-close, cancel 400/403/200 flows, courtesy per item recalculates totals). Only failure = 'bar@digitalcodex.com/<senha removida>' login returns 401 (seed data not present). Frontend: /cashier shows mark-comp-btn and cancel-order-btn on selected order; /bar renders with bar-keyboard-hint, ring-4 + '▶ SELECIONADO' badge on ArrowDown, and 'Garçom: <name>' present on every card. Regression: /dashboard /kitchen /tables /menu all load OK; admin/waiter/cashier logins fine.",
   "backend_issues": {
     "critical": [],
     "minor": [
@@ -16,7 +16,7 @@
     "/app/test_reports/pytest/iter5_results.xml"
   ],
   "action_items": [
-    "Seed the 'bar@digitalcodex.com / bar123' user with role='bar' so real bar operators can log in (main-agent fix — one seed insert)."
+    "Seed the 'bar@digitalcodex.com / <senha removida>' user with role='bar' so real bar operators can log in (main-agent fix — one seed insert)."
   ],
   "critical_code_review_comments": [
     "server.py is 2230 lines — consider splitting (orders/stock/auth routers) for maintainability.",
@@ -27,10 +27,10 @@
     "/app/backend/tests/test_iter5_stock_and_cancel.py"
   ],
   "success_rate": {"backend": "91% (10/11)", "frontend": "100%"},
-  "test_credentials": "admin@teste.com/123456, yuri@digitalcodex.com/123456, caixa@digitalcodex.com/caixa123 (all working). bar@digitalcodex.com/bar123 → 401.",
+  "test_credentials": "admin@teste.com/<senha removida>, yuri@digitalcodex.com/<senha removida>, caixa@digitalcodex.com/<senha removida> (all working). bar@digitalcodex.com/<senha removida> → 401.",
   "seed_data_creation": "Ensured Coca-Cola stock item exists with qty>=100 (created via POST /api/stock as admin if missing). No orphaned test data — every test order was either closed or cancelled.",
   "retest_needed": false,
   "main_agent_can_self_test": true,
   "context_for_next_testing_agent": "Backend test file /app/backend/tests/test_iter5_stock_and_cancel.py is a full regression suite for stock/cancel/courtesy. Bar user seed is the only outstanding item. All other batch-5 acceptance criteria confirmed OK.",
-  "rca of the issue": "Bar user 401: seed_users script never inserted a user with email bar@digitalcodex.com. Reproduction: POST /api/auth/login {email:'bar@digitalcodex.com',password:'bar123'} -> 401 Invalid credentials. Mitigation: add to seed script an idempotent upsert with role='bar' and hashed password, or create via /api/users as admin."
+  "rca of the issue": "Bar user 401: seed_users script never inserted a user with email bar@digitalcodex.com. Reproduction: POST /api/auth/login {email:'bar@digitalcodex.com',password:'<senha removida>'} -> 401 Invalid credentials. Mitigation: add to seed script an idempotent upsert with role='bar' and hashed password, or create via /api/users as admin."
 }

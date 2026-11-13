@@ -1,9 +1,18 @@
 #!/usr/bin/env python3
 """
+LEGADO: script antigo gerado pela plataforma Emergent. NÃO faz parte da suíte
+atual (use backend/tests/ com pytest). Mantido só como referência.
+
+Credenciais: TEST_ADMIN_EMAIL/TEST_ADMIN_PASSWORD (e TEST_<PERFIL>_* opcionais).
+
+A rota POST /api/setup/seed foi removida por segurança; o passo de seed
+deste script foi retirado. Ele espera um banco de TESTE já populado.
+
 Backend API Testing for Digital Codex Restaurant Management System
 Tests all API endpoints for functionality and integration
 """
 
+import os
 import requests
 import sys
 import json
@@ -78,17 +87,6 @@ class RestaurantAPITester:
             })
             return False, {}
 
-    def test_database_seed(self):
-        """Test database seeding"""
-        self.log("=== Testing Database Setup ===")
-        success, response = self.run_test(
-            "Database Seed",
-            "POST",
-            "setup/seed",
-            200
-        )
-        return success
-
     def test_authentication(self):
         """Test authentication endpoints"""
         self.log("=== Testing Authentication ===")
@@ -99,7 +97,7 @@ class RestaurantAPITester:
             "POST",
             "auth/login",
             200,
-            data={"email": "admin@digitalcodex.com", "password": "admin123"}
+            data={"email": os.environ["TEST_ADMIN_EMAIL"], "password": os.environ["TEST_ADMIN_PASSWORD"]}
         )
         
         if success and 'access_token' in response:
@@ -123,11 +121,12 @@ class RestaurantAPITester:
             self.test_data['users'] = users
         
         # Test other user logins
+        # Credenciais do ambiente (banco de TESTE); perfis sem variável são pulados.
         test_users = [
-            {"email": "garcom@digitalcodex.com", "password": "garcom123", "role": "waiter"},
-            {"email": "caixa@digitalcodex.com", "password": "caixa123", "role": "cashier"},
-            {"email": "cozinha@digitalcodex.com", "password": "cozinha123", "role": "kitchen"},
-            {"email": "bar@digitalcodex.com", "password": "bar123", "role": "bar"},
+            {"email": os.environ.get(f"TEST_{r.upper()}_EMAIL"),
+             "password": os.environ.get(f"TEST_{r.upper()}_PASSWORD"), "role": r}
+            for r in ("waiter", "cashier", "kitchen", "bar")
+            if os.environ.get(f"TEST_{r.upper()}_EMAIL") and os.environ.get(f"TEST_{r.upper()}_PASSWORD")
         ]
         
         for user in test_users:
@@ -346,11 +345,7 @@ class RestaurantAPITester:
         self.log(f"Testing against: {self.base_url}")
         
         try:
-            # Core setup tests
-            if not self.test_database_seed():
-                self.log("❌ Database seed failed - stopping tests", "ERROR")
-                return False
-            
+            # Seed removido (rota /setup/seed não existe mais).
             if not self.test_authentication():
                 self.log("❌ Authentication failed - stopping tests", "ERROR")
                 return False

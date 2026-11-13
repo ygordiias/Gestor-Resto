@@ -96,14 +96,14 @@ export default function UsersPage() {
   };
 
   const handleDelete = async (id) => {
-    if (!window.confirm('Deseja excluir este usuário?')) return;
+    if (!window.confirm('Deseja desativar este usuário? Ele não conseguirá mais entrar.')) return;
 
     try {
       await usersAPI.delete(id);
-      toast.success('Usuário excluído');
+      toast.success('Usuário desativado');
       fetchUsers();
     } catch (error) {
-      toast.error('Erro ao excluir usuário');
+      toast.error(error.response?.data?.detail || 'Erro ao desativar usuário');
     }
   };
 

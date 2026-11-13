@@ -27,7 +27,7 @@
     "backend": "100% (10/10)",
     "frontend": "100% (all required flows passed)"
   },
-  "test_credentials": "admin@teste.com / 123456 (Admin) - confirmed working",
+  "test_credentials": "admin@teste.com / <senha removida> (Admin) - confirmed working",
   "seed_data_creation": "Test created and cleaned up a sheet for product 'File a Parmegiana' (deleted at end). Pre-existing seeded sheet for 'Sansao - A Forca Bruta' (id ae207739-fad4-4435-ab3f-6f476f0e0542) was used for the read-existing path and left untouched.",
   "retest_needed": false,
   "should_main_agent_self_test": false,

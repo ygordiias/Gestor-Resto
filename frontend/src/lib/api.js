@@ -125,7 +125,6 @@ export const syncPendingOrders = async () => {
 // Auth
 export const authAPI = {
   login: (data) => api.post('/auth/login', data),
-  register: (data) => api.post('/auth/register', data),
   getMe: () => api.get('/auth/me'),
 };
 
@@ -315,11 +314,6 @@ export const productionRecipesAPI = {
   create: (data) => api.post('/production-recipes', data),
   update: (id, data) => api.put(`/production-recipes/${id}`, data),
   delete: (id) => api.delete(`/production-recipes/${id}`),
-};
-
-// Setup
-export const setupAPI = {
-  seed: () => api.post('/setup/seed'),
 };
 
 // Listen for online event to sync

@@ -5,10 +5,12 @@ import requests
 
 BASE_URL = os.environ.get('REACT_APP_BACKEND_URL', 'https://digital-orders-3.preview.emergentagent.com').rstrip('/')
 
-WAITER_EMAIL = "yuri@digitalcodex.com"
-WAITER_PASS = "123456"
-ADMIN_EMAIL = "admin@teste.com"
-ADMIN_PASS = "123456"
+from _credenciais import credencial
+
+_WAITER = credencial("waiter")
+_ADMIN = credencial("admin")
+WAITER_EMAIL, WAITER_PASS = _WAITER["email"], _WAITER["password"]
+ADMIN_EMAIL, ADMIN_PASS = _ADMIN["email"], _ADMIN["password"]
 
 
 def _login(email, password):
@@ -37,7 +39,7 @@ def test_table(admin_token):
     """Create a fresh test table for orders (avoids conflicts with occupied tables)."""
     headers = {"Authorization": f"Bearer {admin_token}"}
     # Find an unused table number
-    tables = requests.get(f"{BASE_URL}/api/tables", timeout=15).json()
+    tables = requests.get(f"{BASE_URL}/api/tables", headers=headers, timeout=15).json()
     existing_numbers = {t["number"] for t in tables}
     number = 999
     while number in existing_numbers:
@@ -50,9 +52,9 @@ def test_table(admin_token):
     yield tbl
     # Cleanup: cancel any open order on this table then delete
     try:
-        o = requests.get(f"{BASE_URL}/api/orders/table/{tbl['id']}", timeout=15).json()
+        o = requests.get(f"{BASE_URL}/api/orders/table/{tbl['id']}", headers=headers, timeout=15).json()
         if o and o.get("id"):
-            requests.post(f"{BASE_URL}/api/orders/{o['id']}/cancel", timeout=15)
+            requests.post(f"{BASE_URL}/api/orders/{o['id']}/cancel", headers=headers, timeout=15)
     except Exception:
         pass
     requests.delete(f"{BASE_URL}/api/tables/{tbl['id']}", headers=headers, timeout=15)
@@ -114,7 +116,7 @@ def test_create_order_auto_waiter_and_notes_and_service_fee(waiter_token, waiter
 
     # GET /orders/{id} returns waiter_name and items[].notes
     order_id = order["id"]
-    r2 = requests.get(f"{BASE_URL}/api/orders/{order_id}", timeout=15)
+    r2 = requests.get(f"{BASE_URL}/api/orders/{order_id}", headers=headers, timeout=15)
     assert r2.status_code == 200
     fetched = r2.json()
     assert fetched.get("waiter_name")
