@@ -4,7 +4,10 @@ import uuid
 import pytest
 import requests
 
-BASE_URL = os.environ.get("REACT_APP_BACKEND_URL").rstrip("/")
+if not os.environ.get("REACT_APP_BACKEND_URL"):
+    pytest.skip("defina REACT_APP_BACKEND_URL (backend de TESTE) para rodar este teste",
+                allow_module_level=True)
+BASE_URL = os.environ["REACT_APP_BACKEND_URL"].rstrip("/")
 from _credenciais import credencial
 
 ADMIN = credencial("admin")
