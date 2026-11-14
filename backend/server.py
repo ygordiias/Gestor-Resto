@@ -186,6 +186,54 @@ class StockUnit(str, Enum):
     KG = "kg"
     LITER = "liter"
     GRAM = "gram"
+    ML = "ml"
+
+
+# ==================== UNIDADES (receita x estoque) ====================
+# A conversão só vale quando o ingrediente da receita informa "unit".
+# Sem "unit" (receitas antigas), a quantidade continua lida na unidade do
+# insumo, exatamente como antes. Nenhuma receita existente é reescrita.
+_UNIT_ALIASES = {
+    "g": "gram", "gr": "gram", "grama": "gram", "gramas": "gram", "gram": "gram",
+    "kg": "kg", "quilo": "kg", "quilograma": "kg",
+    "ml": "ml", "mililitro": "ml",
+    "l": "liter", "lt": "liter", "litro": "liter", "liter": "liter",
+    "un": "unit", "und": "unit", "unidade": "unit", "unit": "unit",
+}
+_UNIT_FACTORS = {
+    "gram": ("massa", 1.0), "kg": ("massa", 1000.0),
+    "ml": ("volume", 1.0), "liter": ("volume", 1000.0),
+    "unit": ("unidade", 1.0),
+}
+
+
+class UnitConversionError(ValueError):
+    """Unidade desconhecida ou incompatível (ex.: grama x litro)."""
+
+
+def normalize_unit(unit):
+    """Nome canônico da unidade (gram, kg, ml, liter, unit); None se vazia ou desconhecida."""
+    if unit is None:
+        return None
+    return _UNIT_ALIASES.get(str(unit).strip().lower())
+
+
+def convert_quantity(qty, from_unit, to_unit) -> float:
+    f, t = normalize_unit(from_unit), normalize_unit(to_unit)
+    if f is None or t is None:
+        raise UnitConversionError(f"unidade desconhecida (receita {from_unit!r}, insumo {to_unit!r})")
+    (f_dim, f_factor), (t_dim, t_factor) = _UNIT_FACTORS[f], _UNIT_FACTORS[t]
+    if f_dim != t_dim:
+        raise UnitConversionError(f"unidade incompatível (receita em {f}, insumo em {t})")
+    return round(float(qty) * f_factor / t_factor, 6)
+
+
+def ingredient_qty_in_stock_unit(ing: dict, stock_item: dict) -> float:
+    """Quantidade de 1 porção do ingrediente, na unidade do insumo."""
+    qty = float(ing.get("quantity", 0) or 0)
+    if ing.get("unit") in (None, ""):
+        return qty  # receita antiga: quantidade já está na unidade do insumo
+    return convert_quantity(qty, ing.get("unit"), stock_item.get("unit"))
 
 # ==================== MODELS ====================
 class UserBase(BaseModel):
@@ -850,8 +898,8 @@ async def create_order(order_data: OrderCreate, current_user: dict = Depends(get
     if current_user and current_user.get("role") in ("waiter", "admin", "superadmin"):
         order_data.waiter_id = current_user.get("id")
         order_data.waiter_name = current_user.get("name")
-    # Validar estoque antes de criar pedido
-    await validate_stock(order_data.items)
+    # Confere estoque antes de criar pedido (só avisa, nunca bloqueia)
+    stock_warnings = await validate_stock(order_data.items)
     
     # Pedidos com comanda física nunca são mesclados com outra comanda.
     if order_data.tab_number is not None:
@@ -903,6 +951,8 @@ async def create_order(order_data: OrderCreate, current_user: dict = Depends(get
         
         # Emit events for kitchen and bar
         await emit_order_updates(items)
+        if stock_warnings:
+            updated_order["stock_warnings"] = stock_warnings
         return updated_order
     
     # Create new traditional order only if table has no active physical tabs.
@@ -944,7 +994,10 @@ async def create_order(order_data: OrderCreate, current_user: dict = Depends(get
     await emit_order_updates(order_dict["items"])
     await sio.emit('tables_updated', await get_tables())
     
-    return {k: v for k, v in order_dict.items() if k != "_id"}
+    response = {k: v for k, v in order_dict.items() if k != "_id"}
+    if stock_warnings:
+        response["stock_warnings"] = stock_warnings
+    return response
 
 @api_router.post("/orders/online", response_model=dict)
 async def create_online_order(
@@ -968,8 +1021,8 @@ async def create_online_order(
     if not order_data.items:
         raise HTTPException(status_code=400, detail="Pedido deve ter pelo menos 1 item")
 
-    # Reusa validador de estoque existente
-    await validate_stock(order_data.items)
+    # Reusa a conferência de estoque (só avisa, nunca bloqueia)
+    stock_warnings = await validate_stock(order_data.items)
 
     # Monta itens no mesmo formato dos pedidos normais
     items_out = []
@@ -1021,7 +1074,10 @@ async def create_online_order(
         "items_count": len(items_out),
     })
 
-    return {k: v for k, v in order_dict.items() if k != "_id"}
+    response = {k: v for k, v in order_dict.items() if k != "_id"}
+    if stock_warnings:
+        response["stock_warnings"] = stock_warnings
+    return response
 
 async def emit_order_updates(items):
     food_items = [i for i in items if i["type"] == OrderItemType.FOOD.value]
@@ -1057,7 +1113,7 @@ async def update_item_status(order_id: str, item_id: str, status_data: dict):
     
     # Baixa automática de estoque: só quando muda para "delivered" pela primeira vez
     if new_status == "delivered" and previous_status != "delivered" and not target_item.get("stock_deducted"):
-        await deduct_stock(target_item["product_id"], target_item["quantity"])
+        await deduct_stock(target_item["product_id"], target_item["quantity"], order_code=order_id)
         target_item["stock_deducted"] = True
     
     await db.orders.update_one({"id": order_id}, {"$set": {"items": order["items"]}})
@@ -1508,8 +1564,11 @@ async def close_order(order_id: str, payment_data: dict, current_user: dict = De
                 await deduct_stock(item["product_id"], item["quantity"], order_code=order.get("id", ""))
                 item["stock_deducted"] = True
                 changed = True
-            except HTTPException as e:
-                logger.warning(f"[close_order] Baixa falhou para {item.get('product_name')}: {e.detail}")
+            except Exception as e:  # noqa: BLE001 - a comanda já está fechada; a falha fica registrada
+                await record_stock_failure(
+                    "erro_inesperado", item.get("product_id"),
+                    f"baixa não executada ({type(e).__name__}); item ficou sem baixa",
+                    order.get("id", ""))
     if changed:
         await db.orders.update_one({"id": order_id}, {"$set": {"items": order["items"]}})
 
@@ -1675,157 +1734,276 @@ async def check_stock_alert(stock_item_id: str):
             "message": msg
         })
 
+async def _stock_item_name(stock_item: dict) -> str:
+    """Nome do item de estoque: stock.name; senão o nome do produto ligado; senão o id."""
+    name = stock_item.get("name") or ""
+    if not name and stock_item.get("product_id"):
+        prod = await db.products.find_one({"id": stock_item["product_id"]}, {"_id": 0})
+        name = prod["name"] if prod else stock_item["product_id"]
+    return name or stock_item.get("id", "")
+
+
+async def record_stock_failure(kind: str, product_id: str, detail: str,
+                               order_code: str = "", stock_item_id: Optional[str] = None,
+                               stock_item_name: str = "") -> str:
+    """Registra uma falha de baixa/devolução em `stock_deduction_failures`.
+
+    Uma linha por (produto, insumo, tipo) enquanto não for resolvida: novas
+    ocorrências só somam `occurrences` e guardam os últimos pedidos. Cada linha
+    traz produto (id e nome), insumo (id e nome), tipo e pedidos. A tela de
+    Estoque lista as pendentes. Nunca levanta exceção (não pode travar a venda).
+    Devolve o texto da falha. Não grava dados de clientes.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    logger.warning(f"[STOCK-FALHA] {kind} produto={product_id} pedido={order_code or '-'}: {detail}")
+    try:
+        key = {"product_id": product_id, "stock_item_id": stock_item_id, "kind": kind, "resolved": False}
+        existing = await db.stock_deduction_failures.find_one(key, {"_id": 0})
+        if existing:
+            orders = list(existing.get("last_orders") or [])
+            if order_code:
+                orders = ([order_code] + [o for o in orders if o != order_code])[:10]
+            await db.stock_deduction_failures.update_one(
+                {"id": existing["id"]},
+                {"$inc": {"occurrences": 1},
+                 "$set": {"detail": detail, "last_seen": now, "last_orders": orders}},
+            )
+        else:
+            prod = await db.products.find_one({"id": product_id}, {"_id": 0}) if product_id else None
+            await db.stock_deduction_failures.insert_one({
+                "id": str(uuid.uuid4()),
+                **key,
+                "product_name": (prod or {}).get("name", ""),
+                "stock_item_name": stock_item_name,
+                "detail": detail,
+                "occurrences": 1,
+                "first_seen": now,
+                "last_seen": now,
+                "last_orders": [order_code] if order_code else [],
+            })
+    except Exception as exc:  # noqa: BLE001 - registrar nunca pode derrubar a venda
+        logger.error("[STOCK-FALHA] não foi possível gravar o registro (%s)", type(exc).__name__)
+    return detail
+
+
 async def validate_stock(items):
-    """Valida estoque disponível para todos os itens antes de criar pedido."""
-    errors = []
+    """Confere o estoque antes de criar o pedido. Só AVISA, nunca bloqueia.
+
+    Devolve a lista de avisos: estoque ligado direto ao produto (legado) sem
+    saldo, e, para produto com receita, insumo faltando/negativo, abaixo do
+    mínimo, insumo inexistente ou unidade incompatível (somando os itens do
+    pedido que usam o mesmo insumo).
+    """
+    needed = {}   # stock_item_id -> quantidade necessária (unidade do insumo)
+    docs = {}     # stock_item_id -> documento do estoque
+    warnings = []
     for item in items:
         pid = item.product_id if hasattr(item, 'product_id') else item["product_id"]
         qty = item.quantity if hasattr(item, 'quantity') else item["quantity"]
         pname = item.product_name if hasattr(item, 'product_name') else item.get("product_name", pid)
 
-        stock_item = await db.stock.find_one({"product_id": pid}, {"_id": 0})
-        if not stock_item:
-            continue  # Produto sem controle de estoque — permite
-        if stock_item["quantity"] == 0:
-            errors.append(f"'{pname}' sem estoque")
-        elif qty > stock_item["quantity"]:
-            errors.append(f"'{pname}': solicitado {qty}, disponível {stock_item['quantity']}")
-    if errors:
-        raise HTTPException(status_code=400, detail="Estoque insuficiente: " + "; ".join(errors))
+        try:
+            stock_item = await db.stock.find_one({"product_id": pid}, {"_id": 0})
+            if stock_item:
+                available = float(stock_item.get("quantity", 0) or 0)
+                if available <= 0:
+                    warnings.append(f"'{pname}' sem estoque (disponível {available:g})")
+                elif float(qty or 0) > available:
+                    warnings.append(f"'{pname}': solicitado {qty}, disponível {available:g} (estoque vai ficar negativo)")
+
+            recipe = await db.recipes.find_one({"product_id": pid}, {"_id": 0})
+            for ing in (recipe or {}).get("ingredients") or []:
+                sid = ing.get("stock_item_id")
+                if not sid or float(ing.get("quantity", 0) or 0) <= 0:
+                    continue
+                if sid not in docs:
+                    docs[sid] = await db.stock.find_one({"id": sid}, {"_id": 0})
+                if not docs[sid]:
+                    warnings.append(f"'{pname}': insumo da receita não existe no estoque")
+                    continue
+                try:
+                    per_unit = ingredient_qty_in_stock_unit(ing, docs[sid])
+                except UnitConversionError as exc:
+                    warnings.append(f"'{pname}': {exc}")
+                    continue
+                needed[sid] = needed.get(sid, 0) + per_unit * float(qty or 0)
+        except Exception as exc:  # noqa: BLE001 - aviso nunca bloqueia o pedido
+            logger.error("[validate_stock] aviso de estoque falhou (%s)", type(exc).__name__)
+
+    for sid, need in needed.items():
+        doc = docs[sid]
+        name = await _stock_item_name(doc)
+        available = float(doc.get("quantity", 0) or 0)
+        unit = doc.get("unit", "")
+        if available < need:
+            warnings.append(f"{name}: necessário {need:g} {unit}, disponível {available:g} {unit} (estoque vai ficar negativo)")
+        elif available - need <= float(doc.get("min_quantity", 0) or 0):
+            warnings.append(f"{name}: estoque baixo (restam {available - need:g} {unit})")
+    if warnings:
+        logger.info("[validate_stock] avisos de estoque: " + "; ".join(warnings))
+    return warnings
+
 
 async def deduct_stock(product_id: str, quantity: int, order_code: str = ""):
-    """Baixa automatica de estoque baseada em Receita Tecnica (CMV).
-    Comportamento:
-      1) Se o produto possui receita tecnica -> abate cada ingrediente do estoque.
-      2) Caso contrario -> fallback para o comportamento legado (abate o proprio produto).
-    Valida saldo ANTES de descontar (transacional logico). Levanta HTTPException 400 se faltar.
+    """Baixa automática de estoque baseada em Receita Técnica (CMV).
+
+      1) Produto com receita -> abate cada ingrediente (convertendo a unidade
+         quando a receita informa "unit").
+      2) Senão -> abate o item de estoque ligado direto ao produto (legado).
+      3) Sem nenhum dos dois -> não baixa nada e não registra falha (seria
+         ruído a cada venda); aparece como `incomplete` no CMV e no diagnóstico.
+
+    Nunca bloqueia por falta de saldo: baixa mesmo (o estoque pode ficar
+    negativo) e registra a falha. Insumo inexistente ou unidade incompatível:
+    aquele insumo não é baixado e a falha é registrada. Devolve a lista de
+    falhas registradas (vazia quando deu tudo certo).
     """
-    # 1) Tenta usar a receita tecnica
+    qty_num = float(quantity or 0)
+    failures = []
+    if qty_num <= 0:
+        return failures
+    now = lambda: datetime.now(timezone.utc).isoformat()  # noqa: E731
+
+    # 1) Receita técnica
     recipe = await db.recipes.find_one({"product_id": product_id}, {"_id": 0})
     if recipe and recipe.get("ingredients"):
-        # Calcula total necessario por stock_item_id (consolida duplicatas)
-        needed = {}
-        names = {}
+        needed, docs, names = {}, {}, {}
         for ing in recipe["ingredients"]:
             sid = ing.get("stock_item_id")
-            qty = float(ing.get("quantity", 0) or 0) * float(quantity)
-            if not sid or qty <= 0:
+            if not sid or float(ing.get("quantity", 0) or 0) <= 0:
                 continue
-            needed[sid] = needed.get(sid, 0) + qty
-
-        # Valida saldo de TODOS os ingredientes antes de descontar
-        shortages = []
-        for sid, need_qty in needed.items():
-            stock_item = await db.stock.find_one({"id": sid}, {"_id": 0})
-            if not stock_item:
-                shortages.append(f"ingrediente nao encontrado no estoque (id {sid})")
+            if sid not in docs:
+                docs[sid] = await db.stock.find_one({"id": sid}, {"_id": 0})
+            if not docs[sid]:
+                failures.append(await record_stock_failure(
+                    "insumo_inexistente", product_id,
+                    f"insumo não encontrado no estoque (id {sid}); não baixado", order_code, sid))
                 continue
-            # Resolve nome: prioriza stock.name (matéria-prima independente), senão pega de products
-            name = stock_item.get("name") or ""
-            if not name and stock_item.get("product_id"):
-                prod = await db.products.find_one({"id": stock_item.get("product_id")}, {"_id": 0})
-                name = prod["name"] if prod else sid
-            if not name:
-                name = sid
-            names[sid] = name
-            available = float(stock_item.get("quantity", 0) or 0)
-            if available < need_qty:
-                shortages.append(f"{name}: solicitado {need_qty}, disponivel {available}")
-        if shortages:
-            raise HTTPException(status_code=400, detail="Estoque insuficiente: " + "; ".join(shortages))
+            names[sid] = await _stock_item_name(docs[sid])
+            try:
+                per_unit = ingredient_qty_in_stock_unit(ing, docs[sid])
+            except UnitConversionError as exc:
+                failures.append(await record_stock_failure(
+                    "unidade_incompativel", product_id, f"{names[sid]}: {exc}; não baixado",
+                    order_code, sid, names[sid]))
+                continue
+            needed[sid] = needed.get(sid, 0) + per_unit * qty_num
 
-        # Realiza a baixa
         log_lines = []
         for sid, need_qty in needed.items():
+            available = float(docs[sid].get("quantity", 0) or 0)
+            if available < need_qty:
+                unit = docs[sid].get("unit", "")
+                failures.append(await record_stock_failure(
+                    "saldo_insuficiente", product_id,
+                    f"{names[sid]}: necessário {need_qty:g} {unit}, disponível {available:g} {unit}; "
+                    "baixado assim mesmo (estoque negativo)", order_code, sid, names[sid]))
             await db.stock.update_one(
                 {"id": sid},
-                {
-                    "$inc": {"quantity": -need_qty},
-                    "$set": {"last_updated": datetime.now(timezone.utc).isoformat()}
-                }
+                {"$inc": {"quantity": -need_qty}, "$set": {"last_updated": now()}},
             )
-            stock_item = await db.stock.find_one({"id": sid}, {"_id": 0})
-            if stock_item:
-                await check_stock_alert(sid)
-            log_lines.append(f"-{need_qty} {names.get(sid, sid)}")
+            await check_stock_alert(sid)
+            log_lines.append(f"-{need_qty:g} {names[sid]}")
         logger.info(f"[CMV] Baixa por receita - Pedido {order_code or '-'} produto={product_id} x{quantity}: " + ", ".join(log_lines))
-        return
+        return failures
 
-    # 2) Fallback legado: abate o proprio produto se houver entrada de estoque para ele
+    # 2) Legado: abate o próprio produto
     stock_item = await db.stock.find_one({"product_id": product_id}, {"_id": 0})
     if not stock_item:
-        return  # Produto sem controle de estoque - ignora
-    if float(stock_item.get("quantity", 0) or 0) < quantity:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Estoque insuficiente para '{product_id}'. Disponivel: {stock_item['quantity']}, Solicitado: {quantity}"
-        )
+        logger.info(f"[STOCK] Sem receita nem estoque - Pedido {order_code or '-'} produto={product_id}: nada baixado")
+        return failures
+    available = float(stock_item.get("quantity", 0) or 0)
+    if available < qty_num:
+        name = await _stock_item_name(stock_item)
+        failures.append(await record_stock_failure(
+            "saldo_insuficiente", product_id,
+            f"{name}: necessário {qty_num:g}, disponível {available:g}; "
+            "baixado assim mesmo (estoque negativo)", order_code, stock_item.get("id"), name))
     await db.stock.update_one(
         {"product_id": product_id},
-        {
-            "$inc": {"quantity": -quantity},
-            "$set": {"last_updated": datetime.now(timezone.utc).isoformat()}
-        }
+        {"$inc": {"quantity": -qty_num}, "$set": {"last_updated": now()}},
     )
     await check_stock_alert(product_id)
     logger.info(f"[STOCK] Baixa direta - Pedido {order_code or '-'} produto={product_id} x{quantity}")
+    return failures
+
 
 async def restore_stock(product_id: str, quantity: int, order_code: str = ""):
-    """Devolucao de estoque (inversa de deduct_stock).
+    """Devolução de estoque (inversa de deduct_stock), com a mesma conversão de unidade.
 
-    Espelha exatamente a logica de deduct_stock:
-      1) Se o produto possui receita tecnica -> devolve cada ingrediente ao estoque.
-      2) Caso contrario -> fallback legado (devolve o proprio produto).
-    Se o produto nao tem controle de estoque, nao inventa estoque (no-op).
-    Nunca levanta HTTPException por saldo (devolucao sempre soma).
+    Sem controle de estoque: não inventa estoque (no-op). Nunca levanta
+    HTTPException por saldo. Insumo inexistente ou unidade incompatível: não
+    devolve aquele insumo e registra a falha.
     """
     if quantity is None or float(quantity) <= 0:
         return
     qty_num = float(quantity)
+    now = lambda: datetime.now(timezone.utc).isoformat()  # noqa: E731
 
-    # 1) Devolucao via receita tecnica
+    # 1) Devolução via receita técnica
     recipe = await db.recipes.find_one({"product_id": product_id}, {"_id": 0})
     if recipe and recipe.get("ingredients"):
-        needed = {}
-        names = {}
+        needed, names = {}, {}
         for ing in recipe["ingredients"]:
             sid = ing.get("stock_item_id")
-            qty = float(ing.get("quantity", 0) or 0) * qty_num
-            if not sid or qty <= 0:
+            if not sid or float(ing.get("quantity", 0) or 0) <= 0:
                 continue
-            needed[sid] = needed.get(sid, 0) + qty
-        log_lines = []
-        for sid, add_qty in needed.items():
             stock_item = await db.stock.find_one({"id": sid}, {"_id": 0})
             if not stock_item:
-                logger.warning(f"[STOCK-RESTORE] ingrediente {sid} nao encontrado - ignorado")
+                await record_stock_failure(
+                    "devolucao_falhou", product_id,
+                    f"insumo não encontrado no estoque (id {sid}); não devolvido", order_code, sid)
                 continue
-            names[sid] = stock_item.get("name") or sid
+            names[sid] = await _stock_item_name(stock_item)
+            try:
+                per_unit = ingredient_qty_in_stock_unit(ing, stock_item)
+            except UnitConversionError as exc:
+                await record_stock_failure(
+                    "devolucao_falhou", product_id, f"{names[sid]}: {exc}; não devolvido",
+                    order_code, sid, names[sid])
+                continue
+            needed[sid] = needed.get(sid, 0) + per_unit * qty_num
+        log_lines = []
+        for sid, add_qty in needed.items():
             await db.stock.update_one(
                 {"id": sid},
-                {
-                    "$inc": {"quantity": add_qty},
-                    "$set": {"last_updated": datetime.now(timezone.utc).isoformat()}
-                }
+                {"$inc": {"quantity": add_qty}, "$set": {"last_updated": now()}},
             )
             await check_stock_alert(sid)
-            log_lines.append(f"+{add_qty} {names.get(sid, sid)}")
+            log_lines.append(f"+{add_qty:g} {names[sid]}")
         logger.info(f"[CMV] Devolucao por receita - Pedido {order_code or '-'} produto={product_id} x{quantity}: " + ", ".join(log_lines))
         return
 
-    # 2) Fallback legado: soma no proprio produto se houver entrada de estoque
+    # 2) Fallback legado: soma no próprio produto se houver entrada de estoque
     stock_item = await db.stock.find_one({"product_id": product_id}, {"_id": 0})
     if not stock_item:
         return  # sem controle de estoque - no-op
     await db.stock.update_one(
         {"product_id": product_id},
-        {
-            "$inc": {"quantity": qty_num},
-            "$set": {"last_updated": datetime.now(timezone.utc).isoformat()}
-        }
+        {"$inc": {"quantity": qty_num}, "$set": {"last_updated": now()}},
     )
     await check_stock_alert(stock_item["id"])
     logger.info(f"[STOCK] Devolucao direta - Pedido {order_code or '-'} produto={product_id} x{quantity}")
+
+
+@api_router.get("/stock/deduction-failures", dependencies=[Depends(require_role([UserRole.ADMIN]))])
+async def list_stock_deduction_failures(include_resolved: bool = False):
+    """Falhas de baixa de estoque (pendentes por padrão), mais recentes primeiro."""
+    query = {} if include_resolved else {"resolved": False}
+    docs = await db.stock_deduction_failures.find(query, {"_id": 0}).to_list(500)
+    return sorted(docs, key=lambda d: d.get("last_seen") or "", reverse=True)
+
+
+@api_router.post("/stock/deduction-failures/{failure_id}/resolve")
+async def resolve_stock_deduction_failure(failure_id: str, current_user: dict = Depends(require_role([UserRole.ADMIN]))):
+    result = await db.stock_deduction_failures.update_one(
+        {"id": failure_id, "resolved": False},
+        {"$set": {"resolved": True, "resolved_at": datetime.now(timezone.utc).isoformat(),
+                  "resolved_by_id": current_user["id"]}},
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Falha não encontrada ou já resolvida")
+    return {"message": "Falha marcada como resolvida"}
 
 @api_router.get("/stock", response_model=List[dict], dependencies=[Depends(require_role([UserRole.ADMIN]))])
 async def get_stock(stock_type: Optional[str] = None):
@@ -2638,35 +2816,97 @@ async def delete_technical_sheet(sheet_id: str, current_user: dict = Depends(req
 
 # ==================== RECIPES (CMV) ROUTES ====================
 async def _compute_recipe_cost(recipe: dict) -> dict:
-    """Calcula custo total da receita usando unit_cost dos itens de estoque."""
+    """Calcula custo total da receita usando unit_cost dos itens de estoque.
+
+    Converte a unidade quando o ingrediente informa "unit" (g/kg, ml/l).
+    Mantém os campos de sempre e ACRESCENTA, por ingrediente e no total,
+    `incomplete` (bool) e `incomplete_reason` (texto; vazio se completo):
+    insumo inexistente, sem custo, unidade incompatível ou quantidade zero.
+    """
     total = 0.0
     enriched = []
-    for ing in recipe.get("ingredients", []):
-        stock = await db.stock.find_one({"id": ing["stock_item_id"]}, {"_id": 0})
+    reasons = []
+    ingredients = recipe.get("ingredients") or []
+    if not ingredients:
+        reasons.append("receita sem ingredientes")
+    for ing in ingredients:
+        sid = ing.get("stock_item_id")
+        stock = await db.stock.find_one({"id": sid}, {"_id": 0}) if sid else None
         unit_cost = float(stock.get("unit_cost", 0) or 0) if stock else 0
         qty = float(ing.get("quantity", 0) or 0)
-        line = qty * unit_cost
-        total += line
-        # Nome do ingrediente: prioriza stock.name (matéria-prima), senão busca em products
         ing_name = ""
         unit = ""
+        reason = ""
+        converted = 0.0
         if stock:
-            ing_name = stock.get("name") or ""
-            if not ing_name and stock.get("product_id"):
-                prod = await db.products.find_one({"id": stock["product_id"]}, {"_id": 0})
-                ing_name = prod["name"] if prod else stock.get("product_id", "")
-            if not ing_name:
-                ing_name = stock.get("id", "")
+            ing_name = await _stock_item_name(stock)
             unit = stock.get("unit", "")
+            try:
+                converted = ingredient_qty_in_stock_unit(ing, stock)
+            except UnitConversionError as exc:
+                reason = f"{ing_name}: {exc}"
+            if not reason and qty <= 0:
+                reason = f"{ing_name}: quantidade zero"
+            if not reason and unit_cost <= 0:
+                reason = f"{ing_name}: insumo sem custo"
+        else:
+            reason = f"insumo não encontrado no estoque (id {sid})"
+        line = converted * unit_cost
+        total += line
+        if reason:
+            reasons.append(reason)
         enriched.append({
-            "stock_item_id": ing["stock_item_id"],
+            "stock_item_id": sid,
             "quantity": qty,
             "unit_cost": unit_cost,
             "line_cost": round(line, 2),
             "ingredient_name": ing_name,
             "unit": unit,
+            # acrescentados:
+            "recipe_unit": normalize_unit(ing.get("unit")) or unit,
+            "quantity_in_stock_unit": round(converted, 6),
+            "incomplete": bool(reason),
+            "incomplete_reason": reason,
         })
-    return {"total_cost": round(total, 2), "ingredients_detail": enriched}
+    return {
+        "total_cost": round(total, 2),
+        "ingredients_detail": enriched,
+        "incomplete": bool(reasons),
+        "incomplete_reason": "; ".join(reasons),
+    }
+
+
+async def _clean_recipe_ingredients(ingredients) -> list:
+    """Valida a unidade informada em cada ingrediente (opcional).
+
+    Sem "unit": o ingrediente fica como veio (receita antiga, sem conversão).
+    Com "unit": precisa ser conhecida e compatível com a unidade do insumo;
+    é gravada no nome canônico (gram, kg, ml, liter, unit). Quantidades não são
+    alteradas.
+    """
+    if not isinstance(ingredients, list):
+        raise HTTPException(status_code=400, detail="ingredients deve ser uma lista")
+    cleaned = []
+    for ing in ingredients:
+        if not isinstance(ing, dict):
+            raise HTTPException(status_code=400, detail="Ingrediente inválido")
+        ing = dict(ing)
+        if ing.get("unit") in (None, ""):
+            ing.pop("unit", None)
+        else:
+            canon = normalize_unit(ing["unit"])
+            if canon is None:
+                raise HTTPException(status_code=400, detail=f"Unidade desconhecida: {ing['unit']!r} (use g, kg, ml, l ou un)")
+            stock = await db.stock.find_one({"id": ing.get("stock_item_id")}, {"_id": 0})
+            if stock:
+                try:
+                    convert_quantity(1, canon, stock.get("unit"))
+                except UnitConversionError as exc:
+                    raise HTTPException(status_code=400, detail=f"{await _stock_item_name(stock)}: {exc}")
+            ing["unit"] = canon
+        cleaned.append(ing)
+    return cleaned
+
 
 @api_router.get("/recipes")
 async def list_recipes(current_user: dict = Depends(get_current_user)):
@@ -2699,7 +2939,7 @@ async def create_recipe(data: dict, current_user: dict = Depends(require_role([U
     recipe = {
         "id": str(uuid.uuid4()),
         "product_id": data["product_id"],
-        "ingredients": data.get("ingredients", []),
+        "ingredients": await _clean_recipe_ingredients(data.get("ingredients", [])),
         "created_at": datetime.now(timezone.utc).isoformat(),
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -2711,7 +2951,7 @@ async def create_recipe(data: dict, current_user: dict = Depends(require_role([U
 @api_router.put("/recipes/{recipe_id}")
 async def update_recipe(recipe_id: str, data: dict, current_user: dict = Depends(require_role([UserRole.ADMIN]))):
     update = {
-        "ingredients": data.get("ingredients", []),
+        "ingredients": await _clean_recipe_ingredients(data.get("ingredients", [])),
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     result = await db.recipes.update_one({"id": recipe_id}, {"$set": update})
@@ -2728,31 +2968,44 @@ async def delete_recipe(recipe_id: str, current_user: dict = Depends(require_rol
         raise HTTPException(status_code=404, detail="Receita não encontrada")
     return {"message": "Receita excluída"}
 
-@api_router.get("/products/{product_id}/cmv")
-async def get_product_cmv(product_id: str, current_user: dict = Depends(get_current_user)):
-    product = await db.products.find_one({"id": product_id}, {"_id": 0})
-    if not product:
-        raise HTTPException(status_code=404, detail="Produto não encontrado")
-    recipe = await db.recipes.find_one({"product_id": product_id}, {"_id": 0})
+
+async def _product_cmv_row(product: dict, recipe: Optional[dict]) -> dict:
+    """Linha de CMV de um produto. Sem receita: cost 0 (como antes) e incomplete=True."""
     cost = 0.0
     ingredients_detail = []
+    incomplete, reason = True, "sem receita"
     if recipe:
         detail = await _compute_recipe_cost(recipe)
         cost = detail["total_cost"]
         ingredients_detail = detail["ingredients_detail"]
+        incomplete, reason = detail["incomplete"], detail["incomplete_reason"]
     sale_price = float(product.get("price", 0) or 0)
     profit = round(sale_price - cost, 2)
     margin = round((profit / sale_price * 100), 2) if sale_price > 0 else 0
     return {
-        "product_id": product_id,
+        "product_id": product["id"],
         "product_name": product.get("name", ""),
+        "category_id": product.get("category_id"),
         "sale_price": sale_price,
         "cost": cost,
         "profit": profit,
         "margin": margin,
         "has_recipe": bool(recipe),
         "ingredients_detail": ingredients_detail,
+        "incomplete": incomplete,
+        "incomplete_reason": reason,
     }
+
+
+@api_router.get("/products/{product_id}/cmv")
+async def get_product_cmv(product_id: str, current_user: dict = Depends(get_current_user)):
+    product = await db.products.find_one({"id": product_id}, {"_id": 0})
+    if not product:
+        raise HTTPException(status_code=404, detail="Produto não encontrado")
+    recipe = await db.recipes.find_one({"product_id": product_id}, {"_id": 0})
+    row = await _product_cmv_row(product, recipe)
+    row.pop("category_id")  # formato de sempre desta rota
+    return row
 
 @api_router.get("/cmv/report")
 async def cmv_report(current_user: dict = Depends(require_role([UserRole.ADMIN]))):
@@ -2762,27 +3015,16 @@ async def cmv_report(current_user: dict = Depends(require_role([UserRole.ADMIN])
     recipe_map = {r["product_id"]: r for r in recipes}
     rows = []
     for p in products:
-        sale_price = float(p.get("price", 0) or 0)
-        recipe = recipe_map.get(p["id"])
-        cost = 0.0
-        if recipe:
-            detail = await _compute_recipe_cost(recipe)
-            cost = detail["total_cost"]
-        profit = round(sale_price - cost, 2)
-        margin = round((profit / sale_price * 100), 2) if sale_price > 0 else 0
-        rows.append({
-            "product_id": p["id"],
-            "product_name": p["name"],
-            "category_id": p.get("category_id"),
-            "sale_price": sale_price,
-            "cost": cost,
-            "profit": profit,
-            "margin": margin,
-            "has_recipe": bool(recipe),
-        })
+        row = await _product_cmv_row(p, recipe_map.get(p["id"]))
+        row.pop("ingredients_detail")  # formato de sempre desta rota
+        rows.append(row)
     return rows
 
 # ==================== PRODUCTION ROUTES ====================
+# PENDENTE (item futuro, fora do fix/estoque-cmv): as receitas de produção
+# (/production, /production-recipes) têm o mesmo bug de unidade das receitas
+# de produto: a quantidade é lida na unidade do insumo, sem conversão g/kg,
+# ml/l. Corrigir usando ingredient_qty_in_stock_unit() quando for tratado.
 # Reaproveita: stock (item produzido recebe quantity++), recipes (CMV), products (catalogo)
 # Nova collection: productions (registro auditavel de cada producao)
 #
