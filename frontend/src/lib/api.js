@@ -259,6 +259,8 @@ export const stockAPI = {
   create: (data) => api.post('/stock', data),
   update: (id, data) => api.put(`/stock/${id}`, data),
   getAlerts: () => api.get('/stock/alerts'),
+  getDeductionFailures: () => api.get('/stock/deduction-failures'),
+  resolveDeductionFailure: (id) => api.post(`/stock/deduction-failures/${id}/resolve`),
 };
 
 // Cash Register

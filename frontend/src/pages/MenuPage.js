@@ -30,12 +30,44 @@ import {
 
 const API = process.env.REACT_APP_BACKEND_URL;
 
+// Mesma regra do backend (server.py, convert_quantity): sem unidade na receita,
+// a quantidade está na unidade do insumo; com unidade, converte g/kg e ml/l.
+const UNIT_FACTORS = {
+  gram: ['massa', 1], kg: ['massa', 1000],
+  ml: ['volume', 1], liter: ['volume', 1000],
+  unit: ['unidade', 1],
+};
+const RECIPE_UNIT_OPTIONS = [
+  { v: 'gram', l: 'g' }, { v: 'kg', l: 'kg' },
+  { v: 'ml', l: 'ml' }, { v: 'liter', l: 'l' }, { v: 'unit', l: 'un' },
+];
+
+// Devolve a quantidade na unidade do insumo, ou null se a unidade for incompatível.
+function qtyInStockUnit(qty, recipeUnit, stockUnit) {
+  if (!recipeUnit) return qty;
+  const from = UNIT_FACTORS[recipeUnit];
+  const to = UNIT_FACTORS[stockUnit];
+  if (!from || !to || from[0] !== to[0]) return null;
+  return (qty * from[1]) / to[1];
+}
+
+function compatibleUnits(stockUnit) {
+  const dim = UNIT_FACTORS[stockUnit]?.[0];
+  return RECIPE_UNIT_OPTIONS.filter(o => UNIT_FACTORS[o.v][0] === dim);
+}
+
+function lineCost(item, stock) {
+  const qty = parseFloat(item.quantity) || 0;
+  if (!stock || qty <= 0) return 0;
+  const converted = qtyInStockUnit(qty, item.unit, stock.unit);
+  return converted === null ? 0 : converted * stock.unit_cost;
+}
+
 function RecipeSummary({ recipeItems, stockOptions, salePrice }) {
   let cost = 0;
   for (const item of recipeItems) {
     const stock = stockOptions.find(s => s.id === item.stock_item_id);
-    const qty = parseFloat(item.quantity) || 0;
-    if (stock && qty > 0) cost += qty * stock.unit_cost;
+    cost += lineCost(item, stock);
   }
   const profit = salePrice - cost;
   const margin = salePrice > 0 ? (profit / salePrice) * 100 : 0;
@@ -356,7 +388,12 @@ export default function MenuPage() {
     if (!recipeProduct) return;
     const cleanItems = recipeItems
       .filter(i => i.stock_item_id && parseFloat(i.quantity) > 0)
-      .map(i => ({ stock_item_id: i.stock_item_id, quantity: parseFloat(i.quantity) }));
+      .map(i => ({
+        stock_item_id: i.stock_item_id,
+        quantity: parseFloat(i.quantity),
+        // Só envia unidade quando escolhida; sem ela vale a unidade do insumo.
+        ...(i.unit ? { unit: i.unit } : {}),
+      }));
 
     setRecipeSaving(true);
     try {
@@ -544,6 +581,11 @@ export default function MenuPage() {
                     {!cmvMap[product.id]?.has_recipe && (
                       <p className="mt-2 text-[10px] text-muted-foreground italic" data-testid={`no-recipe-${product.id}`}>
                         Sem receita técnica · CMV não calculado
+                      </p>
+                    )}
+                    {cmvMap[product.id]?.has_recipe && cmvMap[product.id]?.incomplete && (
+                      <p className="mt-2 text-[10px] text-destructive" data-testid={`cmv-incomplete-${product.id}`}>
+                        CMV incompleto: {cmvMap[product.id].incomplete_reason}
                       </p>
                     )}
                     <div className="flex gap-2 mt-4 pt-4 border-t">
@@ -864,8 +906,9 @@ export default function MenuPage() {
                   ) : (
                     recipeItems.map((item, idx) => {
                       const stock = stockOptions.find(s => s.id === item.stock_item_id);
-                      const qty = parseFloat(item.quantity) || 0;
-                      const line = stock ? qty * stock.unit_cost : 0;
+                      const line = lineCost(item, stock);
+                      const unitOptions = stock ? compatibleUnits(stock.unit) : [];
+                      const unitInvalid = stock && item.unit && !unitOptions.some(o => o.v === item.unit);
                       return (
                         <div key={idx} className="flex gap-2 items-center" data-testid={`recipe-item-${idx}`}>
                           <Select
@@ -893,6 +936,24 @@ export default function MenuPage() {
                             className="w-24"
                             data-testid={`recipe-qty-${idx}`}
                           />
+                          <Select
+                            value={item.unit || 'stock'}
+                            onValueChange={v => updateRecipeItem(idx, 'unit', v === 'stock' ? '' : v)}
+                            disabled={!stock}
+                          >
+                            <SelectTrigger
+                              className={cn("w-28", unitInvalid && "border-destructive")}
+                              data-testid={`recipe-unit-${idx}`}
+                            >
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="stock">{stock ? `= insumo (${stock.unit})` : 'unidade'}</SelectItem>
+                              {unitOptions.map(o => (
+                                <SelectItem key={o.v} value={o.v}>{o.l}</SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
                           <div className="w-24 text-right text-xs text-muted-foreground">
                             {stock ? `= ${formatCurrency(line)}` : ''}
                           </div>
@@ -925,6 +986,7 @@ export default function MenuPage() {
                 <p className="text-xs text-muted-foreground">
                   <TrendingUp className="h-3 w-3 inline mr-1" />
                   O cálculo usa o custo unitário (R$/unidade) cadastrado em cada item do estoque.
+                  Escolha g, kg, ml ou l para converter; em &quot;= insumo&quot; a quantidade é lida na unidade do estoque.
                 </p>
               </div>
             )}

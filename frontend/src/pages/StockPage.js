@@ -24,6 +24,7 @@ export default function StockPage() {
   const [stock, setStock] = useState([]);
   const [products, setProducts] = useState([]);
   const [alerts, setAlerts] = useState([]);
+  const [failures, setFailures] = useState([]);
   const [loading, setLoading] = useState(true);
   
   const [isDialogOpen, setIsDialogOpen] = useState(false);
@@ -44,6 +45,32 @@ export default function StockPage() {
   useEffect(() => {
     fetchData();
   }, []);
+
+  // Falhas de baixa: consulta ao abrir e a cada 60 s (não depende do socket).
+  const fetchFailures = async () => {
+    try {
+      const res = await stockAPI.getDeductionFailures();
+      setFailures(res.data);
+    } catch (error) {
+      // silencioso aqui: o restante da tela continua funcionando
+    }
+  };
+
+  useEffect(() => {
+    fetchFailures();
+    const timer = setInterval(fetchFailures, 60000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const resolveFailure = async (id) => {
+    try {
+      await stockAPI.resolveDeductionFailure(id);
+      setFailures(f => f.filter(x => x.id !== id));
+      toast.success('Falha marcada como resolvida');
+    } catch (error) {
+      toast.error(error.response?.data?.detail || 'Erro ao resolver falha');
+    }
+  };
 
   const fetchData = async () => {
     try {
@@ -149,6 +176,7 @@ export default function StockPage() {
       kg: 'Quilograma',
       liter: 'Litro',
       gram: 'Grama',
+      ml: 'Mililitro',
     };
     return labels[unit] || unit;
   };
@@ -178,6 +206,44 @@ export default function StockPage() {
   return (
     <Layout title="Estoque">
       <div className="space-y-6" data-testid="stock-page">
+        {/* Falhas de baixa de estoque (nunca silenciosas) */}
+        {failures.length > 0 && (
+          <Card className="border-red-500 bg-red-50 dark:bg-red-900/20" data-testid="stock-failures">
+            <CardHeader>
+              <CardTitle className="font-heading flex items-center gap-2 text-red-700 dark:text-red-300">
+                <AlertTriangle className="h-5 w-5" />
+                Falhas na baixa de estoque ({failures.length})
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              {failures.map(f => (
+                <div key={f.id} className="flex flex-col sm:flex-row sm:items-center gap-2 text-sm border-b border-red-200 pb-2 last:border-0">
+                  <div className="flex-1 min-w-0">
+                    <p className="font-semibold text-red-800 dark:text-red-200">
+                      {f.product_name || f.product_id}
+                      <span className="font-normal text-xs ml-2">
+                        {f.occurrences}x · última em {formatDate(f.last_seen)}
+                      </span>
+                    </p>
+                    <p className="text-xs text-red-700 dark:text-red-300 break-words">
+                      {f.stock_item_name ? `Insumo: ${f.stock_item_name} · ` : ''}Tipo: {f.kind}
+                    </p>
+                    <p className="text-xs text-red-700 dark:text-red-300 break-words">{f.detail}</p>
+                    {f.last_orders?.length > 0 && (
+                      <p className="text-[10px] text-red-600 dark:text-red-400 break-words">
+                        Pedidos: {f.last_orders.join(', ')}
+                      </p>
+                    )}
+                  </div>
+                  <Button size="sm" variant="outline" onClick={() => resolveFailure(f.id)} data-testid={`resolve-failure-${f.id}`}>
+                    Marcar resolvida
+                  </Button>
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+        )}
+
         {/* Alerts */}
         {alerts.length > 0 && (
           <Card className="border-amber-400 bg-amber-50 dark:bg-amber-900/20">
@@ -270,7 +336,7 @@ export default function StockPage() {
                     }`}>
                       {item.unit === 'kg' || item.unit === 'gram' ? (
                         <Scale className="h-5 w-5" />
-                      ) : item.unit === 'liter' ? (
+                      ) : item.unit === 'liter' || item.unit === 'ml' ? (
                         <Droplet className="h-5 w-5" />
                       ) : (
                         <Package className="h-5 w-5" />
@@ -445,6 +511,7 @@ export default function StockPage() {
                       <SelectItem value="kg">Quilograma</SelectItem>
                       <SelectItem value="gram">Grama</SelectItem>
                       <SelectItem value="liter">Litro</SelectItem>
+                      <SelectItem value="ml">Mililitro</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
