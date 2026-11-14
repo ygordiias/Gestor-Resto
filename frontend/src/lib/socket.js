@@ -1,6 +1,27 @@
 import { io } from 'socket.io-client';
+import api from './api';
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
+const RETRY_MS = 5000;
+
+// O backend novo exige o token no Socket.IO e avisa isso em /api/ping
+// (socket_auth: true). O backend antigo não tem esse campo e QUEBRA se
+// receber "auth" na conexão, por isso só enviamos o token quando ele avisa.
+// Isso permite publicar o frontend antes do backend.
+// Resposta positiva fica guardada; negativa ou falha é conferida de novo a
+// cada nova tentativa (o backend pode ter sido atualizado nesse meio-tempo).
+let socketAuthSupported = false;
+const detectSocketAuth = async () => {
+  if (socketAuthSupported) return true;
+  try {
+    const { data } = await api.get('/ping');
+    socketAuthSupported = data?.socket_auth === true;
+  } catch (e) {
+    // Sem resposta: conecta como antes; se o backend novo recusar, a
+    // recusa dispara uma nova checagem (handleRefused).
+  }
+  return socketAuthSupported;
+};
 
 // Beep sound para notificações (simples, sem biblioteca)
 const playBeep = () => {
@@ -28,15 +49,19 @@ class SocketService {
     this.socket = null;
     this.listeners = new Map();
     this.isConnecting = false;
+    this.retryTimer = null;
     this.lastOrderCount = { kitchen: 0, bar: 0 };
   }
 
   connect() {
-    if (this.socket?.connected || this.isConnecting) return;
+    if (this.socket || this.isConnecting) return;
     
     this.isConnecting = true;
 
+    // O socket é criado na hora (para os .on() já poderem ser registrados) e
+    // só conecta depois de saber se o backend exige token.
     this.socket = io(BACKEND_URL, {
+      autoConnect: false,
       transports: ['websocket', 'polling'],
       reconnection: true,
       reconnectionAttempts: Infinity,
@@ -45,31 +70,78 @@ class SocketService {
       randomizationFactor: 0.5,
       timeout: 20000,
     });
+    const socket = this.socket;
 
-    this.socket.on('connect', () => {
+    socket.on('connect', () => {
       this.isConnecting = false;
-      console.log('Socket connected:', this.socket.id);
+      console.log('Socket connected:', socket.id);
     });
 
-    this.socket.on('disconnect', (reason) => {
+    socket.on('disconnect', (reason) => {
       console.log('Socket disconnected:', reason);
+      // Derrubado pelo servidor (ex.: usuário desativado ou perfil trocado):
+      // o socket.io não reconecta sozinho nesse caso.
+      if (reason === 'io server disconnect') this.handleRefused(socket);
     });
 
-    this.socket.on('reconnect_attempt', (attempt) => {
+    socket.io.on('reconnect_attempt', (attempt) => {
       console.log('[socket] reconnect attempt', attempt);
     });
 
-    this.socket.on('reconnect', (attempt) => {
+    socket.io.on('reconnect', (attempt) => {
       console.log('[socket] reconnected after', attempt, 'attempts');
     });
 
-    this.socket.on('connect_error', (error) => {
+    socket.on('connect_error', (error) => {
       this.isConnecting = false;
       console.warn('[socket] connect_error:', error?.message || error);
+      // Recusa do servidor (token ausente, vencido ou usuário desativado):
+      // o socket.io NÃO tenta de novo sozinho nesse caso.
+      if (!socket.active) this.handleRefused(socket);
+    });
+
+    this.openWithAuth(socket);
+  }
+
+  // Liga (ou não) o envio do token conforme o backend e conecta.
+  openWithAuth(socket) {
+    detectSocketAuth().then((needsToken) => {
+      if (this.socket !== socket || socket.connected) return; // desconectado nesse meio-tempo
+      // Função: lê o token atual a cada (re)conexão.
+      socket.auth = needsToken
+        ? (cb) => cb({ token: localStorage.getItem('token') || '' })
+        : {};
+      socket.connect();
     });
   }
 
+  // Nunca fica parado sem tempo real: confere a sessão pela API. Se o token
+  // não vale mais (vencido, usuário desativado), a API responde 401 e o
+  // interceptor leva ao login. Se a sessão vale (ou a rede caiu), tenta
+  // conectar de novo em alguns segundos.
+  handleRefused(socket) {
+    if (this.retryTimer) return;
+    this.retryTimer = setTimeout(() => {}, RETRY_MS); // marca "em andamento"
+    api.get('/auth/me')
+      .catch(() => {})
+      .finally(() => {
+        clearTimeout(this.retryTimer);
+        if (this.socket !== socket) {
+          this.retryTimer = null;
+          return;
+        }
+        this.retryTimer = setTimeout(() => {
+          this.retryTimer = null;
+          if (this.socket === socket && !socket.connected) this.openWithAuth(socket);
+        }, RETRY_MS);
+      });
+  }
+
   disconnect() {
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
+    }
     if (this.socket) {
       // Remove todos os listeners antes de desconectar
       this.listeners.forEach((callback, event) => {

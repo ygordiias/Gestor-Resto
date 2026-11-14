@@ -22,7 +22,7 @@ from datetime import datetime, timezone, timedelta
 from passlib.context import CryptContext
 from jose import JWTError, jwt
 from enum import Enum
-from bootstrap import ensure_initial_superadmin, require_secret_key
+from bootstrap import ensure_initial_superadmin, require_cors_origins, require_secret_key
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -31,6 +31,9 @@ load_dotenv(ROOT_DIR / '.env')
 # Obrigatória, sem valor padrão, mínimo de 32 caracteres. Se faltar, o servidor não sobe.
 SECRET_KEY = require_secret_key()
 ALGORITHM = "HS256"
+
+# Origens aceitas pela API e pelo Socket.IO. Obrigatória: sem ela o servidor não sobe.
+CORS_ORIGINS = require_cors_origins()
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 hours
 
 # Password hashing
@@ -54,11 +57,13 @@ client = AsyncIOMotorClient(mongo_url, **_mongo_kwargs)
 db = client[db_name]
 
 # Socket.IO setup
+# Loggers do Socket.IO desligados: eles gravam o conteúdo das mensagens
+# (pedidos com dados de clientes) nos logs.
 sio = socketio.AsyncServer(
     async_mode='asgi',
-    cors_allowed_origins='*',
-    logger=True,
-    engineio_logger=True
+    cors_allowed_origins=CORS_ORIGINS,
+    logger=False,
+    engineio_logger=False
 )
 
 # Create FastAPI app
@@ -146,7 +151,9 @@ async def health_check_api():
 
 @api_router.get("/ping")
 async def ping():
-    return {"message": "pong", "timestamp": datetime.now(timezone.utc).isoformat()}
+    # socket_auth: avisa o frontend que o Socket.IO exige token (o frontend
+    # só envia o token quando vê este campo; backend antigo não o tem).
+    return {"message": "pong", "timestamp": datetime.now(timezone.utc).isoformat(), "socket_auth": True}
 
 # ==================== ENUMS ====================
 class UserRole(str, Enum):
@@ -543,6 +550,12 @@ async def update_user(user_id: str, user_data: dict, current_user: dict = Depend
     if updates.get("is_active") is True and target.get("is_active", True) is False:
         change["$unset"] = {"deactivated_at": "", "deactivated_by_id": ""}
     await db.users.update_one({"id": user_id}, change)
+    # Perfil trocado ou conta desativada: derruba o tempo real aberto; ao
+    # reconectar ele entra nas salas do perfil novo (ou é recusado).
+    if updates.get("is_active") is False or (
+        "role" in updates and updates["role"] != target.get("role")
+    ):
+        await disconnect_user_sockets(user_id)
     updated = await db.users.find_one({"id": user_id}, {"_id": 0, "password": 0})
     return updated
 
@@ -562,6 +575,7 @@ async def delete_user(user_id: str, current_user: dict = Depends(require_role([U
                 "deactivated_by_id": current_user["id"],
             }},
         )
+    await disconnect_user_sockets(user_id)
     return {"message": "Usuário desativado"}
 
 # ==================== CATEGORY ROUTES ====================
@@ -687,7 +701,7 @@ async def update_table(table_id: str, table_data: dict, current_user: dict = Dep
         {"$set": safe_data}
     )
 
-    await sio.emit("tables_updated", await get_tables())
+    await emit_staff("tables_updated", await get_tables())
     return {"message": "Table updated"}
 
 
@@ -706,7 +720,7 @@ async def update_table_status(table_id: str, status_data: dict):
         {"$set": {"status": new_status}}
     )
 
-    await sio.emit("tables_updated", await get_tables())
+    await emit_staff("tables_updated", await get_tables())
     return {"message": f"Status atualizado para {new_status}"}
 
 
@@ -720,7 +734,7 @@ async def request_table_cleaning(table_id: str):
         {"$set": {"status": "cleaning"}}
     )
 
-    await sio.emit("tables_updated", await get_tables())
+    await emit_staff("tables_updated", await get_tables())
     return {"message": "Limpeza solicitada"}
 
 
@@ -813,7 +827,7 @@ async def link_physical_tab(table_id: str, data: TabLinkCreate, current_user: di
             {"$set": {"active_order_id": None, "table_id": None}},
         )
         raise
-    await sio.emit("tables_updated", await get_tables())
+    await emit_staff("tables_updated", await get_tables())
     return {k: v for k, v in order_doc.items() if k != "_id"}
 
 # ==================== ORDER ROUTES ====================
@@ -942,7 +956,7 @@ async def create_order(order_data: OrderCreate, current_user: dict = Depends(get
     
     # Emit events
     await emit_order_updates(order_dict["items"])
-    await sio.emit('tables_updated', await get_tables())
+    await emit_staff('tables_updated', await get_tables())
     
     return {k: v for k, v in order_dict.items() if k != "_id"}
 
@@ -1012,7 +1026,7 @@ async def create_online_order(
 
     # Reusa exatamente o mesmo emitter para atualizar Cozinha e Bar
     await emit_order_updates(items_out)
-    await sio.emit('new_online_order', {
+    await emit_orders('new_online_order', {
         "order_id": order_dict["id"],
         "platform": platform,
         "external_order_number": external_number,
@@ -1029,11 +1043,11 @@ async def emit_order_updates(items):
     
     if food_items:
         kitchen_orders = await db.orders.find({"is_closed": False}, {"_id": 0}).to_list(100)
-        await sio.emit('kitchen_update', kitchen_orders)
+        await emit_orders('kitchen_update', kitchen_orders)
     
     if drink_items:
         bar_orders = await db.orders.find({"is_closed": False}, {"_id": 0}).to_list(100)
-        await sio.emit('bar_update', bar_orders)
+        await emit_orders('bar_update', bar_orders)
 
 @api_router.put("/orders/{order_id}/item/{item_id}/status", dependencies=[Depends(require_role(ITEM_STATUS_ROLES))])
 async def update_item_status(order_id: str, item_id: str, status_data: dict):
@@ -1064,14 +1078,14 @@ async def update_item_status(order_id: str, item_id: str, status_data: dict):
     
     # Emit updates
     updated_order = await db.orders.find_one({"id": order_id}, {"_id": 0})
-    await sio.emit('kitchen_update', await db.orders.find({"is_closed": False}, {"_id": 0}).to_list(100))
-    await sio.emit('bar_update', await db.orders.find({"is_closed": False}, {"_id": 0}).to_list(100))
-    await sio.emit('order_updated', updated_order)
+    await emit_orders('kitchen_update', await db.orders.find({"is_closed": False}, {"_id": 0}).to_list(100))
+    await emit_orders('bar_update', await db.orders.find({"is_closed": False}, {"_id": 0}).to_list(100))
+    await emit_orders('order_updated', updated_order)
     
     # Emitir atualização de estoque em tempo real
     if new_status == "delivered" and previous_status != "delivered":
         stock_list = await db.stock.find({}, {"_id": 0}).to_list(500)
-        await sio.emit('stock_updated', stock_list)
+        await emit_admins('stock_updated', stock_list)
     
     return {"message": "Item status updated"}
 
@@ -1118,8 +1132,8 @@ async def cancel_order(order_id: str, data: dict, current_user: dict = Depends(g
     # Libera a mesa
     await release_physical_tab(order)
     await refresh_table_after_order(order.get("table_id"))
-    await sio.emit('tables_updated', await get_tables())
-    await sio.emit('order_closed', {"order_id": order_id})
+    await emit_staff('tables_updated', await get_tables())
+    await emit_staff('order_closed', {"order_id": order_id})
     logger.info(f"[CANCEL] {current_user.get('name')} cancelou pedido {order_id} autorizado por {admin.get('name')} — {reason}")
     return {"message": "Comanda cancelada", "cancelled_by": admin.get("name"), "reason": reason}
 
@@ -1291,10 +1305,10 @@ async def cancel_order_item(order_id: str, item_id: str, data: dict, current_use
 
     # Realtime
     updated = await db.orders.find_one({"id": order_id}, {"_id": 0})
-    await sio.emit('order_updated', updated)
+    await emit_orders('order_updated', updated)
     if stock_restored:
         stock_list = await db.stock.find({}, {"_id": 0}).to_list(500)
-        await sio.emit('stock_updated', stock_list)
+        await emit_admins('stock_updated', stock_list)
 
     logger.info(
         f"[CANCEL-ITEM] pedido={order_id} item={item_id} qty={cancel_qty} "
@@ -1351,7 +1365,7 @@ async def complete_online_order(
     )
     if result.modified_count != 1:
         raise HTTPException(status_code=409, detail="Pedido já foi finalizado")
-    await sio.emit("order_closed", {"order_id": order_id})
+    await emit_staff("order_closed", {"order_id": order_id})
     return {
         "message": "Pedido online finalizado; aguardando repasse da plataforma",
         "order_id": order_id,
@@ -1518,8 +1532,8 @@ async def close_order(order_id: str, payment_data: dict, current_user: dict = De
     await refresh_table_after_order(order.get("table_id"))
 
     # Emit updates
-    await sio.emit('tables_updated', await get_tables())
-    await sio.emit('order_closed', {"order_id": order_id})
+    await emit_staff('tables_updated', await get_tables())
+    await emit_staff('order_closed', {"order_id": order_id})
 
     return {"message": "Order closed successfully"}
 
@@ -1612,10 +1626,10 @@ async def quick_cancel_order(order_id: str):
     await refresh_table_after_order(order.get("table_id"))
 
     # Emitir atualizações
-    await sio.emit('tables_updated', await get_tables())
-    await sio.emit('order_cancelled', {"order_id": order_id})
-    await sio.emit('kitchen_update', await db.orders.find({"is_closed": False}, {"_id": 0}).to_list(100))
-    await sio.emit('bar_update', await db.orders.find({"is_closed": False}, {"_id": 0}).to_list(100))
+    await emit_staff('tables_updated', await get_tables())
+    await emit_staff('order_cancelled', {"order_id": order_id})
+    await emit_orders('kitchen_update', await db.orders.find({"is_closed": False}, {"_id": 0}).to_list(100))
+    await emit_orders('bar_update', await db.orders.find({"is_closed": False}, {"_id": 0}).to_list(100))
 
     return {"message": "Pedido cancelado com sucesso"}
 
@@ -1666,7 +1680,7 @@ async def check_stock_alert(stock_item_id: str):
 
         await send_whatsapp_message(ADMIN_PHONE, msg)
 
-        await sio.emit("stock_alert", {
+        await emit_admins("stock_alert", {
             "stock_item_id": stock_item.get("id"),
             "product_id": stock_item.get("product_id"),
             "product_name": item_name,
@@ -2525,9 +2539,110 @@ async def get_profit_report(period: str = "daily", current_user: dict = Depends(
     }
 
 # ==================== SOCKET.IO EVENTS ====================
+# Toda conexão exige token JWT válido de usuário ativo (auth = {"token": ...}).
+# Cada conexão entra nas salas "staff", "role:<perfil>" e "user:<id>"; o
+# servidor escolhe as salas, o navegador não.
+SOCKET_STAFF_ROOM = "staff"
+# Perfis que recebem pedidos com dados pessoais do cliente.
+SOCKET_PII_ROLES = ("superadmin", "admin", "cashier")
+SOCKET_ADMIN_ROLES = ("superadmin", "admin")
+SOCKET_ALL_ROLES = ("superadmin", "admin", "waiter", "cashier", "kitchen", "bar")
+# Campos do pedido que só os perfis de SOCKET_PII_ROLES recebem.
+ORDER_PRIVATE_FIELDS = ("customer_phone", "address", "change_for")
+SOCKET_ITEM_READY_ROLES = ("superadmin", "admin", "kitchen", "bar", "waiter")
+SOCKET_CLEANING_ROLES = ("superadmin", "admin", "waiter", "cashier")
+
+
+def socket_role_room(role: str) -> str:
+    return f"role:{role}"
+
+
+def socket_user_room(user_id: str) -> str:
+    return f"user:{user_id}"
+
+
+def strip_customer_data(data):
+    """Pedido (ou lista de pedidos) sem telefone, endereço e troco, e só com
+    o primeiro nome do cliente. Não altera o objeto original."""
+    if isinstance(data, list):
+        return [strip_customer_data(item) for item in data]
+    if not isinstance(data, dict):
+        return data
+    clean = {k: v for k, v in data.items() if k not in ORDER_PRIVATE_FIELDS}
+    name = clean.get("customer_name")
+    if isinstance(name, str) and name.strip():
+        clean["customer_name"] = name.strip().split()[0]
+    return clean
+
+
+async def emit_staff(event, data):
+    """Evento sem dados pessoais: todos os usuários logados."""
+    await sio.emit(event, data, room=SOCKET_STAFF_ROOM)
+
+
+async def emit_admins(event, data):
+    """Evento só para admin e superadmin (ex.: estoque e custos)."""
+    await sio.emit(event, data, room=[socket_role_room(r) for r in SOCKET_ADMIN_ROLES])
+
+
+async def emit_orders(event, data):
+    """Pedidos: completos para admin/superadmin/caixa; sem dados pessoais
+    para cozinha, bar e garçom."""
+    await sio.emit(event, data, room=[socket_role_room(r) for r in SOCKET_PII_ROLES])
+    others = [socket_role_room(r) for r in SOCKET_ALL_ROLES if r not in SOCKET_PII_ROLES]
+    await sio.emit(event, strip_customer_data(data), room=others)
+
+
+async def _socket_user_from_auth(auth):
+    """Usuário ativo dono do token em auth["token"], ou None."""
+    token = auth.get("token") if isinstance(auth, dict) else None
+    if not token or not isinstance(token, str):
+        return None
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        return None
+    user_id = payload.get("sub")
+    if not user_id:
+        return None
+    user = await db.users.find_one({"id": user_id}, {"_id": 0, "id": 1, "role": 1, "is_active": 1})
+    if not user or user.get("is_active", True) is False:
+        return None
+    if user.get("role") not in SOCKET_ALL_ROLES:
+        return None
+    return user
+
+
+async def _socket_role(sid):
+    try:
+        session = await sio.get_session(sid)
+    except KeyError:
+        return None
+    return (session or {}).get("role")
+
+
+async def disconnect_user_sockets(user_id: str):
+    """Derruba as conexões em tempo real abertas de um usuário (ex.: ao
+    desativá-lo ou trocar o perfil). Ele só volta com um token válido."""
+    room = socket_user_room(user_id)
+    sids = [sid for sid, _ in sio.manager.get_participants("/", room)]
+    for sid in sids:
+        await sio.disconnect(sid)
+    return len(sids)
+
+
 @sio.event
-async def connect(sid, environ):
-    logger.info(f"Client connected: {sid}")
+async def connect(sid, environ, auth=None):
+    user = await _socket_user_from_auth(auth)
+    if user is None:
+        logger.info("Socket recusado (sem token válido): %s", sid)
+        # O frontend trata "unauthorized" levando ao login.
+        raise socketio.exceptions.ConnectionRefusedError("unauthorized")
+    await sio.save_session(sid, {"user_id": user["id"], "role": user["role"]})
+    await sio.enter_room(sid, SOCKET_STAFF_ROOM)
+    await sio.enter_room(sid, socket_role_room(user["role"]))
+    await sio.enter_room(sid, socket_user_room(user["id"]))
+    logger.info("Socket conectado: %s (perfil %s)", sid, user["role"])
     await sio.emit('connection_established', {'sid': sid}, room=sid)
 
 @sio.event
@@ -2536,27 +2651,26 @@ async def disconnect(sid):
 
 @sio.event
 async def join_room(sid, data):
-    room = data.get('room')
-    if room:
-        sio.enter_room(sid, room)
-        logger.info(f"Client {sid} joined room {room}")
+    # Mantido só por compatibilidade com o frontend: as salas são definidas
+    # pelo servidor na conexão. Pedidos de sala vindos do navegador são ignorados.
+    return None
 
 @sio.event
 async def leave_room(sid, data):
-    room = data.get('room')
-    if room:
-        sio.leave_room(sid, room)
-        logger.info(f"Client {sid} left room {room}")
+    return None
 
 @sio.event
 async def item_ready(sid, data):
     """Notifica garçom que item está pronto"""
+    if await _socket_role(sid) not in SOCKET_ITEM_READY_ROLES:
+        return None
+    data = data if isinstance(data, dict) else {}
     table_number = data.get('tableNumber')
     product_name = data.get('productName')
     item_type = data.get('type', 'food')
     
-    # Emite para todos os garçons conectados
-    await sio.emit('waiter_notification', {
+    # Emite para todos os usuários logados (o garçom filtra na tela)
+    await emit_staff('waiter_notification', {
         'tableNumber': table_number,
         'productName': product_name,
         'type': item_type,
@@ -2566,7 +2680,10 @@ async def item_ready(sid, data):
 
 @sio.event
 async def request_cleaning(sid, data):
-    """Cliente solicita limpeza da mesa"""
+    """Solicita limpeza da mesa (grava no banco: só admin, garçom e caixa)."""
+    if await _socket_role(sid) not in SOCKET_CLEANING_ROLES:
+        return None
+    data = data if isinstance(data, dict) else {}
     table_id = data.get('tableId')
     table_number = data.get('tableNumber')
     
@@ -2576,7 +2693,7 @@ async def request_cleaning(sid, data):
             {"$set": {"status": "cleaning"}}
         )
         tables = await get_tables()
-        await sio.emit('tables_updated', tables)
+        await emit_staff('tables_updated', tables)
         logger.info(f"Cleaning requested for table {table_number}")
 
 # ==================== TECHNICAL SHEETS ROUTES ====================
@@ -2910,7 +3027,7 @@ async def create_production(data: dict, current_user: dict = Depends(require_rol
 
     # Emite atualizacao de estoque em tempo real
     stock_list = await db.stock.find({}, {"_id": 0}).to_list(500)
-    await sio.emit('stock_updated', stock_list)
+    await emit_admins('stock_updated', stock_list)
 
     logger.info(f"[PRODUCTION] {current_user.get('name','-')} produziu {quantity}x {produced_name} (custo R$ {total_cost:.2f})")
     return production
@@ -3409,7 +3526,7 @@ async def create_public_order(order_data: PublicOrderCreate):
 
     # Emitir para cozinha/bar via Socket.IO
     await emit_order_updates(order_items)
-    await sio.emit('new_online_order', {
+    await emit_orders('new_online_order', {
         "order_code": order_code,
         "customer_name": order_data.customer_name,
         "delivery_type": order_data.delivery_type,
@@ -3468,8 +3585,9 @@ register_operational_routes(
 app.include_router(api_router)
 app.add_middleware(
     CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=["*"],
+    # Token vai no cabeçalho Authorization (não em cookie): sem credentials.
+    allow_credentials=False,
+    allow_origins=CORS_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
