@@ -2,6 +2,8 @@
 
 - require_secret_key(): SECRET_KEY obrigatória, sem valor padrão, mínimo de
   32 caracteres. Se faltar ou for curta, o servidor não sobe. Nunca mostra a chave.
+- require_cors_origins(): CORS_ORIGINS obrigatória (lista separada por
+  vírgula, sem "*"). Se faltar, o servidor não sobe.
 - ensure_initial_superadmin(): criação do primeiro superadmin a partir de
   variáveis de ambiente.
 
@@ -52,6 +54,55 @@ def require_secret_key(env=None) -> str:
     # Só stderr: roda antes do logging ser configurado, e o Render já
     # captura o stderr nos logs do serviço.
     print(f"{problema}\n{_SECRET_KEY_HELP}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+_CORS_HELP = (
+    "O servidor não vai iniciar sem ela.\n"
+    "Defina CORS_ORIGINS com os endereços do frontend, separados por vírgula, "
+    "sem barra no final. Exemplo:\n"
+    "    CORS_ORIGINS=https://meu-frontend.onrender.com,http://localhost:3000\n"
+    "Render: Environment do serviço backend; local: backend/.env."
+)
+
+
+def require_cors_origins(env=None) -> list:
+    """Devolve a lista de origens permitidas (CORS da API e do Socket.IO).
+
+    Lê CORS_ORIGINS (separada por vírgula), tira espaços e a barra final.
+    Encerra (SystemExit(1)) se faltar, estiver vazia, contiver "*" ou um
+    item que não comece com http:// ou https://.
+    """
+    env = os.environ if env is None else env
+    raw = env.get("CORS_ORIGINS")
+    origins = []
+    problema = None
+
+    if raw is None or not raw.strip():
+        problema = "ERRO FATAL: a variável de ambiente CORS_ORIGINS não está definida."
+    else:
+        for item in raw.split(","):
+            origin = item.strip().rstrip("/")
+            if not origin:
+                continue
+            if "*" in origin:
+                problema = "ERRO FATAL: CORS_ORIGINS não pode conter \"*\"; liste os endereços."
+                break
+            if not (origin.startswith("http://") or origin.startswith("https://")) or origin in ("http:", "https:"):
+                problema = (
+                    f"ERRO FATAL: CORS_ORIGINS tem um item inválido ({origin!r}); "
+                    "cada item deve começar com http:// ou https://."
+                )
+                break
+            if origin not in origins:
+                origins.append(origin)
+        if problema is None and not origins:
+            problema = "ERRO FATAL: CORS_ORIGINS está vazia."
+
+    if problema is None:
+        return origins
+
+    print(f"{problema}\n{_CORS_HELP}", file=sys.stderr)
     raise SystemExit(1)
 
 
