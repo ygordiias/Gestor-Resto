@@ -244,9 +244,13 @@ export default function OrderPage() {
       };
 
       // Comandas físicas precisam de confirmação real do servidor; nunca enfileirar offline.
-      if (selectedTab !== 'traditional') await api.post('/orders', orderData);
-      else await ordersAPI.create(orderData);
+      const res = selectedTab !== 'traditional'
+        ? await api.post('/orders', orderData)
+        : await ordersAPI.create(orderData);
       toast.success('Pedido enviado com sucesso!');
+      // Avisos de estoque (receita): não bloqueiam o pedido.
+      const warnings = res?.data?.stock_warnings || [];
+      if (warnings.length) toast.warning(`Atenção ao estoque: ${warnings.join('; ')}`, { duration: 8000 });
       setCart([]);
       await fetchTableOrders();
     } catch (error) {

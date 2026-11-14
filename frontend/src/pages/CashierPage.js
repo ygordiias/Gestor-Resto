@@ -1061,6 +1061,8 @@ export default function CashierPage() {
         items: payloadItems,
       });
       toast.success(`Pedido online criado: ${res.data.platform.toUpperCase()} #${res.data.external_order_number}`);
+      const warnings = res.data.stock_warnings || [];
+      if (warnings.length) toast.warning(`Atenção ao estoque: ${warnings.join('; ')}`, { duration: 8000 });
       setOnlineDialogOpen(false);
       await fetchData();
     } catch (e) {
