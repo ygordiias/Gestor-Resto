@@ -9,17 +9,34 @@ import React from 'react';
 const PLATFORM_LABEL = {
   ifood: 'IFOOD',
   '99food': '99FOOD',
+  nostfood: 'NOSTFOOD',
   other: 'ONLINE',
 };
 
 const PLATFORM_COLOR = {
   ifood: 'bg-red-600 text-white',
   '99food': 'bg-yellow-500 text-black',
+  nostfood: 'bg-orange-600 text-white',
   other: 'bg-slate-700 text-white',
 };
 
 export function isOnlineOrder(order) {
   return !!(order && (order.source === 'online' || order.platform));
+}
+
+// Pedido da NostFood cobrado na entrega: é dinheiro do caixa (fechamento normal).
+export function isCollectOnDelivery(order) {
+  return !!(order && order.external_source === 'nostfood' && order.payment_status === 'to_collect');
+}
+
+// Pedido online pago pela plataforma (repasse) ou de teste: não entra no caixa.
+export function isPlatformSettled(order) {
+  return isOnlineOrder(order) && (!isCollectOnDelivery(order) || !!order.is_test);
+}
+
+// Cobrar na entrega que ainda deve dinheiro ao caixa (teste nunca deve).
+export function owesCash(order) {
+  return isCollectOnDelivery(order) && !order.is_test && order.status !== 'cancelled';
 }
 
 export function OnlineOrderBadge({ order, size = 'md', className = '' }) {
@@ -44,6 +61,16 @@ export function OnlineOrderBadge({ order, size = 'md', className = '' }) {
         <span>{label}{num && ` ${num}`}</span>
         {fulfill && <><span>•</span><span>{fulfill}</span></>}
       </span>
+      {order.is_test && (
+        <span className="text-[10px] font-extrabold bg-sky-500 text-white rounded px-1" data-testid="online-order-test">
+          TESTE
+        </span>
+      )}
+      {order.external_source === 'nostfood' && order.payment_status && (
+        <span className="text-[10px] font-extrabold" data-testid="online-order-payment">
+          {order.payment_status === 'to_collect' ? '💵 COBRAR NA ENTREGA' : '✔ PAGO ONLINE'}
+        </span>
+      )}
       {pack && (
         <span className="text-[10px] font-extrabold" data-testid="online-order-packaging">
           {pack}

@@ -1129,6 +1129,15 @@ async def cancel_order(order_id: str, data: dict, current_user: dict = Depends(g
     logger.info(f"[CANCEL] {current_user.get('name')} cancelou pedido {order_id} autorizado por {admin.get('name')} — {reason}")
     return {"message": "Comanda cancelada", "cancelled_by": admin.get("name"), "reason": reason}
 
+def _order_total(order: dict, subtotal: float, service_fee: float) -> float:
+    """Total = subtotal + serviço + taxa de entrega - descontos (nunca negativo).
+
+    Recalcular só subtotal + serviço perdia a taxa de entrega dos pedidos de delivery.
+    """
+    delivery_fee = float(order.get("delivery_fee") or 0)
+    discount = float(order.get("discount") or 0)
+    return round(max(0.0, subtotal + service_fee + delivery_fee - discount), 2)
+
 @api_router.patch("/orders/{order_id}/item/{item_id}/courtesy")
 async def mark_item_courtesy(order_id: str, item_id: str, data: dict, current_user: dict = Depends(require_role([UserRole.ADMIN, UserRole.CASHIER]))):
     """Marca item individual como cortesia. Zera preco, mantem estoque a deduzir."""
@@ -1161,7 +1170,7 @@ async def mark_item_courtesy(order_id: str, item_id: str, data: dict, current_us
             "items": order["items"],
             "subtotal": subtotal,
             "service_fee": service_fee,
-            "total": subtotal + service_fee,
+            "total": _order_total(order, subtotal, service_fee),
         }}
     )
     return await db.orders.find_one({"id": order_id}, {"_id": 0})
@@ -1283,7 +1292,7 @@ async def cancel_order_item(order_id: str, item_id: str, data: dict, current_use
     )
     fee_pct = order.get("service_fee_percentage", 10)
     service_fee = subtotal * (fee_pct / 100)
-    total = subtotal + service_fee
+    total = _order_total(order, subtotal, service_fee)
 
     await db.orders.update_one(
         {"id": order_id},

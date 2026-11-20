@@ -16,11 +16,18 @@ import {
   DialogDescription,
   DialogFooter,
 } from '../components/ui/dialog';
-import { ordersAPI, cashRegisterAPI, tablesAPI, invoicesAPI, productsAPI } from '../lib/api';
+import { ordersAPI, cashRegisterAPI, tablesAPI, invoicesAPI, productsAPI, kdsAPI, nostfoodAPI } from '../lib/api';
 import { cn, formatCurrency, formatDate } from '../lib/utils';
 import socketService from '../lib/socket';
 import { toast } from 'sonner';
-import { OnlineOrderBadge, isOnlineOrder } from '../components/OnlineOrderBadge';
+import {
+  OnlineOrderBadge,
+  isOnlineOrder,
+  isCollectOnDelivery,
+  isPlatformSettled,
+  owesCash,
+} from '../components/OnlineOrderBadge';
+import { useAuth } from '../contexts/AuthContext';
 import {
   CreditCard,
   Receipt,
@@ -525,6 +532,8 @@ function PaymentRow({ payment, index, onUpdate, onRemove, canRemove }) {
 }
 
 export default function CashierPage() {
+  const { user } = useAuth();
+  const isAdmin = ['admin', 'superadmin'].includes(user?.role);
   const [orders, setOrders] = useState([]);
     // Configuração da impressora térmica
   const [paperWidth, setPaperWidth] = useState(() => {
@@ -683,7 +692,17 @@ export default function CashierPage() {
   // O primeiro clique em "Fechar Caixa" SOMENTE abre a prévia para impressão.
   const handleCloseRegister = async () => {
     if (closeFlowBusy || previewLoading) return;
-    if (orders.some(order => !isOnlineOrder(order))) {
+    const collect = orders.filter(owesCash);
+    if (collect.length) {
+      toast.error(
+        'Pedidos a cobrar na entrega ainda pendentes: ' +
+        collect.map(o => `${o.external_order_number} (${formatCurrency(o.total)})`).join(', ') +
+        '. Receba o pagamento ou, se o cliente não pagou, um admin marca "Não recebido".',
+        { duration: 10000 }
+      );
+      return;
+    }
+    if (orders.some(order => !isOnlineOrder(order) && !order.is_test)) {
       toast.error('Finalize as comandas presenciais antes de fechar o caixa.');
       return;
     }
@@ -864,7 +883,7 @@ export default function CashierPage() {
       const handleCloseOrder = async () => {
   if (!selectedOrder || closingOrder) return;
 
-  if (isOnlineOrder(selectedOrder)) {
+  if (isPlatformSettled(selectedOrder)) {
   setClosingOrder(true);
 
   try {
@@ -1316,6 +1335,11 @@ export default function CashierPage() {
                                 Obs.: {item.notes}
                               </span>
                             )}
+                            {item.unlinked && (
+                              <span className="block text-[10px] font-bold text-fuchsia-700">
+                                ITEM SEM LIGAÇÃO (ligue em Configurações › NostFood)
+                              </span>
+                            )}
                             {isCancelled && (
                               <Badge
                                 variant="destructive"
@@ -1360,6 +1384,12 @@ export default function CashierPage() {
                       </span>
                       <span>{formatCurrency(selectedOrder.service_fee)}</span>
                     </div>
+                    {Number(selectedOrder.delivery_fee) > 0 && (
+                      <div className="flex justify-between text-xs sm:text-sm">
+                        <span>Taxa de entrega:</span>
+                        <span>{formatCurrency(selectedOrder.delivery_fee)}</span>
+                      </div>
+                    )}
                     <div className="flex justify-between font-bold text-base sm:text-lg">
                       <span>Total:</span>
                       <span className="text-primary">
@@ -1368,7 +1398,76 @@ export default function CashierPage() {
                     </div>
                   </div>
 
-                  {isOnlineOrder(selectedOrder) ? (
+                  {selectedOrder.external_source === 'nostfood' && (
+                    <div className="rounded border p-3 text-xs sm:text-sm space-y-1" data-testid="cashier-delivery-info">
+                      <p className="font-bold">
+                        Pedido {selectedOrder.external_order_number}
+                        {selectedOrder.customer_name ? ` · ${selectedOrder.customer_name}` : ''}
+                      </p>
+                      {selectedOrder.customer_phone && <p>Telefone: {selectedOrder.customer_phone}</p>}
+                      {selectedOrder.address && <p>Endereço: {selectedOrder.address}</p>}
+                      <p>
+                        Pagamento: {selectedOrder.payment_method || 'não informado'} ·{' '}
+                        <strong>
+                          {isCollectOnDelivery(selectedOrder) ? 'COBRAR NA ENTREGA' : 'PAGO ONLINE (repasse)'}
+                        </strong>
+                      </p>
+                    </div>
+                  )}
+
+                  {isAdmin && owesCash(selectedOrder) && !selectedOrder.is_closed && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="w-full border-destructive text-destructive hover:bg-destructive/10"
+                      disabled={closingOrder}
+                      onClick={async () => {
+                        const reason = window.prompt(
+                          `Pedido ${selectedOrder.external_order_number}: o cliente não pagou?\n` +
+                          'Informe o motivo (obrigatório). O pedido sai do caixa e não conta como venda.',
+                          ''
+                        );
+                        if (!reason || !reason.trim()) return;
+                        try {
+                          await nostfoodAPI.notReceived(selectedOrder.id, reason.trim());
+                          toast.success('Pedido marcado como não recebido');
+                          clearSelection();
+                          await fetchData();
+                        } catch (e) {
+                          const detail = e?.response?.data?.detail;
+                          toast.error(typeof detail === 'string' ? detail : 'Erro ao marcar como não recebido');
+                        }
+                      }}
+                      data-testid="not-received-btn"
+                    >
+                      Não recebido (cliente não pagou)
+                    </Button>
+                  )}
+
+                  {!selectedOrder.is_closed && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="w-full border-yellow-500 text-yellow-700 hover:bg-yellow-500/10"
+                      onClick={async () => {
+                        const text = window.prompt('Observação para a cozinha/bar (aparece em destaque no KDS):', '');
+                        if (!text || !text.trim()) return;
+                        try {
+                          await kdsAPI.addObservation(selectedOrder.id, text.trim());
+                          toast.success('Observação enviada para a cozinha e o bar');
+                          await fetchData();
+                        } catch (e) {
+                          const detail = e?.response?.data?.detail;
+                          toast.error(typeof detail === 'string' ? detail : 'Erro ao enviar observação');
+                        }
+                      }}
+                      data-testid="add-observation-btn"
+                    >
+                      📢 Adicionar observação (cozinha/bar)
+                    </Button>
+                  )}
+
+                  {isPlatformSettled(selectedOrder) ? (
                     <div className="rounded border border-blue-500/30 bg-blue-500/5 p-3 text-sm">
                       <strong>Pagamento via plataforma</strong>
                       <p>Valor bruto: {formatCurrency(selectedOrder.total)}</p>
@@ -1471,7 +1570,7 @@ export default function CashierPage() {
                     onClick={handleCloseOrder}
                     disabled={
                       closingOrder ||
-                      (!isOnlineOrder(selectedOrder) &&
+                      (!isPlatformSettled(selectedOrder) &&
                         getTotalPayments + 0.001 < selectedOrder.total)
                     }
                     data-testid="close-order-btn"
@@ -1479,9 +1578,11 @@ export default function CashierPage() {
                     <Receipt className="h-4 w-4 mr-2" />
                     {closingOrder
                       ? 'Finalizando...'
-                      : isOnlineOrder(selectedOrder)
+                      : isPlatformSettled(selectedOrder)
                         ? 'Finalizar Pedido Online — Aguardando Repasse'
-                        : 'Fechar Comanda'}
+                        : isCollectOnDelivery(selectedOrder)
+                          ? 'Receber na Entrega e Fechar'
+                          : 'Fechar Comanda'}
                   </Button>
 
                   {/* Cortesia / Permuta */}
@@ -1676,6 +1777,30 @@ export default function CashierPage() {
                       <Receipt className="h-4 w-4 mr-2" />
                       Reimprimir último fechamento
                     </Button>
+
+                    {/* NostFood: a cobrar na entrega ainda pendentes (bloqueiam o fechamento) */}
+                    {orders.filter(owesCash).length > 0 && (
+                      <div className="rounded border border-amber-500 bg-amber-500/10 p-3 text-xs sm:text-sm space-y-1"
+                        data-testid="pending-to-collect">
+                        <p className="font-bold">A cobrar na entrega (pendentes)</p>
+                        {orders.filter(owesCash).map(o => (
+                          <button
+                            key={o.id}
+                            type="button"
+                            className="w-full flex justify-between gap-2 text-left hover:underline"
+                            onClick={() => selectOrder(o)}
+                          >
+                            <span className="truncate">
+                              {o.external_order_number} · {o.customer_name || 'cliente'} · {o.payment_method}
+                            </span>
+                            <span className="font-bold shrink-0">{formatCurrency(o.total)}</span>
+                          </button>
+                        ))}
+                        <p className="text-muted-foreground">
+                          O caixa só fecha depois de receber ou marcar “Não recebido”.
+                        </p>
+                      </div>
+                    )}
 
                     {/* Fechamento definitivo do caixa */}
                     <Button
