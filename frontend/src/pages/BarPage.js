@@ -13,7 +13,8 @@ import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
 import { ordersAPI } from '../lib/api';
 import { cn, getStatusLabel, formatDate } from '../lib/utils';
-import socketService, { playNotificationSound } from '../lib/socket';
+import socketService from '../lib/socket';
+import { useKdsSound, useKdsAlerts } from '../lib/kdsSound';
 import { toast } from 'sonner';
 
 import {
@@ -27,6 +28,28 @@ import {
   OnlineOrderBadge,
   isOnlineOrder,
 } from '../components/OnlineOrderBadge';
+
+import {
+  CancelledOrdersPanel,
+  ObservationBanners,
+  SoundButton,
+  TestOrderBand,
+  UnlinkedItemBadge,
+  cancelNeedsAck,
+  pendingObservations,
+  useCancelledOrders,
+} from '../components/KdsNotices';
+
+const STATION = 'bar';
+const isBarItem = (item) => item.type === 'drink';
+const LATE_SECONDS = { salon: 30 * 60, delivery: 45 * 60 };
+
+function isLate(order, now) {
+  const created = new Date(order?.created_at).getTime();
+  if (!Number.isFinite(created)) return false;
+  const limit = isOnlineOrder(order) ? LATE_SECONDS.delivery : LATE_SECONDS.salon;
+  return (now - created) / 1000 > limit;
+}
 
 const STATUSES = ['pending', 'preparing', 'ready'];
 const NEXT_STATUSES = ['preparing', 'ready', 'delivered'];
@@ -75,8 +98,7 @@ export default function BarPage() {
       pendingCount > prevPendingCountRef.current &&
       prevPendingCountRef.current > 0
     ) {
-      playNotificationSound();
-
+      // O som do pedido novo fica com useKdsAlerts (respeita o botão "Ativar som").
       toast.info('Novo pedido no bar!', {
         icon: <Bell className="h-4 w-4" />,
       });
@@ -182,6 +204,29 @@ export default function BarPage() {
   const [pendingItems, preparingItems, readyItems] = columns;
 
   columnsRef.current = columns;
+
+  // Sons e avisos (pedido novo, observação, cancelado, atrasado)
+  const sound = useKdsSound();
+  const { cancelled, refreshCancelled } = useCancelledOrders();
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 5000);
+    return () => clearInterval(id);
+  }, []);
+  const visibleOrders = [...new Map(barItems.map(item => [item.orderId, item._order])).values()];
+  useKdsAlerts({
+    ready: !loading,
+    soundOn: sound.running,
+    newOrderIds: pendingItems.map(item => itemKey(item)),
+    pendingObsIds: visibleOrders.flatMap(order =>
+      pendingObservations(order, STATION).map(obs => obs.id)),
+    pendingCancelIds: cancelled
+      .filter(order => cancelNeedsAck(order, STATION, isBarItem))
+      .map(order => order.id),
+    lateOrderIds: visibleOrders
+      .filter(order => isLate(order, now))
+      .map(order => String(order.id)),
+  });
 
   const chooseItem = useCallback((col, key) => {
     selectedRef.current = { col, key };
@@ -602,6 +647,15 @@ export default function BarPage() {
                         📝 {item.notes}
                       </p>
                     )}
+                    <UnlinkedItemBadge item={item} />
+                  </div>
+                  <div className="mb-3 space-y-2">
+                    <TestOrderBand order={item._order} />
+                    <ObservationBanners
+                      order={item._order}
+                      station={STATION}
+                      onAcked={fetchOrders}
+                    />
                   </div>
 
                   <Button
@@ -701,17 +755,28 @@ export default function BarPage() {
 
         </div>
 
-        {/* INSTRUÇÕES */}
-        <div
-          className="text-sm text-muted-foreground flex flex-wrap gap-3"
-          data-testid="bar-keyboard-hint"
-        >
-          <span>↑ ↓ Selecionar bebida</span>
-          <span>← → Mudar coluna</span>
-          <span className="font-bold text-foreground">
-            ENTER = AVANÇAR STATUS
-          </span>
+        {/* INSTRUÇÕES E SOM */}
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div
+            className="text-sm text-muted-foreground flex flex-wrap gap-3"
+            data-testid="bar-keyboard-hint"
+          >
+            <span>↑ ↓ Selecionar bebida</span>
+            <span>← → Mudar coluna</span>
+            <span className="font-bold text-foreground">
+              ENTER = AVANÇAR STATUS
+            </span>
+          </div>
+          <SoundButton sound={sound} />
         </div>
+
+        {/* CANCELADOS AGUARDANDO CIENTE */}
+        <CancelledOrdersPanel
+          orders={cancelled}
+          station={STATION}
+          itemFilter={isBarItem}
+          onAcked={refreshCancelled}
+        />
 
         {/* QUADRO DE PEDIDOS */}
         <div

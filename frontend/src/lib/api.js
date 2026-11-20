@@ -316,6 +316,29 @@ export const productionRecipesAPI = {
   delete: (id) => api.delete(`/production-recipes/${id}`),
 };
 
+// Integração NostFood (iFood / 99) e avisos do KDS
+const NOSTFOOD = '/integrations/nostfood';
+export const nostfoodAPI = {
+  status: () => api.get(`${NOSTFOOD}/status`),
+  simulate: (data) => api.post(`${NOSTFOOD}/simular`, data || {}),
+  unlinked: () => api.get(`${NOSTFOOD}/produtos-sem-ligacao`),
+  links: () => api.get(`${NOSTFOOD}/ligacoes`),
+  link: (data) => api.post(`${NOSTFOOD}/ligar-produto`, data),
+  losses: (params) => api.get(`${NOSTFOOD}/perdas`, { params }),
+  deleteTests: () => api.delete(`${NOSTFOOD}/testes`),
+  notReceived: (orderId, reason) => api.post(`${NOSTFOOD}/pedidos/${orderId}/nao-recebido`, { reason }),
+};
+
+export const kdsAPI = {
+  getCancelled: () => api.get(`${NOSTFOOD}/kds/cancelados`),
+  ackCancel: (orderId, station) =>
+    api.post(`${NOSTFOOD}/pedidos/${orderId}/cancelamento/ciente`, { station }),
+  addObservation: (orderId, text) =>
+    api.post(`${NOSTFOOD}/pedidos/${orderId}/observacao`, { text }),
+  ackObservation: (orderId, obsId, station) =>
+    api.post(`${NOSTFOOD}/pedidos/${orderId}/observacao/${obsId}/ciente`, { station }),
+};
+
 // Listen for online event to sync
 if (typeof window !== 'undefined') {
   window.addEventListener('online', async () => {
