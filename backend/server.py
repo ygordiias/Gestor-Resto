@@ -10,6 +10,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo.errors import PyMongoError
 import socketio
 import os
+import sys
 import logging
 import json
 import hashlib
@@ -23,6 +24,7 @@ from passlib.context import CryptContext
 from jose import JWTError, jwt
 from enum import Enum
 from bootstrap import ensure_initial_superadmin, require_secret_key
+import nostfood_integration as nostfood
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -1057,10 +1059,14 @@ async def update_item_status(order_id: str, item_id: str, status_data: dict):
     
     # Baixa automática de estoque: só quando muda para "delivered" pela primeira vez
     if new_status == "delivered" and previous_status != "delivered" and not target_item.get("stock_deducted"):
-        await deduct_stock(target_item["product_id"], target_item["quantity"])
-        target_item["stock_deducted"] = True
+        if nostfood.is_nostfood(order):
+            await nostfood.safe_deduct(order, target_item)  # falha vira pendência, não trava o KDS
+        else:
+            await deduct_stock(target_item["product_id"], target_item["quantity"])
+            target_item["stock_deducted"] = True
     
     await db.orders.update_one({"id": order_id}, {"$set": {"items": order["items"]}})
+    await nostfood.on_item_status_changed(order_id, new_status)
     
     # Emit updates
     updated_order = await db.orders.find_one({"id": order_id}, {"_id": 0})
@@ -1325,12 +1331,17 @@ async def complete_online_order(
         raise HTTPException(status_code=400, detail="Use o fechamento normal para pedidos presenciais")
     if order.get("status") == "cancelled" or order.get("is_comp"):
         raise HTTPException(status_code=400, detail="Pedido cancelado ou cortesia não pode gerar repasse")
+    if nostfood.is_to_collect(order) and not order.get("is_test"):
+        raise HTTPException(status_code=409, detail="Pedido cobrado na entrega: use Fechar Comanda e registre o pagamento")
     existing = await db.payments.count_documents({"order_id": order_id})
     if existing:
         raise HTTPException(status_code=409, detail="Pedido já possui pagamentos; confira antes de finalizar")
 
     for item in order.get("items", []):
         if item.get("status") == "cancelled" or item.get("stock_deducted"):
+            continue
+        if nostfood.is_nostfood(order):
+            await nostfood.safe_deduct(order, item)  # falha vira pendência, não trava o caixa
             continue
         await deduct_stock(item["product_id"], item["quantity"], order_code=order_id)
         item["stock_deducted"] = True
@@ -1435,8 +1446,17 @@ async def close_order(order_id: str, payment_data: dict, current_user: dict = De
         raise HTTPException(status_code=404, detail="Order not found")
     if order.get("is_closed"):
         raise HTTPException(status_code=409, detail="Pedido já está fechado")
-    if order.get("source") == "online":
+    collect_on_delivery = nostfood.is_to_collect(order)
+    if order.get("source") == "online" and not collect_on_delivery:
         raise HTTPException(status_code=409, detail="Pedido online deve usar Finalizar pedido online (aguardando repasse)")
+    if collect_on_delivery and order.get("status") == OrderStatus.CANCELLED.value:
+        raise HTTPException(status_code=409, detail="Pedido cancelado")
+    if order.get("is_test"):
+        raise HTTPException(status_code=409, detail="Pedido de teste não entra no caixa: use Finalizar pedido online")
+    claim_filter = (
+        {"external_source": "nostfood", "payment_status": "to_collect", "status": {"$ne": "cancelled"}}
+        if collect_on_delivery else {"source": {"$ne": "online"}}
+    )
 
     # Total SEMPRE o do banco, em centavos (nunca o enviado pelo navegador).
     total_cents = _close_cents(order.get("total"))
@@ -1452,7 +1472,7 @@ async def close_order(order_id: str, payment_data: dict, current_user: dict = De
         async with await client.start_session() as session:
             async with session.start_transaction():
                 claimed = await db.orders.update_one(
-                    {"id": order_id, "is_closed": False, "source": {"$ne": "online"}},
+                    {"id": order_id, "is_closed": False, **claim_filter},
                     {"$set": {
                         "is_closed": True,
                         "closed_at": closed_at,
@@ -1504,6 +1524,10 @@ async def close_order(order_id: str, payment_data: dict, current_user: dict = De
         if item.get("status") == "cancelled":
             continue
         if not item.get("stock_deducted"):
+            if collect_on_delivery:
+                await nostfood.safe_deduct(order, item)  # falha vira pendência do item
+                changed = True
+                continue
             try:
                 await deduct_stock(item["product_id"], item["quantity"], order_code=order.get("id", ""))
                 item["stock_deducted"] = True
@@ -2009,7 +2033,10 @@ async def preview_cash_register(
         if order.get("status") == "cancelled" or order.get("is_comp"):
             continue
 
-        if order.get("source") == "online":
+        if nostfood.excluded_from_cash(order):  # teste ou "Não recebido"
+            continue
+
+        if nostfood.settles_on_platform(order):
             online_bucket(online_completed, order)
             continue
 
@@ -2053,14 +2080,13 @@ async def preview_cash_register(
     deposits = cents(register.get("deposits"))
     withdrawals = cents(register.get("withdrawals"))
 
-    open_orders = await db.orders.count_documents({
-        "is_closed": False,
-        "source": {"$ne": "online"}
-    })
+    open_orders = await db.orders.count_documents(nostfood.OPEN_CASH_ORDERS_QUERY)
     online_cursor = db.orders.find({
         "is_closed": False,
         "source": "online",
-        "status": {"$ne": "cancelled"}
+        "status": {"$ne": "cancelled"},
+        "payment_status": {"$ne": "to_collect"},
+        "is_test": {"$ne": True},
     }, {"_id": 0})
     async for order in online_cursor:
         online_bucket(online_open, order)
@@ -2092,6 +2118,9 @@ async def preview_cash_register(
             initial + methods["cash"] + deposits - withdrawals
         ),
         "warnings": warnings,
+        # NostFood: a cobrar na entrega ainda abertos (bloqueiam) e marcados "Não recebido".
+        "pending_to_collect": await nostfood.pending_to_collect(),
+        "not_received": await nostfood.not_received_between(opened_at, generated_at),
     }
     report["preview_token"] = _make_closing_preview_token(report, current_user["id"])
     return report
@@ -2113,10 +2142,7 @@ async def close_register(
         )
 
     # Não permite fechar com comandas pendentes.
-    pending = await db.orders.count_documents({
-        "is_closed": False,
-        "source": {"$ne": "online"},
-    })
+    pending = await db.orders.count_documents(nostfood.OPEN_CASH_ORDERS_QUERY)
     if pending:
         raise HTTPException(
             status_code=409,
@@ -2193,6 +2219,9 @@ async def close_register(
     }, {"_id": 0})
 
     async for order in cursor:
+        if nostfood.excluded_from_cash(order):  # teste ou "Não recebido"
+            continue
+
         if order.get("status") == "cancelled":
             cancelled_orders += 1
             continue
@@ -2202,7 +2231,7 @@ async def close_register(
             courtesy_amount += cents(order.get("total"))
             continue
 
-        if order.get("source") == "online":
+        if nostfood.settles_on_platform(order):
             online_bucket(order)
             continue
 
@@ -2304,6 +2333,7 @@ async def close_register(
         "deposits": money(deposits),
         "withdrawals": money(withdrawals),
         "expected_cash": money(expected_cash),
+        "not_received": await nostfood.not_received_between(opened_at, closed_at),
     }
 
     if (report["total_sales"] != fresh["total_sales"]
@@ -2314,10 +2344,7 @@ async def close_register(
 
     # Checagem final para reduzir o risco de uma movimentação concorrente
     # entre a conferência e a gravação do relatório definitivo.
-    if await db.orders.count_documents({
-        "is_closed": False,
-        "source": {"$ne": "online"},
-    }):
+    if await db.orders.count_documents(nostfood.OPEN_CASH_ORDERS_QUERY):
         raise HTTPException(status_code=409, detail="Nova comanda presencial aberta; reimprima a prévia")
     latest = await preview_cash_register(current_user)
     if token.get("digest") != _closing_preview_hash(latest):
@@ -3463,6 +3490,9 @@ register_operational_routes(
     require_role,
     UserRole
 )
+
+# Integração NostFood (iFood/99): rotas em /api/integrations/nostfood
+nostfood.register(api_router, app, sys.modules[__name__])
 
 # Registrar todas as rotas na aplicação
 app.include_router(api_router)
