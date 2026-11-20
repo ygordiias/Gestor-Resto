@@ -2474,6 +2474,12 @@ async def create_invoice(invoice_data: InvoiceBase):
     return {k: v for k, v in inv_dict.items() if k != "_id"}
 
 # ==================== REPORTS ROUTES ====================
+def _sold_orders_match(start_date) -> dict:
+    """Pedidos que contam como venda: fechados, sem cancelado, cortesia, teste ou "Não recebido"."""
+    return {"is_closed": True, "closed_at": {"$gte": start_date.isoformat()},
+            "is_comp": {"$ne": True}, "status": {"$ne": "cancelled"},
+            "is_test": {"$ne": True}, "payment_status": {"$ne": "not_received"}}
+
 @api_router.get("/reports/sales")
 async def get_sales_report(period: str = "daily", current_user: dict = Depends(require_role([UserRole.ADMIN]))):
     today = datetime.now(timezone.utc)
@@ -2487,8 +2493,10 @@ async def get_sales_report(period: str = "daily", current_user: dict = Depends(r
     else:
         start_date = today - timedelta(days=1)
     
+    # Pedido cancelado não é venda (se começou a ser feito, o custo vai para stock_losses).
+    sold = _sold_orders_match(start_date)
     pipeline = [
-        {"$match": {"is_closed": True, "closed_at": {"$gte": start_date.isoformat()}, "is_comp": {"$ne": True}}},
+        {"$match": sold},
         {"$group": {
             "_id": None,
             "total_sales": {"$sum": "$total"},
@@ -2501,8 +2509,9 @@ async def get_sales_report(period: str = "daily", current_user: dict = Depends(r
     
     # Get top products
     product_pipeline = [
-        {"$match": {"is_closed": True, "closed_at": {"$gte": start_date.isoformat()}, "is_comp": {"$ne": True}}},
+        {"$match": sold},
         {"$unwind": "$items"},
+        {"$match": {"items.status": {"$ne": "cancelled"}}},
         {"$group": {
             "_id": "$items.product_name",
             "quantity": {"$sum": "$items.quantity"},
@@ -2531,8 +2540,12 @@ async def get_profit_report(period: str = "daily", current_user: dict = Depends(
         start_date = today - timedelta(days=30)
     
     # Get sales
+    # Mesmo filtro de /reports/sales (cancelado, teste e "Não recebido" não são venda).
+    # Cortesia continua contando aqui, como antes deste ajuste.
+    sold = _sold_orders_match(start_date)
+    sold.pop("is_comp")
     sales_pipeline = [
-        {"$match": {"is_closed": True, "closed_at": {"$gte": start_date.isoformat()}}},
+        {"$match": sold},
         {"$group": {"_id": None, "total": {"$sum": "$total"}}}
     ]
     sales = await db.orders.aggregate(sales_pipeline).to_list(1)
