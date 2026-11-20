@@ -9,6 +9,8 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -90,6 +92,7 @@ def env(monkeypatch):
     monkeypatch.setenv("NOSTFOOD_ENABLED", "true")
     monkeypatch.setenv("NOSTFOOD_WEBHOOK_SECRET", SECRET)
     monkeypatch.setenv("NOSTFOOD_API_KEY", "chave-teste")
+    monkeypatch.setenv("NOSTFOOD_SEND_STATUS", "true")
 
     class E:
         pass
@@ -154,6 +157,8 @@ def remote_order(oid=498, payment="pix_online", status="confirmado", **kw):
             {"id": 12, "name": "Coca-Cola lata", "quantity": 2, "price": 6.0, "subtotal": 12.0},
         ],
         "subtotal": 47.0, "delivery": 5.0, "total": 52.0, "status": status, "payment_method": payment,
+        # criado "agora" (horário de São Paulo, formato da NostFood): sempre depois da ativação
+        "created_at": (datetime.now(nf.SP_TZ) + timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S"),
     }
     o.update(kw)
     return o
@@ -221,7 +226,7 @@ def test_events_have_ttl_of_30_days(env):
     link_all(env)
     send_event("order.created", remote_order())
     ttl = [opts for fields, opts in env.db.nostfood_events.indexes if fields == ["received_at_dt"]]
-    assert ttl and ttl[0]["expireAfterSeconds"] == 30 * 24 * 3600
+    assert ttl and ttl[0]["expireAfterSeconds"] == 2592000  # 30 dias
     assert env.db.nostfood_events.docs[0]["received_at_dt"].tzinfo is not None
 
 
@@ -694,3 +699,74 @@ def test_not_received(env):
     online = orders(env)[1]
     assert call("POST", f"{N}/pedidos/{online['id']}/nao-recebido", token=T_ADMIN,
                 body={"reason": "x"})[0] == 409
+
+
+# ==================== homologação ====================
+def test_order_without_date_is_never_imported_on_first_poll(env, caplog):
+    link_all(env)
+    no_date = remote_order(7, id=7, created_at=None, hora_aprovado="2026-11-20 10:00:00")
+    env.remote.append(no_date)
+    with caplog.at_level(logging.WARNING, logger="nostfood"):
+        summary = asyncio.run(nf.poll_once())
+    assert summary["first_poll"] is True and summary["skipped"] == 1 and orders(env) == []
+    assert "sem data de criação" in caplog.text and "hora_aprovado" in caplog.text
+    # ciclos seguintes: importa se ainda não existir, e nunca duplica
+    summary = asyncio.run(nf.poll_once())
+    assert summary["first_poll"] is False and summary["created"] == 1
+    asyncio.run(nf.poll_once())
+    assert len(orders(env)) == 1
+
+
+def test_first_poll_failure_keeps_first_poll_pending(env, monkeypatch):
+    async def down(params):
+        raise RuntimeError("NostFood fora do ar")
+
+    monkeypatch.setattr(nf, "fetch_orders_page", down)
+    with pytest.raises(RuntimeError):
+        asyncio.run(nf.poll_once())
+    assert asyncio.run(nf._first_poll_pending()) is True
+
+
+def test_send_status_off_only_logs(env, monkeypatch, caplog):
+    monkeypatch.setenv("NOSTFOOD_SEND_STATUS", "false")
+    link_all(env)
+    send_event("order.created", remote_order(), event_id="e1")
+    o = orders(env)[0]
+    call("PUT", f"/api/orders/{o['id']}/item/{o['items'][0]['id']}/status", token=T_KITCHEN,
+         body={"status": "preparing"})
+    with caplog.at_level(logging.INFO, logger="nostfood"):
+        env.run_scheduled()
+    assert env.sent == []
+    assert "teria enviado status em_preparo" in caplog.text
+
+
+def test_send_status_defaults_to_off(monkeypatch):
+    monkeypatch.delenv("NOSTFOOD_SEND_STATUS", raising=False)
+    assert nf.send_status_enabled() is False
+
+
+def test_webhook_and_polling_never_create_test_orders(env):
+    link_all(env)
+    send_event("order.created", remote_order(801, id=801, is_test=True, simulated=True),
+               event_id="e1", resource_id="801")
+    env.remote.append(remote_order(802, id="SIM-FAKE", order_number="SIM-FAKE", is_test=True))
+    asyncio.run(nf.poll_once())
+    asyncio.run(nf.poll_once())
+    assert len(orders(env)) == 2
+    assert all(o["is_test"] is False for o in orders(env))
+
+
+def test_simulate_never_calls_nostfood(env, monkeypatch):
+    async def forbidden(*a, **k):
+        raise AssertionError("não pode chamar a NostFood")
+
+    monkeypatch.setattr(nf, "fetch_orders_page", forbidden)
+    monkeypatch.setattr(nf, "send_status", forbidden)
+    _, body = call("POST", f"{N}/simular", token=T_ADMIN)
+    o = body["order"]
+    for status in ("preparing", "ready"):
+        for item in o["items"]:
+            assert call("PUT", f"/api/orders/{o['id']}/item/{item['id']}/status", token=T_KITCHEN,
+                        body={"status": status})[0] == 200
+    env.run_scheduled()
+    asyncio.run(nf._push_status(orders(env)[0], "pronto"))  # defesa extra no envio

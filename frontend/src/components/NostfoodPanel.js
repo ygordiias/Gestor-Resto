@@ -103,6 +103,8 @@ export default function NostfoodPanel() {
                 Situação: <strong>{status.enabled ? 'LIGADA' : 'DESLIGADA'}</strong>
                 {' · '}Chave da API: {status.has_api_key ? 'configurada' : 'faltando'}
                 {' · '}Segredo do webhook: {status.has_webhook_secret ? 'configurado' : 'faltando'}
+                {' · '}Envio de status para a NostFood:{' '}
+                {status.send_status ? 'LIGADO' : 'desligado (só registra no log)'}
               </p>
               <p>
                 Polling a cada {status.poll_seconds} s · Última consulta:{' '}

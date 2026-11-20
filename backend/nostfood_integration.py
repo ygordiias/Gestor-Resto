@@ -10,6 +10,8 @@ Variáveis de ambiente (nenhuma chave no código):
   NOSTFOOD_WEBHOOK_SECRET  segredo do HMAC do webhook
   NOSTFOOD_BASE_URL        padrão https://nostfood.com/api/public
   NOSTFOOD_POLL_SECONDS    intervalo do polling de segurança (padrão 90)
+  NOSTFOOD_SEND_STATUS     "true" envia em_preparo/pronto para a NostFood (padrão: false,
+                           só registra no log o que teria enviado)
 
 Coleções novas: nostfood_events (TTL de 30 dias), nostfood_product_map,
 nostfood_unlinked, nostfood_tombstones, nostfood_settings e stock_losses.
@@ -49,7 +51,7 @@ CANCEL_STATUSES = {"cancelado", "cancelada", "rejeitado", "rejeitada", "cancelle
 PREPARING_STATUSES = {"em_preparo", "preparando"}
 DONE_STATUSES = {"pronto", "saiu_entrega", "enviado", "entregue"}
 DELIVERED_STATUSES = {"entregue"}
-EVENTS_TTL_SECONDS = 30 * 24 * 3600
+EVENTS_TTL_SECONDS = 2592000  # 30 dias
 STARTED_ITEM_STATUSES = {"preparing", "ready", "delivered"}
 KDS_STATIONS = ("kitchen", "bar", "grill")
 CANCEL_KDS_WINDOW_HOURS = 12
@@ -72,6 +74,11 @@ _background: set = set()
 # ==================== CONFIGURAÇÃO ====================
 def enabled() -> bool:
     return os.environ.get("NOSTFOOD_ENABLED", "false").strip().lower() in ("1", "true", "yes", "sim")
+
+
+def send_status_enabled() -> bool:
+    """Só com NOSTFOOD_SEND_STATUS=true o Gestor muda o pedido na NostFood."""
+    return os.environ.get("NOSTFOOD_SEND_STATUS", "false").strip().lower() in ("1", "true", "yes", "sim")
 
 
 def _api_key() -> str:
@@ -389,6 +396,15 @@ def parse_remote_datetime(value) -> Optional[datetime]:
     return None
 
 
+def _date_field_names(raw: dict) -> list:
+    keys = []
+    for k, v in (raw or {}).items():
+        lk = str(k).lower()
+        if any(t in lk for t in ("data", "date", "created", "hora", "_at", "time")) and v not in (None, ""):
+            keys.append(str(k))
+    return sorted(keys)
+
+
 async def created_before_activation(norm: dict) -> bool:
     enabled_at = await get_enabled_at()
     created = parse_remote_datetime(norm.get("created_at"))
@@ -644,13 +660,26 @@ async def _find_order(external_id, order_number=None):
     return None
 
 
-async def upsert_from_snapshot(raw: dict, origin: str, is_test: bool = False) -> str:
-    """Cria o pedido no Gestor se ainda não existir. Nunca duplica (webhook + polling)."""
+async def upsert_from_snapshot(raw: dict, origin: str, is_test: bool = False,
+                               first_poll: bool = False) -> str:
+    """Cria o pedido no Gestor se ainda não existir. Nunca duplica (webhook + polling).
+
+    is_test=True só vem de /simular; webhook e polling nunca passam esse valor.
+    """
     norm = normalize_order(raw)
     ext_id = norm["external_id"]
     if not ext_id:
         raise ValueError("pedido sem id")
     await ensure_indexes()
+
+    if not is_test and parse_remote_datetime(norm.get("created_at")) is None:
+        exists = await _find_order(ext_id, norm["order_number"])
+        logger.warning(f"[NOSTFOOD] pedido {norm['order_number']} sem data de criação (via {origin}); "
+                       f"campos de data recebidos: {', '.join(_date_field_names(raw)) or 'nenhum'}")
+        # Sem data não dá para comparar com a ativação: no primeiro ciclo de polling
+        # nunca importa (seriam pedidos antigos do dia); depois, só se ainda não existir.
+        if first_poll and not exists:
+            return "ignored_no_date_first_poll"
 
     if not is_test and await created_before_activation(norm) and not await _find_order(ext_id, norm["order_number"]):
         return "ignored_before_activation"
@@ -931,28 +960,43 @@ async def process_event(event: dict):
 
 
 # ==================== POLLING ====================
+async def _first_poll_pending() -> bool:
+    doc = await S.db.nostfood_settings.find_one({"key": "config"}, {"_id": 0})
+    return not (doc or {}).get("first_poll_done_at")
+
+
+async def _mark_first_poll_done():
+    await S.db.nostfood_settings.update_one(
+        {"key": "config"}, {"$set": {"first_poll_done_at": _now_iso()}}, upsert=True)
+
+
 async def poll_once() -> dict:
+    await get_enabled_at()  # grava a data de ativação, se ainda não existir
+    first_poll = await _first_poll_pending()
     today = _today_sp()
     days = [today]
     if datetime.now(SP_TZ).hour == 0:  # virada do dia: olha também o anterior
         days.append(today - timedelta(days=1))
     remote = await fetch_orders_for_days(days)
-    summary = {"seen": len(remote), "created": 0, "cancelled": 0, "skipped": 0, "errors": 0}
+    summary = {"seen": len(remote), "created": 0, "cancelled": 0, "skipped": 0, "errors": 0,
+               "first_poll": first_poll}
     for raw in remote:
         try:
             norm = normalize_order(raw)
             if not norm["external_id"]:
                 continue
             if norm["status"] in CANCEL_STATUSES:
-                r = await upsert_from_snapshot(raw, "polling")  # respeita a data de ativação
+                r = await upsert_from_snapshot(raw, "polling", first_poll=first_poll)  # respeita a ativação
                 summary["cancelled"] += r.startswith("cancelled")
                 continue
-            r = await upsert_from_snapshot(raw, "polling")
+            r = await upsert_from_snapshot(raw, "polling", first_poll=first_poll)
             summary["created"] += r.startswith("created")
-            summary["skipped"] += r == "ignored_before_activation"
+            summary["skipped"] += r.startswith("ignored_")
         except Exception as e:
             summary["errors"] += 1
             logger.error(f"[NOSTFOOD] polling: pedido {raw.get('order_number') or raw.get('id')} falhou: {e}")
+    if first_poll:
+        await _mark_first_poll_done()
     return summary
 
 
@@ -972,6 +1016,12 @@ async def _poll_loop():
 
 # ==================== STATUS DE VOLTA (gancho do KDS) ====================
 async def _push_status(order: dict, target: str):
+    if order.get("is_test"):
+        return  # pedido de teste nunca chama a NostFood
+    if not send_status_enabled():
+        logger.info(f"[NOSTFOOD] NOSTFOOD_SEND_STATUS=false: teria enviado status {target} "
+                    f"para o pedido {order.get('external_order_number')} (id {order.get('external_id')})")
+        return
     try:
         await send_status(order.get("external_id"), order.get("external_order_number"), target)
         logger.info(f"[NOSTFOOD] status {target} enviado para o pedido {order.get('external_order_number')}")
@@ -1071,7 +1121,7 @@ def build_router(require_role, UserRole) -> APIRouter:
     async def integration_status():
         return {
             "enabled": enabled(), "has_api_key": bool(_api_key()), "has_webhook_secret": bool(_webhook_secret()),
-            "base_url": _base_url(), "poll_seconds": poll_seconds(),
+            "base_url": _base_url(), "poll_seconds": poll_seconds(), "send_status": send_status_enabled(),
             "last_poll_at": _state["last_poll_at"], "last_poll_result": _state["last_poll_result"],
             "last_poll_error": _state["last_poll_error"],
         }
