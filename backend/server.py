@@ -25,6 +25,7 @@ from jose import JWTError, jwt
 from enum import Enum
 from bootstrap import ensure_initial_superadmin, require_secret_key
 import nostfood_integration as nostfood
+import physical_tabs
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -82,28 +83,13 @@ async def startup_validate_db():
             raise Exception("MongoDB ping retornou status != ok")
         # Não registrar nenhum trecho do MONGO_URL (contém usuário e senha do banco).
         logger.info(f"MongoDB conectado com sucesso (db={db_name})")
-                # Cadastro automático das comandas físicas 200 a 230
-        # Preserva comandas existentes e seus vínculos com pedidos.
-        created_tabs = 0
-
-        for tab_number in range(200, 231):
-            result = await db.physical_tabs.update_one(
-                {"number": tab_number},
-                {
-                    "$setOnInsert": {
-                        "number": tab_number,
-                        "active_order_id": None,
-                        "table_id": None
-                    }
-                },
-                upsert=True
-            )
-
-            if result.upserted_id is not None:
-                created_tabs += 1
-
+        # Cadastro automático das comandas físicas da faixa configurada
+        # (physical_tabs.py). Só cria as que faltam: preserva as existentes
+        # e seus vínculos com pedidos.
+        created_tabs = await physical_tabs.ensure_tabs(db.physical_tabs)
+        tab_min, tab_max = physical_tabs.tab_range()
         logger.info(
-            f"Comandas físicas 200 a 230 verificadas. "
+            f"Comandas físicas {tab_min} a {tab_max} verificadas. "
             f"Novos cadastros: {created_tabs}"
         )
 
@@ -762,15 +748,23 @@ async def list_physical_tabs(current_user: dict = Depends(get_current_user)):
     tabs = await db.physical_tabs.find({}, {"_id": 0}).sort("number", 1).to_list(10000)
     return tabs
 
+@api_router.get("/tabs/config")
+async def physical_tabs_config(current_user: dict = Depends(get_current_user)):
+    """Faixa das comandas físicas, para o frontend usar a mesma origem do servidor."""
+    tab_min, tab_max = physical_tabs.tab_range()
+    return {"min": tab_min, "max": tab_max}
+
 @api_router.post("/tabs/range")
 async def register_physical_tabs(data: TabRangeCreate, current_user: dict = Depends(require_role([UserRole.ADMIN]))):
-    if data.start <= 0 or data.end < data.start or data.end - data.start > 1000:
-        raise HTTPException(status_code=400, detail="Intervalo inválido (máximo de 1001 por operação)")
+    tab_min, tab_max = physical_tabs.tab_range()
+    if data.end < data.start or not physical_tabs.in_range(data.start) or not physical_tabs.in_range(data.end):
+        raise HTTPException(status_code=400,
+                            detail=f"Intervalo inválido: as comandas devem estar entre {tab_min} e {tab_max}")
     created = 0
     for number in range(data.start, data.end + 1):
         result = await db.physical_tabs.update_one(
             {"number": number},
-            {"$setOnInsert": {"number": number, "active_order_id": None, "table_id": None}},
+            {"$setOnInsert": physical_tabs.new_tab_doc(number)},
             upsert=True,
         )
         if result.upserted_id is not None:
@@ -791,6 +785,8 @@ async def link_physical_tab(table_id: str, data: TabLinkCreate, current_user: di
         raise HTTPException(status_code=404, detail="Mesa não encontrada")
     if table.get("status") == "cleaning":
         raise HTTPException(status_code=400, detail="Mesa em limpeza")
+    if not physical_tabs.in_range(data.tab_number):
+        raise HTTPException(status_code=400, detail=physical_tabs.out_of_range_message(data.tab_number))
     order = Order(table_id=table_id, table_number=table["number"],
                   waiter_id=current_user.get("id"), waiter_name=current_user.get("name"),
                   tab_number=data.tab_number, items=[])
