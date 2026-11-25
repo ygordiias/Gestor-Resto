@@ -240,3 +240,61 @@ def test_webhook_body_limit(env):
 def test_webhook_only_accepts_post(env, method):
     status, _ = post_raw(WEBHOOK, b"", {}, method=method)
     assert status == 405
+
+
+# ==================== kds/cancelados sem dados pessoais ====================
+PERSONAL_FIELDS = {"customer_phone", "address", "customer_address", "latitude", "longitude",
+                   "payment_method", "payment_status", "total", "subtotal", "delivery_fee",
+                   "external_financials", "external_id", "external_platform_order_id", "observations",
+                   "change_for", "troco", "customer_email"}
+
+
+def _cancelled_order(env):
+    from test_nostfood_integration import link_all, send_event
+    link_all(env)
+    send_event("order.created", remote_order(customer_name="Maria Aparecida da Silva", troco=50,
+                                             change_for=50), event_id="c1")
+    send_event("order.cancelled", {"order_number": "PED-498", "status": "cancelado",
+                                   "motivo": "Cliente desistiu"}, event_id="c2")
+
+
+def _token(role):
+    from _offline_app import token_for
+    uid = f"u-{role}"
+    return uid, token_for(uid)
+
+
+@pytest.mark.parametrize("role", ["kitchen", "bar", "waiter"])
+def test_kds_cancelled_for_kitchen_bar_waiter_has_no_personal_data(env, role):
+    uid, tok = _token(role)
+    env.db.users.docs.append({"id": uid, "name": role, "email": f"{role}@x", "role": role, "is_active": True})
+    _cancelled_order(env)
+    status, rows = call("GET", f"{N}/kds/cancelados", token=tok)
+    assert status == 200 and len(rows) == 1
+    o = rows[0]
+    assert set(o) <= set(nf.KDS_CANCELLED_ORDER_FIELDS) | {"customer_name", "items"}
+    assert not (set(o) & PERSONAL_FIELDS)
+    assert o["customer_name"] == "Maria"  # só o primeiro nome
+    assert o["cancellation_reason"] == "Cliente desistiu" and o["cancelled_at"]
+    assert o["external_order_number"] == "PED-498"
+    assert [(i["product_name"], i["quantity"], i["type"]) for i in o["items"]] == [
+        ("Sansão", 1, "food"), ("Coca-Cola Lata", 2, "drink")]
+    for item in o["items"]:
+        assert set(item) <= set(nf.KDS_CANCELLED_ITEM_FIELDS)
+        assert "unit_price" not in item and "notes" not in item and "addons" not in item
+
+
+@pytest.mark.parametrize("role", ["admin", "cashier"])
+def test_kds_cancelled_for_admin_and_cashier_is_complete(env, role):
+    from test_nostfood_integration import T_ADMIN, T_CASHIER
+    _cancelled_order(env)
+    status, rows = call("GET", f"{N}/kds/cancelados", token=T_ADMIN if role == "admin" else T_CASHIER)
+    assert status == 200 and len(rows) == 1
+    o = rows[0]
+    assert o["customer_name"] == "Maria Aparecida da Silva" and o["customer_phone"] == "16999990000"
+    assert "address" in o and "total" in o and "unit_price" in o["items"][0]
+
+
+def test_first_name():
+    assert nf.first_name("  Maria   Aparecida ") == "Maria"
+    assert nf.first_name("") is None and nf.first_name(None) is None

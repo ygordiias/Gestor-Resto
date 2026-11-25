@@ -1299,6 +1299,30 @@ def _required_cancel_stations(order: dict):
     return [s for s, t in (("kitchen", "food"), ("bar", "drink")) if t in types]
 
 
+# Aviso de cancelamento no KDS: cozinha, bar e garçom recebem só o que a tela usa.
+# Sem telefone, endereço, troco, pagamento, valores nem dados da plataforma.
+FULL_ORDER_ROLES = {"superadmin", "admin", "cashier"}
+KDS_CANCELLED_ORDER_FIELDS = (
+    "id", "status", "is_test", "table_number", "tab_number", "created_at",
+    "external_source", "external_order_number", "external_display_code", "external_origin_platform",
+    "cancelled_at", "cancellation_reason", "cancelled_by_name", "cancel_acks", "kds_ack_pending",
+)
+KDS_CANCELLED_ITEM_FIELDS = ("id", "product_name", "quantity", "type", "status", "status_before_cancel")
+
+
+def first_name(name) -> Optional[str]:
+    parts = str(name or "").split()
+    return parts[0] if parts else None
+
+
+def kds_cancelled_view(order: dict) -> dict:
+    view = {k: order.get(k) for k in KDS_CANCELLED_ORDER_FIELDS if k in order}
+    view["customer_name"] = first_name(order.get("customer_name"))
+    view["items"] = [{k: it.get(k) for k in KDS_CANCELLED_ITEM_FIELDS if k in it}
+                     for it in order.get("items") or []]
+    return view
+
+
 WEBHOOK_MAX_BODY_BYTES = 256 * 1024
 
 
@@ -1561,12 +1585,15 @@ def build_router(require_role, UserRole) -> APIRouter:
         await _emit_kds()
         return obs
 
-    @router.get("/kds/cancelados", dependencies=[staff])
-    async def kds_cancelled():
+    @router.get("/kds/cancelados")
+    async def kds_cancelled(current_user: dict = staff):
         since = (datetime.now(timezone.utc) - timedelta(hours=CANCEL_KDS_WINDOW_HOURS)).isoformat()
-        return await S.db.orders.find(
+        rows = await S.db.orders.find(
             {"kds_ack_pending": True, "status": "cancelled", "cancelled_at": {"$gte": since}},
             {"_id": 0}).to_list(100)
+        if current_user.get("role") in FULL_ORDER_ROLES:
+            return rows  # admin e caixa: pedido completo
+        return [kds_cancelled_view(o) for o in rows]
 
     @router.post("/pedidos/{order_id}/cancelamento/ciente")
     async def ack_cancel(order_id: str, body: dict, current_user: dict = kds):

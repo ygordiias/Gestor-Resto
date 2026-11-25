@@ -43,7 +43,7 @@ inválido, a resposta é 401. Nos dois casos o corpo tem só `detail`.
 | POST | `/ligar-produto` | admin | Cria ou refaz uma ligação. |
 | POST | `/pedidos/{order_id}/observacao` | admin, caixa | Nova observação no pedido (aparece no KDS). |
 | POST | `/pedidos/{order_id}/observacao/{obs_id}/ciente` | admin, cozinha, bar | KDS confirma que viu a observação. |
-| GET | `/kds/cancelados` | admin, garçom, caixa, cozinha, bar | Pedidos cancelados recentes para o aviso do KDS. |
+| GET | `/kds/cancelados` | admin, garçom, caixa, cozinha, bar | Pedidos cancelados recentes para o aviso do KDS. Admin e caixa recebem o pedido completo. Cozinha, bar e garçom recebem só o que o KDS usa: código, mesa, primeiro nome do cliente, itens (nome, quantidade, tipo, status), motivo, horário e autor do cancelamento. Não recebem telefone, endereço, troco, pagamento nem valores. |
 | POST | `/pedidos/{order_id}/cancelamento/ciente` | admin, cozinha, bar | KDS confirma que viu o cancelamento. |
 | GET | `/perdas` | admin | Perdas de estoque por cancelamento depois do preparo. |
 
