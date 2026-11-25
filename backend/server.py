@@ -3333,13 +3333,24 @@ async def create_public_order(order_data: PublicOrderCreate):
     if order_data.delivery_type == "delivery" and not order_data.address:
         raise HTTPException(status_code=400, detail="Endereço obrigatório para delivery")
 
+    # Preço e nome vêm SEMPRE do cadastro: o "price" e o "name" enviados pelo
+    # navegador são ignorados. Produto inexistente ou indisponível é recusado.
+    products = []
+    for item in order_data.items:
+        if item.quantity < 1:
+            raise HTTPException(status_code=400, detail="Quantidade inválida")
+        product = await db.products.find_one({"id": item.product_id}, {"_id": 0})
+        if not product or product.get("is_available") is False:
+            raise HTTPException(status_code=400, detail="Produto indisponível no cardápio")
+        products.append(product)
+
     # Validar estoque usando items como dicts compatíveis com validate_stock
     stock_items = []
-    for item in order_data.items:
+    for item, product in zip(order_data.items, products):
         stock_items.append(type('obj', (object,), {
             'product_id': item.product_id,
             'quantity': item.quantity,
-            'product_name': item.name,
+            'product_name': product.get("name") or item.product_id,
         })())
     await validate_stock(stock_items)
 
@@ -3348,16 +3359,14 @@ async def create_public_order(order_data: PublicOrderCreate):
 
     # Montar items no formato do sistema existente
     order_items = []
-    for item in order_data.items:
-        product = await db.products.find_one({"id": item.product_id}, {"_id": 0})
-        item_type = product.get("type", "food") if product else "food"
+    for item, product in zip(order_data.items, products):
         order_items.append({
             "id": str(uuid.uuid4()),
             "product_id": item.product_id,
-            "product_name": item.name,
+            "product_name": product.get("name") or item.product_id,
             "quantity": item.quantity,
-            "unit_price": item.price,
-            "type": item_type,
+            "unit_price": float(product.get("price", 0) or 0),
+            "type": product.get("type", "food"),
             "status": "pending",
             "notes": None,
             "created_at": datetime.now(timezone.utc).isoformat(),
