@@ -1,4 +1,4 @@
-import { cancelNeedsAck, cancelledItemsFor, pendingCancelKeys } from './KdsNotices';
+import { cancelNeedsAck, cancelledItemsFor, pendingCancelKeys, pendingObservations } from './KdsNotices';
 
 const isFood = item => item.type === 'food';
 const isDrink = item => item.type === 'drink';
@@ -60,4 +60,33 @@ test('pedido NostFood cancelado usa o status de antes do cancelamento', () => {
     items: [{ id: 'x', type: 'food', status: 'cancelled', status_before_cancel: 'preparing' }],
   };
   expect(cancelledItemsFor(nostfood, isFood, 'grill').items.map(i => i.id)).toEqual(['x']);
+});
+
+const obsOrder = {
+  id: 'o2',
+  items: [
+    { id: 's', type: 'food', status: 'preparing' },
+    { id: 'k', type: 'drink', status: 'pending' },
+  ],
+  observations: [
+    { id: 'o-item-food', item_id: 's', stations: ['kitchen', 'grill'], acks: {} },
+    { id: 'o-item-drink', item_id: 'k', stations: ['bar'], acks: {} },
+    { id: 'o-all', item_id: null, stations: ['kitchen', 'bar', 'grill'], acks: { kitchen: {} } },
+    { id: 'o-old', text: 'sem telas', acks: {} },
+  ],
+};
+
+test('observação de item só aparece na tela do item', () => {
+  expect(pendingObservations(obsOrder, 'kitchen', isFood).map(o => o.id)).toEqual(['o-item-food', 'o-old']);
+  expect(pendingObservations(obsOrder, 'bar', isDrink).map(o => o.id)).toEqual(['o-item-drink', 'o-all', 'o-old']);
+});
+
+test('Ciente da cozinha não tira o aviso do bar', () => {
+  expect(pendingObservations(obsOrder, 'kitchen', isFood).some(o => o.id === 'o-all')).toBe(false);
+  expect(pendingObservations(obsOrder, 'bar', isDrink).some(o => o.id === 'o-all')).toBe(true);
+});
+
+test('observação de pedido sem itens da tela não aparece nela', () => {
+  const onlyDrinks = { ...obsOrder, items: [obsOrder.items[1]] };
+  expect(pendingObservations(onlyDrinks, 'kitchen', isFood)).toEqual([]);
 });

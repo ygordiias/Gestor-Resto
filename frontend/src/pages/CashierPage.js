@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import Layout from '../components/Layout';
 import FinancialModulesPanel from '../components/FinancialModulesPanel';
 import PlatformTotals, { hasPlatformBreakdown } from '../components/PlatformTotals';
+import AddObservationDialog from '../components/AddObservationDialog';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
@@ -17,7 +18,7 @@ import {
   DialogDescription,
   DialogFooter,
 } from '../components/ui/dialog';
-import { ordersAPI, cashRegisterAPI, tablesAPI, invoicesAPI, productsAPI, kdsAPI, nostfoodAPI } from '../lib/api';
+import { ordersAPI, cashRegisterAPI, tablesAPI, invoicesAPI, productsAPI, nostfoodAPI } from '../lib/api';
 import { cn, formatCurrency, formatDate } from '../lib/utils';
 import socketService from '../lib/socket';
 import { toast } from 'sonner';
@@ -95,6 +96,28 @@ function printPreBill(order, paperWidth = '80') {
     (item) => item.status !== 'cancelled'
   );
 
+  // Observações novas (KDS): as de um item saem embaixo dele; as do pedido
+  // inteiro (ou de item que não aparece aqui) saem num bloco próprio.
+  const observations = order.observations || [];
+  const printedIds = new Set(items.map(item => item.id));
+  const observationLine = (obs) => {
+    const when = obs.created_at
+      ? new Date(obs.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+      : '';
+    const who = [obs.author_name, when].filter(Boolean).join(', ');
+    return `${escapeReceipt(obs.text)}${who ? ` (${escapeReceipt(who)})` : ''}`;
+  };
+  const itemObservations = (item) => observations
+    .filter(obs => obs.item_id === item.id)
+    .map(obs => `<tr><td colspan="2" class="note">Observação: ${observationLine(obs)}</td></tr>`)
+    .join('');
+  const orderObservations = observations.filter(obs => !obs.item_id || !printedIds.has(obs.item_id));
+  const orderObservationsHtml = orderObservations.length
+    ? `<div class="line"></div><p><strong>OBSERVAÇÕES</strong></p>${orderObservations
+      .map(obs => `<div class="note">${obs.item_name ? `${escapeReceipt(obs.item_name)}: ` : ''}${observationLine(obs)}</div>`)
+      .join('')}`
+    : '';
+
   const rows = items.map((item) => `
     <tr>
       <td>
@@ -119,6 +142,7 @@ function printPreBill(order, paperWidth = '80') {
           </tr>`
         : ''
     }
+    ${itemObservations(item)}
   `).join('');
 
   const html = `
@@ -217,6 +241,7 @@ function printPreBill(order, paperWidth = '80') {
         <table>
           ${rows}
         </table>
+        ${orderObservationsHtml}
 
         <div class="line"></div>
 
@@ -549,6 +574,7 @@ export default function CashierPage() {
   const [tables, setTables] = useState([]);
   const [register, setRegister] = useState(null);
   const [selectedOrderId, setSelectedOrderId] = useState(null);
+  const [observationOpen, setObservationOpen] = useState(false);
   const [orderSearch, setOrderSearch] = useState('');
   const [closingOrder, setClosingOrder] = useState(false);
   const [payments, setPayments] = useState([]);
@@ -1464,22 +1490,19 @@ export default function CashierPage() {
                       variant="outline"
                       size="sm"
                       className="w-full border-yellow-500 text-yellow-700 hover:bg-yellow-500/10"
-                      onClick={async () => {
-                        const text = window.prompt('Observação para a cozinha/bar (aparece em destaque no KDS):', '');
-                        if (!text || !text.trim()) return;
-                        try {
-                          await kdsAPI.addObservation(selectedOrder.id, text.trim());
-                          toast.success('Observação enviada para a cozinha e o bar');
-                          await fetchData();
-                        } catch (e) {
-                          const detail = e?.response?.data?.detail;
-                          toast.error(typeof detail === 'string' ? detail : 'Erro ao enviar observação');
-                        }
-                      }}
+                      onClick={() => setObservationOpen(true)}
                       data-testid="add-observation-btn"
                     >
                       📢 Adicionar observação (cozinha/bar)
                     </Button>
+                  )}
+                  {!selectedOrder.is_closed && (
+                    <AddObservationDialog
+                      order={selectedOrder}
+                      open={observationOpen}
+                      onOpenChange={setObservationOpen}
+                      onSent={fetchData}
+                    />
                   )}
 
                   {isPlatformSettled(selectedOrder) ? (

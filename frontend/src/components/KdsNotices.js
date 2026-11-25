@@ -12,8 +12,21 @@ import { orderDisplayLabel } from './OnlineOrderBadge';
  * station: 'kitchen' | 'bar' | 'grill' (o "Ciente" vale para a tela).
  */
 
-export function pendingObservations(order, station) {
-  return (order?.observations || []).filter(obs => !obs?.acks?.[station]);
+/**
+ * Observações novas que esta tela ainda não confirmou. Vale para qualquer pedido.
+ * Observação de um item só aparece na tela desse item; do pedido inteiro, nas
+ * telas que têm itens do pedido. Observações antigas (sem "stations") valem
+ * para todas as telas.
+ */
+export function pendingObservations(order, station, itemFilter) {
+  const items = (order?.items || []).filter(item => item.status !== 'cancelled');
+  return (order?.observations || []).filter(obs => {
+    if (!obs || obs.acks?.[station]) return false;
+    if (Array.isArray(obs.stations) && !obs.stations.includes(station)) return false;
+    if (!itemFilter) return true;
+    const targets = obs.item_id ? items.filter(item => item.id === obs.item_id) : items;
+    return targets.some(itemFilter);
+  });
 }
 
 /**
@@ -149,9 +162,9 @@ export function UnlinkedItemBadge({ item }) {
   );
 }
 
-export function ObservationBanners({ order, station, onAcked }) {
+export function ObservationBanners({ order, station, itemFilter, onAcked }) {
   const [busy, setBusy] = useState(null);
-  const list = pendingObservations(order, station);
+  const list = pendingObservations(order, station, itemFilter);
   if (list.length === 0) return null;
 
   const ack = async (event, obs) => {
@@ -178,6 +191,9 @@ export function ObservationBanners({ order, station, onAcked }) {
           onClick={event => event.stopPropagation()}
         >
           <p className="text-sm font-black uppercase tracking-wider">📢 NOVA OBSERVAÇÃO</p>
+          {obs.item_name && (
+            <p className="text-sm font-black" data-testid="kds-observation-item">Item: {obs.item_name}</p>
+          )}
           <p className="text-lg font-black leading-snug break-words">{obs.text}</p>
           <p className="text-xs font-semibold">
             {obs.author_name || 'Caixa'} · {formatDate(obs.created_at)}

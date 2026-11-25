@@ -1554,40 +1554,15 @@ def build_router(require_role, UserRole) -> APIRouter:
         return {"message": "Produto ligado", "keys": keys, "open_orders_updated": updated_orders,
                 "kept_stock_deducted": kept_deducted}
 
+    # Rotas antigas, mantidas para compatibilidade: mesma lógica de
+    # /api/orders/{id}/observacao (server.py), que vale para qualquer pedido.
     @router.post("/pedidos/{order_id}/observacao")
     async def add_observation(order_id: str, body: dict, current_user: dict = cash):
-        text = str((body or {}).get("text") or "").strip()
-        if not text:
-            raise HTTPException(status_code=400, detail="Escreva a observação")
-        if len(text) > 500:
-            raise HTTPException(status_code=400, detail="Observação muito longa (máximo 500 caracteres)")
-        order = await S.db.orders.find_one({"id": order_id}, {"_id": 0})
-        if not order:
-            raise HTTPException(status_code=404, detail="Pedido não encontrado")
-        if order.get("is_closed"):
-            raise HTTPException(status_code=400, detail="Pedido já finalizado")
-        obs = {"id": str(uuid.uuid4()), "text": text, "author_id": current_user.get("id"),
-               "author_name": current_user.get("name"), "created_at": _now_iso(), "acks": {}}
-        await S.db.orders.update_one({"id": order_id}, {"$push": {"observations": obs}})
-        await S.emit_staff("order_observation", {"order_id": order_id, "observation": obs})
-        await _emit_kds()
-        return obs
+        return await S.add_order_observation(order_id, body, current_user)
 
     @router.post("/pedidos/{order_id}/observacao/{obs_id}/ciente")
     async def ack_observation(order_id: str, obs_id: str, body: dict, current_user: dict = kds):
-        station = _validate_station(body)
-        order = await S.db.orders.find_one({"id": order_id}, {"_id": 0})
-        if not order:
-            raise HTTPException(status_code=404, detail="Pedido não encontrado")
-        observations = order.get("observations") or []
-        obs = next((o for o in observations if o.get("id") == obs_id), None)
-        if not obs:
-            raise HTTPException(status_code=404, detail="Observação não encontrada")
-        obs.setdefault("acks", {})[station] = {"by_id": current_user.get("id"),
-                                               "by_name": current_user.get("name"), "at": _now_iso()}
-        await S.db.orders.update_one({"id": order_id}, {"$set": {"observations": observations}})
-        await _emit_kds()
-        return obs
+        return await S.ack_order_observation(order_id, obs_id, body, current_user)
 
     @router.get("/kds/cancelados")
     async def kds_cancelled(current_user: dict = staff):

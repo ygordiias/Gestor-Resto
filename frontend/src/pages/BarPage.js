@@ -219,7 +219,7 @@ export default function BarPage() {
     sound,
     newOrderIds: pendingItems.map(item => itemKey(item)),
     pendingObsIds: visibleOrders.flatMap(order =>
-      pendingObservations(order, STATION).map(obs => obs.id)),
+      pendingObservations(order, STATION, isBarItem).map(obs => obs.id)),
     pendingCancelIds: pendingCancelKeys(cancelled, STATION, isBarItem),
     lateOrderIds: visibleOrders
       .filter(order => isLate(order, now))
@@ -652,6 +652,7 @@ export default function BarPage() {
                     <ObservationBanners
                       order={item._order}
                       station={STATION}
+                      itemFilter={isBarItem}
                       onAcked={fetchOrders}
                     />
                   </div>

@@ -42,8 +42,8 @@ inválido, a resposta é 401. Nos dois casos o corpo tem só `detail`.
 | GET | `/produtos-sem-ligacao` | admin | Itens da NostFood sem produto do Gestor. |
 | GET | `/ligacoes` | admin | Ligações item da NostFood → produto do Gestor. |
 | POST | `/ligar-produto` | admin | Cria ou refaz uma ligação. |
-| POST | `/pedidos/{order_id}/observacao` | admin, caixa | Nova observação no pedido (aparece no KDS). |
-| POST | `/pedidos/{order_id}/observacao/{obs_id}/ciente` | admin, cozinha, bar | KDS confirma que viu a observação. |
+| POST | `/pedidos/{order_id}/observacao` | admin, caixa | Nova observação no pedido (aparece no KDS). Rota antiga: usa a mesma lógica de `POST /api/orders/{id}/observacao`. |
+| POST | `/pedidos/{order_id}/observacao/{obs_id}/ciente` | admin, cozinha, bar | KDS confirma que viu a observação. Rota antiga: mesma lógica de `POST /api/orders/{id}/observacao/{obs_id}/ciente`. |
 | GET | `/kds/cancelados` | admin, garçom, caixa, cozinha, bar | Cancelados recentes de **qualquer pedido** (salão, balcão, online, NostFood) para o aviso do KDS: pedidos inteiros e itens cancelados em pedidos abertos. Admin e caixa recebem o pedido completo. Cozinha, bar e garçom recebem só o que o KDS usa: código, mesa, primeiro nome do cliente, itens (nome, quantidade, tipo, status), motivo, horário e autor do cancelamento. Não recebem telefone, endereço, troco, pagamento nem valores. |
 | POST | `/pedidos/{order_id}/cancelamento/ciente` | admin, cozinha, bar | KDS confirma que viu o cancelamento (do pedido inteiro e dos itens da tela). Vale para qualquer pedido. Cozinha e bar recebem a mesma visão reduzida do `/kds/cancelados`. |
 | GET | `/perdas` | admin | Perdas de estoque por cancelamento depois do preparo. |
@@ -288,6 +288,21 @@ Código: `backend/kds_cancel.py`. Vale para Cozinha, Bar e Churrasqueira, cada t
 - Cozinha (itens `food`) e bar (itens `drink`) precisam confirmar. Depois das duas, o aviso some também da Churrasqueira, que é só visualização. Depois de 12 horas o aviso sai sozinho.
 - As rotas continuam em `/api/integrations/nostfood/kds/cancelados` e `/pedidos/{id}/cancelamento/ciente`, porque o frontend já as usa.
 
+## Observação nova no KDS (qualquer pedido)
+
+Código: `backend/order_observations.py`. Rotas gerais, para qualquer pedido aberto (mesa, comanda, balcão, online, NostFood):
+
+| Método | Rota | Quem pode | Corpo |
+|---|---|---|---|
+| POST | `/api/orders/{id}/observacao` | admin, caixa, garçom | `{text, item_id?}`: sem `item_id`, vale para o pedido inteiro |
+| POST | `/api/orders/{id}/observacao/{obs_id}/ciente` | admin, cozinha, bar | `{station}`: `kitchen`, `bar` ou `grill` |
+
+- A observação guarda texto (até 500 caracteres), item (`item_id`, `item_name`, `item_type`), telas (`stations`), autor e horário. Cada "Ciente" grava quem confirmou e quando em `acks[tela]`.
+- Item de comida vai para cozinha e churrasqueira; bebida, para o bar. Pedido inteiro: as telas dos itens do pedido. Item já entregue ou cancelado não recebe observação.
+- O Ciente de uma tela não apaga o aviso das outras. Uma tela que não está em `stations` recebe 400. Observações antigas (sem `stations`) valem para todas as telas.
+- No KDS: faixa amarela "NOVA OBSERVAÇÃO" no card, com o item quando houver, e dois bipes repetindo até o Ciente. Na pré-conta impressa, a observação do item sai embaixo dele e as do pedido inteiro num bloco "OBSERVAÇÕES".
+- Tempo real: `order_observation` (texto, item e autor, sem dados do cliente) por `emit_staff`, e `kitchen_update`/`bar_update` por `emit_orders`.
+
 ## Tempo real (Socket.IO)
 
 A integração só envia eventos pelas funções por sala do `server.py`. Nenhum evento vai para "todo mundo conectado".
@@ -295,7 +310,7 @@ A integração só envia eventos pelas funções por sala do `server.py`. Nenhum
 | Evento | Função | Quem recebe |
 |---|---|---|
 | `kitchen_update`, `bar_update`, `new_online_order` | `emit_orders` | Admin, superadmin e caixa: pedido completo. Cozinha, bar e garçom: só o primeiro nome do cliente, sem telefone, endereço (`address`, `customer_address`, `latitude`, `longitude`) e troco. |
-| `order_cancelled`, `order_closed`, `order_observation`, `kds_cancelled` | `emit_staff` | Todos os usuários logados. Levam só ids e a observação. `kds_cancelled` leva só `{order_id}`: cada tela busca o aviso em `/kds/cancelados`, já filtrado pelo perfil. |
+| `order_cancelled`, `order_closed`, `order_observation` (emitido pelo `server.py`), `kds_cancelled` | `emit_staff` | Todos os usuários logados. Levam só ids e a observação. `kds_cancelled` leva só `{order_id}`: cada tela busca o aviso em `/kds/cancelados`, já filtrado pelo perfil. |
 | `nostfood_alert`, `stock_updated` | `emit_admins` | Só admin e superadmin. |
 
 O teste `test_nenhum_evento_para_cozinha_ou_bar_leva_telefone_ou_endereco` (`backend/tests/test_socket_dados_pessoais.py`) passa pelos fluxos da NostFood e do salão e confere cada evento que chega a cozinha, bar ou garçom.

@@ -302,7 +302,7 @@ export default function KitchenPage() {
     newOrderIds: groupsByStage[0].flatMap(group =>
       group.items.map(item => `${group.order.id}:${item.id}`)),
     pendingObsIds: visibleGroups.flatMap(group =>
-      pendingObservations(group.order, STATION).map(obs => obs.id)),
+      pendingObservations(group.order, STATION, isKitchenItem).map(obs => obs.id)),
     pendingCancelIds: pendingCancelKeys(cancelled, STATION, isKitchenItem),
     lateOrderIds: visibleGroups
       .filter(group => getTiming(group.order, now).late)
@@ -968,6 +968,7 @@ export default function KitchenPage() {
                             <ObservationBanners
                               order={order}
                               station={STATION}
+                              itemFilter={isKitchenItem}
                               onAcked={fetchOrders}
                             />
 

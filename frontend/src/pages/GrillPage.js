@@ -168,7 +168,7 @@ export default function GrillPage() {
     newOrderIds: activeOrders.flatMap(({ order, items }) =>
       items.filter(item => item.status === 'pending').map(item => `${order.id}:${item.id}`)),
     pendingObsIds: activeOrders.flatMap(({ order }) =>
-      pendingObservations(order, STATION).map(obs => obs.id)),
+      pendingObservations(order, STATION, belongsToGrill).map(obs => obs.id)),
     pendingCancelIds: pendingCancelKeys(cancelled, STATION, belongsToGrill),
     lateOrderIds: activeOrders
       .filter(({ order }) => getTiming(order, now).late)
@@ -350,6 +350,7 @@ export default function GrillPage() {
                   <ObservationBanners
                     order={order}
                     station={STATION}
+                    itemFilter={belongsToGrill}
                     onAcked={fetchOrders}
                   />
 

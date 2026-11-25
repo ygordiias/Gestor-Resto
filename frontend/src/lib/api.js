@@ -215,6 +215,11 @@ export const ordersAPI = {
     }
   },
   get: (id) => api.get(`/orders/${id}`),
+  // Observação nova para o KDS (qualquer pedido): pedido inteiro ou um item.
+  addObservation: (orderId, text, itemId = null) =>
+    api.post(`/orders/${orderId}/observacao`, itemId ? { text, item_id: itemId } : { text }),
+  ackObservation: (orderId, obsId, station) =>
+    api.post(`/orders/${orderId}/observacao/${obsId}/ciente`, { station }),
   getByTable: (tableId) => api.get(`/orders/table/${tableId}`),
   create: async (data) => {
     try {
@@ -333,10 +338,8 @@ export const kdsAPI = {
   getCancelled: () => api.get(`${NOSTFOOD}/kds/cancelados`),
   ackCancel: (orderId, station) =>
     api.post(`${NOSTFOOD}/pedidos/${orderId}/cancelamento/ciente`, { station }),
-  addObservation: (orderId, text) =>
-    api.post(`${NOSTFOOD}/pedidos/${orderId}/observacao`, { text }),
   ackObservation: (orderId, obsId, station) =>
-    api.post(`${NOSTFOOD}/pedidos/${orderId}/observacao/${obsId}/ciente`, { station }),
+    api.post(`/orders/${orderId}/observacao/${obsId}/ciente`, { station }),
 };
 
 // Listen for online event to sync

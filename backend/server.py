@@ -26,6 +26,7 @@ from enum import Enum
 from bootstrap import ensure_initial_superadmin, require_cors_origins, require_secret_key
 import nostfood_integration as nostfood
 import kds_cancel
+import order_observations
 import physical_tabs
 import sobre
 
@@ -1097,6 +1098,65 @@ async def update_item_status(order_id: str, item_id: str, status_data: dict):
         await emit_admins('stock_updated', stock_list)
     
     return {"message": "Item status updated"}
+
+# ==================== OBSERVAÇÃO NOVA PARA O KDS ====================
+# Qualquer pedido (mesa, comanda, balcão, online, NostFood). As rotas antigas em
+# /api/integrations/nostfood/pedidos/{id}/observacao chamam estas mesmas funções.
+OBSERVATION_ROLES = [UserRole.ADMIN, UserRole.CASHIER, UserRole.WAITER]
+OBSERVATION_ACK_ROLES = [UserRole.ADMIN, UserRole.KITCHEN, UserRole.BAR]
+
+
+async def add_order_observation(order_id: str, body: dict, current_user: dict) -> dict:
+    order = await db.orders.find_one({"id": order_id}, {"_id": 0})
+    if not order:
+        raise HTTPException(status_code=404, detail="Pedido não encontrado")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    try:
+        obs = order_observations.build(order, body, current_user, now_iso)
+    except order_observations.ObservationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    await db.orders.update_one({"id": order_id}, {"$push": {"observations": obs}})
+    # Texto, item e autor (equipe): sem dados do cliente.
+    await emit_staff("order_observation", {"order_id": order_id, "observation": obs})
+    await emit_order_updates(order.get("items", []))
+    return obs
+
+
+async def ack_order_observation(order_id: str, obs_id: str, body: dict, current_user: dict) -> dict:
+    station = str((body or {}).get("station") or "").strip().lower()
+    if station not in kds_cancel.KDS_STATIONS:
+        raise HTTPException(status_code=400, detail="Informe a tela: kitchen, bar ou grill")
+    order = await db.orders.find_one({"id": order_id}, {"_id": 0})
+    if not order:
+        raise HTTPException(status_code=404, detail="Pedido não encontrado")
+    observations = order.get("observations") or []
+    obs = next((o for o in observations if o.get("id") == obs_id), None)
+    if not obs:
+        raise HTTPException(status_code=404, detail="Observação não encontrada")
+    by = {"by_id": current_user.get("id"), "by_name": current_user.get("name"),
+          "at": datetime.now(timezone.utc).isoformat()}
+    try:
+        order_observations.apply_ack(obs, station, by)
+    except order_observations.ObservationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    await db.orders.update_one({"id": order_id}, {"$set": {"observations": observations}})
+    await emit_order_updates(order.get("items", []))
+    return obs
+
+
+@api_router.post("/orders/{order_id}/observacao")
+async def create_order_observation(order_id: str, body: dict,
+                                   current_user: dict = Depends(require_role(OBSERVATION_ROLES))):
+    """Observação nova (pedido inteiro ou um item) para o KDS. Body: {text, item_id?}."""
+    return await add_order_observation(order_id, body, current_user)
+
+
+@api_router.post("/orders/{order_id}/observacao/{obs_id}/ciente")
+async def confirm_order_observation(order_id: str, obs_id: str, body: dict,
+                                    current_user: dict = Depends(require_role(OBSERVATION_ACK_ROLES))):
+    """Tela do KDS confirma que viu a observação. Body: {station}."""
+    return await ack_order_observation(order_id, obs_id, body, current_user)
+
 
 @api_router.patch("/orders/{order_id}/cancel")
 async def cancel_order(order_id: str, data: dict, current_user: dict = Depends(get_current_user)):
