@@ -877,7 +877,12 @@ async def create_order(order_data: OrderCreate, current_user: dict = Depends(get
             item["created_at"] = item["created_at"].isoformat()
         
         existing_order["items"].extend(items)
-        subtotal = sum(item["unit_price"] * item["quantity"] for item in existing_order["items"])
+        # Itens cancelados não somam (mesma regra do cancelamento e da cortesia).
+        subtotal = sum(
+            (item.get("unit_price") or 0) * (item.get("quantity") or 0)
+            for item in existing_order["items"]
+            if item.get("status") != "cancelled"
+        )
         service_fee = subtotal * (existing_order.get("service_fee_percentage", 10) / 100)
 
         # Preserva waiter se pedido ainda nao tem
