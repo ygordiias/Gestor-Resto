@@ -7,6 +7,7 @@ import { Button } from './ui/button';
 import { Badge } from './ui/badge';
 import socketService, { playNotificationSound } from '../lib/socket';
 import { toast } from 'sonner';
+import Assinatura from './Assinatura';
 
 import {
   LayoutDashboard,
@@ -533,6 +534,8 @@ export default function Layout({ children, title }) {
         <main className="p-3 sm:p-4 lg:p-6 xl:p-8">
           {children}
         </main>
+
+        <Assinatura className="px-3 pb-4" />
 
       </div>
     </div>
