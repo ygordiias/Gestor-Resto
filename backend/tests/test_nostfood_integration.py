@@ -72,6 +72,11 @@ def env(monkeypatch):
         emitted.append((event, data))
 
     async def fake_page(params):
+        # Como a API real: devolve os pedidos só do dia pedido (hoje, no horário de São Paulo).
+        # Entre 00:00 e 00:59 o polling também pede o dia anterior; sem este filtro os
+        # pedidos voltariam duas vezes e os testes contariam em dobro.
+        if params.get("data_inicio") != nf._today_sp().isoformat():
+            return {"pedidos": [], "has_more": False}
         return {"pedidos": list(remote), "has_more": False}
 
     async def fake_send(external_id, order_number, status):
@@ -1034,3 +1039,30 @@ def test_webhook_with_real_format_is_full_snapshot(env):
     send_event("order.created", real_order(), event_id="evt_real", resource_id="900001")
     o = orders(env)[0]
     assert len(o["items"]) == 2 and o["external_display_code"] == "252001"
+
+
+# ==================== polling na virada do dia (00:00–00:59) ====================
+class _MidnightDatetime(datetime):
+    """datetime.now() às 00:30 de hoje em São Paulo (o resto do datetime não muda)."""
+    @classmethod
+    def now(cls, tz=None):
+        real = datetime.now(nf.SP_TZ).replace(hour=0, minute=30, second=0, microsecond=0)
+        return real.astimezone(tz) if tz else real.replace(tzinfo=None)
+
+
+def test_polling_between_midnight_and_one_asks_two_days_and_imports_once(env, monkeypatch):
+    monkeypatch.setattr(nf, "datetime", _MidnightDatetime)
+    asked = []
+    original = nf.fetch_orders_page
+
+    async def spy(params):
+        asked.append(params["data_inicio"])
+        return await original(params)
+
+    monkeypatch.setattr(nf, "fetch_orders_page", spy)
+    link_all(env)
+    env.remote.append(remote_order(created_at=_MidnightDatetime.now(nf.SP_TZ).strftime("%Y-%m-%d %H:%M:%S")))
+    summary = asyncio.run(nf.poll_once())
+    today = nf._today_sp()
+    assert asked == [today.isoformat(), (today - timedelta(days=1)).isoformat()]
+    assert summary["seen"] == 1 and len(orders(env)) == 1
