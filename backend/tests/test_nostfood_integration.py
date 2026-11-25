@@ -770,3 +770,89 @@ def test_simulate_never_calls_nostfood(env, monkeypatch):
                         body={"status": status})[0] == 200
     env.run_scheduled()
     asyncio.run(nf._push_status(orders(env)[0], "pronto"))  # defesa extra no envio
+
+
+# ==================== formato real do pedidos.php (fixture anonimizada) ====================
+FIXTURE = __import__("pathlib").Path(__file__).parent / "fixtures" / "nostfood_pedidos_reais.json"
+
+
+def real_order(key="pedido_99", **kw):
+    o = json.loads(FIXTURE.read_text(encoding="utf-8"))[key]
+    o["created_at"] = (datetime.now(nf.SP_TZ) + timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
+    o.update(kw)
+    return o
+
+
+def test_fixture_has_no_customer_data():
+    for o in json.loads(FIXTURE.read_text(encoding="utf-8")).values():
+        if isinstance(o, dict):
+            assert o["customer_name"] == "Cliente Fixture" and o["customer_phone"] == "16900000000"
+            assert o["customer_address"] == "Rua Fictícia"
+
+
+def test_real_format_items_inside_itens_detalhados():
+    norm = nf.normalize_order(real_order())
+    assert [(i["name"], i["quantity"], i["unit_price"]) for i in norm["items"]] == [
+        ("Combo Amós", 1, 49.5), ("Salomão - O Principe do Sabor", 2, 36.41)]
+    # produto_id vem vazio: a ligação cai no nome do item
+    assert all(i["external_item_id"] is None for i in norm["items"])
+
+
+def test_real_format_values_come_from_totais():
+    o = real_order()
+    o["subtotal"], o["delivery"], o["total"] = "0", "0", "0"  # o topo é só reserva
+    norm = nf.normalize_order(o)
+    assert (norm["subtotal"], norm["delivery_fee"], norm["total"]) == (122.32, 6.88, 80.51)
+    direto = nf.normalize_order(real_order("pedido_direto"))
+    assert (direto["subtotal"], direto["delivery_fee"], direto["total"]) == (0.0, 12.25, 12.25)
+
+
+def test_real_format_platform_and_financials():
+    norm = nf.normalize_order(real_order())
+    assert norm["origin_platform"] == "99food" and norm["platform_order_id"] == "5764700000000000001"
+    fin = norm["financials"]
+    assert fin["totais"]["desconto"] == 52.89 and fin["totais"]["taxa_servico"] == 4.2
+    assert fin["sponsorship_values"]["platform_subside_price"] == 26.06
+    assert fin["other_fees"]["service_price"] == 4.2 and len(fin["promotions_raw"]) == 3
+    direto = nf.normalize_order(real_order("pedido_direto"))
+    assert direto["origin_platform"] is None and direto["platform_order_id"] is None
+    assert set(direto["financials"]) == {"totais"}
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ({"items": {"ifood_order_id": "x"}}, "ifood"),
+    ({"platform": "iFood", "items": []}, "ifood"),
+    ({"plataforma": "99 Food", "items": []}, "99food"),
+    ({"order_number": "99-123", "items": []}, "99food"),
+    ({"order_number": "123", "items": []}, None),
+])
+def test_platform_detection(raw, expected):
+    assert nf.normalize_order(raw)["origin_platform"] == expected
+
+
+def test_real_order_imported_by_polling(env):
+    env.remote.append(real_order())
+    summary = asyncio.run(nf.poll_once())
+    assert summary["errors"] == 0 and summary["created"] == 1
+    o = orders(env)[0]
+    assert len(o["items"]) == 2 and all(i["unlinked"] for i in o["items"])
+    assert (o["subtotal"], o["delivery_fee"], o["total"]) == (122.32, 6.88, 80.51)
+    assert o["platform"] == "nostfood"  # caixa e relatórios continuam agrupando por NostFood
+    assert o["external_origin_platform"] == "99food"
+    assert o["external_platform_order_id"] == "5764700000000000001"
+    assert o["external_financials"]["sponsorship_values"]["shop_subside_price"] == 26.83
+    assert o["payment_status"] == "pending_platform"
+
+
+@pytest.mark.parametrize("linked_as,arrives_as", [
+    ("Sansão ", "sansao"), ("sansao", "  SANSÃO  "), ("Combo  Amós", "combo amos"),
+])
+def test_link_by_name_ignores_case_accents_and_spaces(env, linked_as, arrives_as):
+    status, _ = call("POST", f"{N}/ligar-produto", token=T_ADMIN,
+                     body={"nostfood_name": linked_as, "product_id": "p-sansao"})
+    assert status == 200
+    o = real_order()
+    o["items"]["itens_detalhados"] = [{"nome": arrives_as, "preco": 32.0, "quantidade": 1, "produto_id": ""}]
+    assert asyncio.run(nf.upsert_from_snapshot(o, "teste")) == "created_history"
+    item = orders(env)[0]["items"][0]
+    assert item["product_id"] == "p-sansao" and item["unlinked"] is False

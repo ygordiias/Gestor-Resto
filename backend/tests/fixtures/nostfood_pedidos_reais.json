@@ -1,0 +1,147 @@
+{
+  "_comentario": "Pedidos reais de pedidos.php (24/11/2026) anonimizados: cliente, ids, códigos e horários trocados; estrutura, itens e valores mantidos.",
+  "pedido_99": {
+    "id": 900001,
+    "order_number": "99-5764700000000000001",
+    "customer_name": "Cliente Fixture",
+    "customer_email": null,
+    "customer_phone": "16900000000",
+    "customer_address": "Rua Fictícia",
+    "customer_number": "1",
+    "customer_neighborhood": "Bairro Teste",
+    "customer_city": "Cidade Teste",
+    "customer_state": "SP",
+    "customer_cep": "00000-000",
+    "customer_complemento": "",
+    "items": {
+      "totais": {
+        "total": 80.51,
+        "delivery": 6.88,
+        "desconto": 52.89,
+        "subtotal": 122.32,
+        "acrescimo": 4.2,
+        "taxa_servico": 4.2,
+        "entrega_bruta": 6.88,
+        "total_liquido": 80.51,
+        "desconto_itens": 46.01,
+        "subtotal_bruto": 122.32,
+        "entrega_liquida": 0,
+        "desconto_entrega": 6.88
+      },
+      "locator": "FIXTURE",
+      "other_fees": {
+        "service_price": 4.2,
+        "coupon_discount": 28.89,
+        "total_tip_money": 0,
+        "small_order_price": 0
+      },
+      "order_index": 1,
+      "payment_raw": {
+        "pay_type": 1,
+        "pay_method": 1,
+        "pay_channel": 212
+      },
+      "delivered_by": "MERCHANT",
+      "delivery_type": 2,
+      "handover_code": "0000",
+      "takeaway_code": null,
+      "other_fees_raw": {
+        "service_price": 420,
+        "coupon_discount": 2889,
+        "total_tip_money": 0,
+        "small_order_price": 0
+      },
+      "promotions_raw": [
+        {
+          "promo_type": 2,
+          "promo_discount": 2201,
+          "shop_subside_price": 2201
+        },
+        {
+          "promo_type": 11,
+          "promo_discount": 2400,
+          "shop_subside_price": 0
+        },
+        {
+          "promo_type": 3,
+          "promo_discount": 688,
+          "shop_subside_price": 482
+        }
+      ],
+      "food99_order_id": "5764700000000000001",
+      "itens_detalhados": [
+        {
+          "nome": "Combo Amós",
+          "preco": 49.5,
+          "adicionais": [],
+          "observacao": "",
+          "produto_id": "",
+          "quantidade": 1
+        },
+        {
+          "nome": "Salomão - O Principe do Sabor",
+          "preco": 36.41,
+          "adicionais": [],
+          "observacao": "",
+          "produto_id": "",
+          "quantidade": 2
+        }
+      ],
+      "sponsorship_values": {
+        "total_discount": 52.89,
+        "shop_subside_price": 26.83,
+        "platform_subside_price": 26.06
+      }
+    },
+    "subtotal": "122.32",
+    "delivery": "6.88",
+    "total": "80.51",
+    "status": "saiu_entrega",
+    "payment_method": "pago_online",
+    "created_at": "2026-11-24 12:00:00",
+    "hora_preparado": null,
+    "hora_enviado": null,
+    "hora_pronto": null,
+    "hora_aprovado": "2026-11-24 12:00:00",
+    "hora_confirmado": "2026-11-24 12:00:00"
+  },
+  "pedido_direto": {
+    "id": 900002,
+    "order_number": "900002",
+    "customer_name": "Cliente Fixture",
+    "customer_email": null,
+    "customer_phone": "16900000000",
+    "customer_address": "Rua Fictícia",
+    "customer_number": "1",
+    "customer_neighborhood": "Bairro Teste",
+    "customer_city": "Cidade Teste",
+    "customer_state": "SP",
+    "customer_cep": "00000-000",
+    "customer_complemento": "",
+    "items": {
+      "totais": {
+        "total": 12.25,
+        "entrega": 12.25,
+        "subtotal": 0
+      },
+      "itens_detalhados": [
+        {
+          "nome": "Pedido manual",
+          "preco": 0,
+          "quantidade": 1
+        }
+      ]
+    },
+    "subtotal": "0.00",
+    "delivery": "12.25",
+    "total": "12.25",
+    "status": "entregue",
+    "payment_method": "pix_online",
+    "created_at": "2026-11-24 12:00:00",
+    "hora_preparado": null,
+    "hora_enviado": null,
+    "hora_pronto": "2026-11-24 12:00:00",
+    "hora_aprovado": "2026-11-24 12:00:00",
+    "hora_confirmado": null
+  }
+}

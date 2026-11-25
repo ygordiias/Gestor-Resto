@@ -226,6 +226,53 @@ def _normalize_item(raw: dict) -> dict:
     }
 
 
+def _order_details(raw: dict) -> dict:
+    """No pedidos.php real, "items" é um objeto: itens em itens_detalhados, valores em totais."""
+    items = raw.get("items")
+    return items if isinstance(items, dict) else {}
+
+
+def _raw_items(raw: dict, details: dict) -> list:
+    if details:
+        found = _pick(details, "itens_detalhados", "itens", "items", "produtos", default=[])
+    else:
+        found = _pick(raw, "items", "itens", "produtos", default=[])
+    return found if isinstance(found, list) else []
+
+
+def _detect_platform(raw: dict, details: dict) -> Optional[str]:
+    """iFood ou 99 a partir dos campos do pedido. None = pedido direto na NostFood."""
+    keys = {str(k).lower() for k in list(raw) + list(details)}
+    if any("food99" in k or "99food" in k for k in keys):
+        return "99food"
+    if any("ifood" in k for k in keys):
+        return "ifood"
+    declared = _pick(raw, "platform", "plataforma", "origem", "origin", "canal")
+    if declared:
+        name = normalize_name(declared).replace(" ", "")
+        if "99" in name:
+            return "99food"
+        if "ifood" in name:
+            return "ifood"
+        return str(declared)
+    if str(_pick(raw, "order_number", default="")).startswith("99-"):
+        return "99food"
+    return None
+
+
+_FINANCIAL_BLOCKS = ("totais", "other_fees", "sponsorship_values", "promotions_raw")
+
+
+def _financials(details: dict) -> Optional[dict]:
+    """Valores financeiros como a plataforma mandou (descontos, subsídios, taxa de serviço).
+
+    Só registro: ainda não entra em caixa, repasse nem relatórios. A API não manda
+    comissão nem valor de repasse da plataforma.
+    """
+    out = {k: details[k] for k in _FINANCIAL_BLOCKS if isinstance(details.get(k), (dict, list))}
+    return out or None
+
+
 def normalize_order(raw: dict) -> dict:
     cliente = raw.get("cliente") if isinstance(raw.get("cliente"), dict) else {}
     customer = raw.get("customer") if isinstance(raw.get("customer"), dict) else {}
@@ -251,12 +298,18 @@ def normalize_order(raw: dict) -> dict:
 
     lat = _pick(raw, "latitude", "lat", default=_pick(endereco, "latitude", "lat"))
     lng = _pick(raw, "longitude", "lng", "lon", default=_pick(endereco, "longitude", "lng"))
-    raw_items = _pick(raw, "items", "itens", "produtos", default=[]) or []
-    items = [_normalize_item(i) for i in raw_items if isinstance(i, dict)]
+    details = _order_details(raw)
+    items = [_normalize_item(i) for i in _raw_items(raw, details) if isinstance(i, dict)]
     subtotal_calc = round(sum(i["unit_price"] * i["quantity"] for i in items), 2)
-    delivery_fee = _num(_pick(raw, "delivery", "delivery_fee", "taxa_entrega", "frete", default=0))
-    subtotal = _num(_pick(raw, "subtotal"), subtotal_calc) if _pick(raw, "subtotal") is not None else subtotal_calc
-    total = _num(_pick(raw, "total", "valor_total"), subtotal + delivery_fee) if _pick(raw, "total", "valor_total") is not None else round(subtotal + delivery_fee, 2)
+    # Valores: primeiro items.totais (formato real do pedidos.php), depois o topo do pedido.
+    totais = details.get("totais") if isinstance(details.get("totais"), dict) else {}
+    raw_subtotal = _pick(totais, "subtotal", default=_pick(raw, "subtotal"))
+    raw_delivery = _pick(totais, "delivery", "entrega",
+                         default=_pick(raw, "delivery", "delivery_fee", "taxa_entrega", "frete", default=0))
+    raw_total = _pick(totais, "total", default=_pick(raw, "total", "valor_total"))
+    delivery_fee = _num(raw_delivery)
+    subtotal = _num(raw_subtotal, subtotal_calc) if raw_subtotal is not None else subtotal_calc
+    total = _num(raw_total, subtotal + delivery_fee) if raw_total is not None else round(subtotal + delivery_fee, 2)
     method = _pick(raw, "payment_method", "forma_pagamento", "pagamento", default="")
     return {
         "external_id": str(ext_id) if ext_id is not None else (str(order_number) if order_number else None),
@@ -275,7 +328,10 @@ def normalize_order(raw: dict) -> dict:
         "delivery_fee": round(delivery_fee, 2),
         "total": round(total, 2),
         "payment_method": str(method or "").strip().lower(),
-        "origin_platform": _pick(raw, "platform", "plataforma", "origem", "origin", "canal"),
+        "origin_platform": _detect_platform(raw, details),
+        "platform_order_id": _pick(details, "food99_order_id", "ifood_order_id",
+                                   default=_pick(raw, "food99_order_id", "ifood_order_id")),
+        "financials": _financials(details),
         "created_at": _pick(raw, "created_at", "data", "data_pedido"),
         "cancel_reason": _pick(raw, "motivo", "reason", "cancellation_reason", "motivo_cancelamento"),
     }
@@ -738,6 +794,8 @@ async def upsert_from_snapshot(raw: dict, origin: str, is_test: bool = False,
             "external_order_number": norm["order_number"],
             "external_created_at": norm["created_at"],
             "external_origin_platform": norm["origin_platform"],
+            "external_platform_order_id": norm["platform_order_id"],
+            "external_financials": norm["financials"],
             "customer_name": norm["customer_name"],
             "customer_phone": norm["customer_phone"],
             "address": norm["address_text"],
