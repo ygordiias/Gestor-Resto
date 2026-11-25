@@ -1139,10 +1139,25 @@ async def mark_item_courtesy(order_id: str, item_id: str, data: dict, current_us
     found = False
     for item in order.get("items", []):
         if item.get("id") == item_id:
+            was_courtesy = bool(item.get("is_courtesy"))
+            if is_courtesy:
+                # Guarda o preço cobrado antes de zerar (só na primeira marcação,
+                # para não sobrescrever com 0 se marcar de novo).
+                if not was_courtesy:
+                    item["courtesy_original_price"] = item.get("unit_price", 0)
+                item["unit_price"] = 0
+            elif was_courtesy:
+                original = item.get("courtesy_original_price")
+                if original is None:
+                    # Cortesia marcada antes de o preço ser guardado: usa o cadastro.
+                    product = await db.products.find_one({"id": item.get("product_id")}, {"_id": 0})
+                    if not product:
+                        raise HTTPException(status_code=409, detail="Preço original do item não encontrado")
+                    original = product.get("price", 0)
+                item["unit_price"] = float(original or 0)
+                item.pop("courtesy_original_price", None)
             item["is_courtesy"] = is_courtesy
             item["courtesy_reason"] = reason if is_courtesy else None
-            if is_courtesy:
-                item["unit_price"] = 0
             found = True
             break
     if not found:
