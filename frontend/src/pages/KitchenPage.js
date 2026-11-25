@@ -298,7 +298,7 @@ export default function KitchenPage() {
   const visibleGroups = groupsByStage.flat();
   useKdsAlerts({
     ready: !loading,
-    soundOn: sound.running,
+    sound,
     newOrderIds: groupsByStage[0].flatMap(group =>
       group.items.map(item => `${group.order.id}:${item.id}`)),
     pendingObsIds: visibleGroups.flatMap(group =>

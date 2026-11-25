@@ -72,10 +72,10 @@ def env(monkeypatch):
         emitted.append((event, data))
 
     async def fake_page(params):
-        # Como a API real: devolve os pedidos só do dia pedido (hoje, no horário de São Paulo).
-        # Entre 00:00 e 00:59 o polling também pede o dia anterior; sem este filtro os
-        # pedidos voltariam duas vezes e os testes contariam em dobro.
-        if params.get("data_inicio") != nf._today_sp().isoformat():
+        # Como a API real, filtra por dia: os pedidos falsos são todos "de hoje".
+        # Sem isso, entre 00:00 e 00:59 (SP) o polling também consulta ontem e
+        # cada pedido vinha duas vezes, derrubando os testes só nessa hora.
+        if params.get("data_inicio") not in (None, nf._today_sp().isoformat()):
             return {"pedidos": [], "has_more": False}
         return {"pedidos": list(remote), "has_more": False}
 

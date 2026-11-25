@@ -66,20 +66,18 @@ export function useCancelledOrders() {
   return { cancelled, refreshCancelled: refresh };
 }
 
+// O som toca sozinho. Este aviso só aparece se o navegador bloquear o autoplay.
 export function SoundButton({ sound, dark = false }) {
-  const on = sound.enabled && sound.running;
   const base =
     'inline-flex items-center gap-2 rounded-lg px-4 py-2 font-bold text-sm border-2 min-h-11';
-  if (on) {
+  if (!sound.blocked) {
     return (
-      <button
-        type="button"
+      <span
         className={`${base} ${dark ? 'border-green-400 text-green-300' : 'border-green-600 text-green-700'}`}
-        onClick={sound.disable}
         data-testid="kds-sound-on"
       >
         <Volume2 className="h-5 w-5" /> Som ativo
-      </button>
+      </span>
     );
   }
   return (
@@ -90,7 +88,7 @@ export function SoundButton({ sound, dark = false }) {
       data-testid="kds-sound-enable"
     >
       <VolumeX className="h-5 w-5" />
-      {sound.enabled ? 'Toque para liberar o som' : 'Ativar som'}
+      Ativar som (o navegador bloqueou)
     </button>
   );
 }

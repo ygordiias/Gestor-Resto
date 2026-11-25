@@ -164,7 +164,7 @@ export default function GrillPage() {
   const { cancelled, refreshCancelled } = useCancelledOrders();
   useKdsAlerts({
     ready: !loading,
-    soundOn: sound.running,
+    sound,
     newOrderIds: activeOrders.flatMap(({ order, items }) =>
       items.filter(item => item.status === 'pending').map(item => `${order.id}:${item.id}`)),
     pendingObsIds: activeOrders.flatMap(({ order }) =>
