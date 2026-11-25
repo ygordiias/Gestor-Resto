@@ -36,7 +36,7 @@ import {
   SoundButton,
   TestOrderBand,
   UnlinkedItemBadge,
-  cancelNeedsAck,
+  pendingCancelKeys,
   pendingObservations,
   useCancelledOrders,
 } from '../components/KdsNotices';
@@ -303,9 +303,7 @@ export default function KitchenPage() {
       group.items.map(item => `${group.order.id}:${item.id}`)),
     pendingObsIds: visibleGroups.flatMap(group =>
       pendingObservations(group.order, STATION).map(obs => obs.id)),
-    pendingCancelIds: cancelled
-      .filter(order => cancelNeedsAck(order, STATION, isKitchenItem))
-      .map(order => order.id),
+    pendingCancelIds: pendingCancelKeys(cancelled, STATION, isKitchenItem),
     lateOrderIds: visibleGroups
       .filter(group => getTiming(group.order, now).late)
       .map(group => String(group.order.id)),

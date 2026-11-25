@@ -44,8 +44,8 @@ inválido, a resposta é 401. Nos dois casos o corpo tem só `detail`.
 | POST | `/ligar-produto` | admin | Cria ou refaz uma ligação. |
 | POST | `/pedidos/{order_id}/observacao` | admin, caixa | Nova observação no pedido (aparece no KDS). |
 | POST | `/pedidos/{order_id}/observacao/{obs_id}/ciente` | admin, cozinha, bar | KDS confirma que viu a observação. |
-| GET | `/kds/cancelados` | admin, garçom, caixa, cozinha, bar | Pedidos cancelados recentes para o aviso do KDS. Admin e caixa recebem o pedido completo. Cozinha, bar e garçom recebem só o que o KDS usa: código, mesa, primeiro nome do cliente, itens (nome, quantidade, tipo, status), motivo, horário e autor do cancelamento. Não recebem telefone, endereço, troco, pagamento nem valores. |
-| POST | `/pedidos/{order_id}/cancelamento/ciente` | admin, cozinha, bar | KDS confirma que viu o cancelamento. Cozinha e bar recebem a mesma visão reduzida do `/kds/cancelados`. |
+| GET | `/kds/cancelados` | admin, garçom, caixa, cozinha, bar | Cancelados recentes de **qualquer pedido** (salão, balcão, online, NostFood) para o aviso do KDS: pedidos inteiros e itens cancelados em pedidos abertos. Admin e caixa recebem o pedido completo. Cozinha, bar e garçom recebem só o que o KDS usa: código, mesa, primeiro nome do cliente, itens (nome, quantidade, tipo, status), motivo, horário e autor do cancelamento. Não recebem telefone, endereço, troco, pagamento nem valores. |
+| POST | `/pedidos/{order_id}/cancelamento/ciente` | admin, cozinha, bar | KDS confirma que viu o cancelamento (do pedido inteiro e dos itens da tela). Vale para qualquer pedido. Cozinha e bar recebem a mesma visão reduzida do `/kds/cancelados`. |
 | GET | `/perdas` | admin | Perdas de estoque por cancelamento depois do preparo. |
 
 Um teste (`test_every_route_is_listed_here`) falha se uma rota nova entrar na integração
@@ -271,13 +271,22 @@ A baixa usa a mesma ficha técnica do salão, mas **nunca trava** o KDS nem o ca
 
 - Item que **ainda não começou**: devolve a baixa, se houve.
 - Item em preparo, pronto ou entregue: vira **perda** (baixa de estoque e custo em `stock_losses`), não venda.
-- O KDS mostra o cancelado até cada tela (cozinha, bar) confirmar que viu, por até 12 horas.
+- O KDS mostra o cancelado até cada tela (cozinha, bar) confirmar que viu, por até 12 horas. O mesmo aviso vale para pedidos que não são da NostFood: veja [Aviso de cancelado no KDS](#aviso-de-cancelado-no-kds-qualquer-pedido).
 - Cancelamento que chega **antes** do pedido grava uma "lápide" (`nostfood_tombstones`) e o pedido não é criado depois.
 - Cancelamento depois de o pedido ser finalizado no Gestor só marca e alerta (`cancelled_after_close`) para conferência manual.
 
 ### Pedidos de teste
 
 `POST /simular` cria um pedido falso só no Gestor (`is_test = true`), que nunca chama a NostFood, não mexe em estoque e não entra no caixa. `DELETE /testes` apaga todos os pedidos de teste e o que eles geraram. Webhook e polling nunca criam pedido de teste.
+
+## Aviso de cancelado no KDS (qualquer pedido)
+
+Código: `backend/kds_cancel.py`. Vale para Cozinha, Bar e Churrasqueira, cada tela só com os seus itens.
+
+- **Item cancelado num pedido aberto** (mesa, comanda, balcão, online): se o item ainda estava no KDS (pendente, em preparo ou pronto), ele ganha `kds_item_cancel`, `kds_ack_pending` e `cancel_acks`, e o pedido ganha `kds_item_cancel_pending`. A tela mostra o item esmaecido e riscado, com "✕ CANCELADO", motivo e quem cancelou, e toca o som de cancelado até a tela do item tocar em **Ciente**. Item já entregue não gera aviso.
+- **Pedido inteiro cancelado** (`/orders/{id}/cancel`, `/orders/{id}/cancel-quick` ou cancelamento da NostFood): o pedido ganha `kds_ack_pending` e `cancel_acks`. A tela mostra o card inteiro cancelado com os seus itens, motivo e quem cancelou, até tocar em **Ciente**.
+- Cozinha (itens `food`) e bar (itens `drink`) precisam confirmar. Depois das duas, o aviso some também da Churrasqueira, que é só visualização. Depois de 12 horas o aviso sai sozinho.
+- As rotas continuam em `/api/integrations/nostfood/kds/cancelados` e `/pedidos/{id}/cancelamento/ciente`, porque o frontend já as usa.
 
 ## Tempo real (Socket.IO)
 

@@ -10,7 +10,7 @@ import {
   SoundButton,
   TestOrderBand,
   UnlinkedItemBadge,
-  cancelNeedsAck,
+  pendingCancelKeys,
   pendingObservations,
   useCancelledOrders,
 } from '../components/KdsNotices';
@@ -169,9 +169,7 @@ export default function GrillPage() {
       items.filter(item => item.status === 'pending').map(item => `${order.id}:${item.id}`)),
     pendingObsIds: activeOrders.flatMap(({ order }) =>
       pendingObservations(order, STATION).map(obs => obs.id)),
-    pendingCancelIds: cancelled
-      .filter(order => cancelNeedsAck(order, STATION, belongsToGrill))
-      .map(order => order.id),
+    pendingCancelIds: pendingCancelKeys(cancelled, STATION, belongsToGrill),
     lateOrderIds: activeOrders
       .filter(({ order }) => getTiming(order, now).late)
       .map(({ order }) => String(order.id)),

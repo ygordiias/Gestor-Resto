@@ -33,6 +33,8 @@ from typing import Optional
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query, Request
 from pymongo.errors import DuplicateKeyError
 
+import kds_cancel
+
 logger = logging.getLogger("nostfood")
 
 SOURCE = "nostfood"
@@ -53,7 +55,7 @@ DONE_STATUSES = {"pronto", "saiu_entrega", "enviado", "entregue"}
 DELIVERED_STATUSES = {"entregue"}
 EVENTS_TTL_SECONDS = 2592000  # 30 dias
 STARTED_ITEM_STATUSES = {"preparing", "ready", "delivered"}
-KDS_STATIONS = ("kitchen", "bar", "grill")
+KDS_STATIONS = kds_cancel.KDS_STATIONS
 CANCEL_KDS_WINDOW_HOURS = 12
 
 try:
@@ -1295,11 +1297,6 @@ def _validate_station(body: dict) -> str:
     return station
 
 
-def _required_cancel_stations(order: dict):
-    types = {i.get("type") for i in order.get("items", [])}
-    return [s for s, t in (("kitchen", "food"), ("bar", "drink")) if t in types]
-
-
 # Aviso de cancelamento no KDS: cozinha, bar e garçom recebem só o que a tela usa.
 # Sem telefone, endereço, troco, pagamento, valores nem dados da plataforma.
 FULL_ORDER_ROLES = {"superadmin", "admin", "cashier"}
@@ -1307,8 +1304,14 @@ KDS_CANCELLED_ORDER_FIELDS = (
     "id", "status", "is_test", "table_number", "tab_number", "created_at",
     "external_source", "external_order_number", "external_display_code", "external_origin_platform",
     "cancelled_at", "cancellation_reason", "cancelled_by_name", "cancel_acks", "kds_ack_pending",
+    "kds_item_cancel_pending", "kds_item_cancel_at", "source", "delivery_type",
 )
-KDS_CANCELLED_ITEM_FIELDS = ("id", "product_name", "quantity", "type", "status", "status_before_cancel")
+KDS_CANCELLED_ITEM_FIELDS = (
+    "id", "product_name", "quantity", "type", "status", "status_before_cancel",
+    # item cancelado num pedido aberto
+    "kds_item_cancel", "kds_ack_pending", "kds_cancel_at", "cancel_acks",
+    "cancellation_reason", "cancelled_by_name",
+)
 
 
 def first_name(name) -> Optional[str]:
@@ -1589,9 +1592,12 @@ def build_router(require_role, UserRole) -> APIRouter:
     @router.get("/kds/cancelados")
     async def kds_cancelled(current_user: dict = staff):
         since = (datetime.now(timezone.utc) - timedelta(hours=CANCEL_KDS_WINDOW_HOURS)).isoformat()
-        rows = await S.db.orders.find(
+        # Qualquer pedido (salão, balcão, online, NostFood): inteiro cancelado ou
+        # com item cancelado aguardando "Ciente".
+        rows = await S.db.orders.find({"$or": [
             {"kds_ack_pending": True, "status": "cancelled", "cancelled_at": {"$gte": since}},
-            {"_id": 0}).to_list(100)
+            {"kds_item_cancel_pending": True, "kds_item_cancel_at": {"$gte": since}},
+        ]}, {"_id": 0}).to_list(100)
         if current_user.get("role") in FULL_ORDER_ROLES:
             return rows  # admin e caixa: pedido completo
         return [kds_cancelled_view(o) for o in rows]
@@ -1600,12 +1606,12 @@ def build_router(require_role, UserRole) -> APIRouter:
     async def ack_cancel(order_id: str, body: dict, current_user: dict = kds):
         station = _validate_station(body)
         order = await S.db.orders.find_one({"id": order_id}, {"_id": 0})
-        if not order or order.get("status") != "cancelled":
+        if not order or (order.get("status") != "cancelled" and not kds_cancel.item_cancel_pending(order)):
             raise HTTPException(status_code=404, detail="Pedido cancelado não encontrado")
-        acks = order.get("cancel_acks") or {}
-        acks[station] = {"by_id": current_user.get("id"), "by_name": current_user.get("name"), "at": _now_iso()}
-        pending = any(s not in acks for s in _required_cancel_stations(order))
-        await S.db.orders.update_one({"id": order_id}, {"$set": {"cancel_acks": acks, "kds_ack_pending": pending}})
+        by = {"by_id": current_user.get("id"), "by_name": current_user.get("name"), "at": _now_iso()}
+        update = kds_cancel.apply_ack(order, station, by)
+        if update:
+            await S.db.orders.update_one({"id": order_id}, {"$set": update})
         updated = await S.db.orders.find_one({"id": order_id}, {"_id": 0})
         await S.emit_staff("kds_cancelled", {"order_id": order_id})
         if current_user.get("role") in FULL_ORDER_ROLES:

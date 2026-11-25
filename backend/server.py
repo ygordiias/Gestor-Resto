@@ -25,6 +25,7 @@ from jose import JWTError, jwt
 from enum import Enum
 from bootstrap import ensure_initial_superadmin, require_cors_origins, require_secret_key
 import nostfood_integration as nostfood
+import kds_cancel
 import physical_tabs
 import sobre
 
@@ -1042,8 +1043,8 @@ async def create_online_order(
     return {k: v for k, v in order_dict.items() if k != "_id"}
 
 async def emit_order_updates(items):
-    food_items = [i for i in items if i["type"] == OrderItemType.FOOD.value]
-    drink_items = [i for i in items if i["type"] == OrderItemType.DRINK.value]
+    food_items = [i for i in items if i.get("type") == OrderItemType.FOOD.value]
+    drink_items = [i for i in items if i.get("type") == OrderItemType.DRINK.value]
     
     if food_items:
         kitchen_orders = await db.orders.find({"is_closed": False}, {"_id": 0}).to_list(100)
@@ -1135,6 +1136,8 @@ async def cancel_order(order_id: str, data: dict, current_user: dict = Depends(g
             "cancelled_by_cashier_id": current_user.get("id"),
             "cancelled_by_cashier_name": current_user.get("name"),
             "cancellation_reason": reason,
+            # Aviso de cancelado no KDS até cada tela dar "Ciente".
+            **kds_cancel.order_cancel_fields(order),
         }}
     )
     # Libera a mesa
@@ -1142,6 +1145,8 @@ async def cancel_order(order_id: str, data: dict, current_user: dict = Depends(g
     await refresh_table_after_order(order.get("table_id"))
     await emit_staff('tables_updated', await get_tables())
     await emit_staff('order_closed', {"order_id": order_id})
+    await emit_order_updates(order.get("items", []))
+    await emit_staff('kds_cancelled', {"order_id": order_id})
     logger.info(f"[CANCEL] {current_user.get('name')} cancelou pedido {order_id} autorizado por {admin.get('name')} — {reason}")
     return {"message": "Comanda cancelada", "cancelled_by": admin.get("name"), "reason": reason}
 
@@ -1270,11 +1275,14 @@ async def cancel_order_item(order_id: str, item_id: str, data: dict, current_use
         "stock_restored": stock_restored,
     }
 
+    previous_status = item.get("status")
+    kds_notice = False
     if cancel_qty == current_qty:
         # Cancelamento total do item — marca em lugar
         item["status"] = "cancelled"
         item["quantity_cancelled"] = cancel_qty
         item.update(cancel_meta)
+        kds_notice = kds_cancel.mark_item_cancelled(item, previous_status, now_iso)
         # Se estoque foi devolvido, a "conta" deste item deixa de estar deduzida.
         if stock_restored:
             item["stock_deducted"] = False
@@ -1298,6 +1306,7 @@ async def cancel_order_item(order_id: str, item_id: str, data: dict, current_use
             "stock_deducted": (stock_was_deducted and not stock_restored),
             **cancel_meta,
         }
+        kds_notice = kds_cancel.mark_item_cancelled(cancelled_line, previous_status, now_iso)
         order["items"].append(cancelled_line)
 
     # --- Recalcula totais (ignora itens cancelados) ---
@@ -1317,12 +1326,17 @@ async def cancel_order_item(order_id: str, item_id: str, data: dict, current_use
             "subtotal": subtotal,
             "service_fee": service_fee,
             "total": total,
+            # Aviso de item cancelado no KDS até a tela do item dar "Ciente".
+            **({"kds_item_cancel_pending": True, "kds_item_cancel_at": now_iso} if kds_notice else {}),
         }}
     )
 
     # Realtime
     updated = await db.orders.find_one({"id": order_id}, {"_id": 0})
     await emit_orders('order_updated', updated)
+    await emit_order_updates([item])
+    if kds_notice:
+        await emit_staff('kds_cancelled', {"order_id": order_id})
     if stock_restored:
         stock_list = await db.stock.find({}, {"_id": 0}).to_list(500)
         await emit_admins('stock_updated', stock_list)
@@ -1624,8 +1638,8 @@ async def sales_by_table(period: str = "daily", current_user: dict = Depends(req
         })
     return {"period": period, "start": start_iso, "rows": rows}
 
-@api_router.post("/orders/{order_id}/cancel-quick", dependencies=[Depends(require_role([UserRole.ADMIN]))])
-async def quick_cancel_order(order_id: str):
+@api_router.post("/orders/{order_id}/cancel-quick")
+async def quick_cancel_order(order_id: str, current_user: dict = Depends(require_role([UserRole.ADMIN]))):
     order = await db.orders.find_one({"id": order_id}, {"_id": 0})
     if not order:
         raise HTTPException(status_code=404, detail="Pedido não encontrado")
@@ -1643,16 +1657,25 @@ async def quick_cancel_order(order_id: str):
     # Cancelar todos os itens e o pedido
     cancelled_items = []
     for item in order["items"]:
+        if item.get("status") != "cancelled":
+            item["status_before_cancel"] = item.get("status")
         item["status"] = "cancelled"
         cancelled_items.append(item)
 
+    now_iso = datetime.now(timezone.utc).isoformat()
     await db.orders.update_one(
         {"id": order_id},
         {"$set": {
             "items": cancelled_items,
             "status": "cancelled",
             "is_closed": True,
-            "closed_at": datetime.now(timezone.utc).isoformat()
+            "closed_at": now_iso,
+            "cancelled_at": now_iso,
+            "cancelled_by_id": current_user.get("id"),
+            "cancelled_by_name": current_user.get("name"),
+            "cancellation_reason": "Cancelado antes do preparo",
+            # Aviso de cancelado no KDS até cada tela dar "Ciente".
+            **kds_cancel.order_cancel_fields({"items": cancelled_items}),
         }}
     )
 
@@ -1665,6 +1688,7 @@ async def quick_cancel_order(order_id: str):
     await emit_staff('order_cancelled', {"order_id": order_id})
     await emit_orders('kitchen_update', await db.orders.find({"is_closed": False}, {"_id": 0}).to_list(100))
     await emit_orders('bar_update', await db.orders.find({"is_closed": False}, {"_id": 0}).to_list(100))
+    await emit_staff('kds_cancelled', {"order_id": order_id})
 
     return {"message": "Pedido cancelado com sucesso"}
 

@@ -35,7 +35,7 @@ import {
   SoundButton,
   TestOrderBand,
   UnlinkedItemBadge,
-  cancelNeedsAck,
+  pendingCancelKeys,
   pendingObservations,
   useCancelledOrders,
 } from '../components/KdsNotices';
@@ -220,9 +220,7 @@ export default function BarPage() {
     newOrderIds: pendingItems.map(item => itemKey(item)),
     pendingObsIds: visibleOrders.flatMap(order =>
       pendingObservations(order, STATION).map(obs => obs.id)),
-    pendingCancelIds: cancelled
-      .filter(order => cancelNeedsAck(order, STATION, isBarItem))
-      .map(order => order.id),
+    pendingCancelIds: pendingCancelKeys(cancelled, STATION, isBarItem),
     lateOrderIds: visibleOrders
       .filter(order => isLate(order, now))
       .map(order => String(order.id)),

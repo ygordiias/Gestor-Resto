@@ -16,17 +16,47 @@ export function pendingObservations(order, station) {
   return (order?.observations || []).filter(obs => !obs?.acks?.[station]);
 }
 
-export function cancelledItemsFor(order, itemFilter) {
-  return (order?.items || []).filter(item =>
-    itemFilter({ ...item, status: item.status_before_cancel || item.status }));
+/**
+ * Cancelados que esta tela ainda não confirmou, para qualquer pedido
+ * (salão, balcão, online, NostFood):
+ * - wholeOrder: o pedido inteiro foi cancelado (card inteiro cancelado);
+ * - items: itens desta tela cancelados (no pedido inteiro ou um a um).
+ */
+export function cancelledItemsFor(order, itemFilter, station) {
+  const wholeOrder = order?.status === 'cancelled' && !order?.cancel_acks?.[station];
+  const items = (order?.items || []).filter(item => {
+    const asOrdered = { ...item, status: item.status_before_cancel || item.status };
+    if (!itemFilter(asOrdered)) return false;
+    if (item.kds_item_cancel) {
+      // Cancelado um a um: fica até esta tela dar "Ciente".
+      return !!item.kds_ack_pending && !item.cancel_acks?.[station];
+    }
+    return wholeOrder && asOrdered.status !== 'cancelled';
+  });
+  return { wholeOrder: wholeOrder && items.length > 0, items };
 }
 
 export function cancelNeedsAck(order, station, itemFilter) {
-  return (
-    order?.status === 'cancelled' &&
-    !order?.cancel_acks?.[station] &&
-    cancelledItemsFor(order, itemFilter).length > 0
-  );
+  return cancelledItemsFor(order, itemFilter, station).items.length > 0;
+}
+
+// Chaves para o som de cancelado: pedido e cada item (item novo cancelado toca de novo).
+export function pendingCancelKeys(orders, station, itemFilter) {
+  return (orders || []).flatMap(order => {
+    const { wholeOrder, items } = cancelledItemsFor(order, itemFilter, station);
+    return [
+      ...(wholeOrder ? [String(order.id)] : []),
+      ...items.filter(item => item.kds_item_cancel).map(item => `${order.id}:${item.id}`),
+    ];
+  });
+}
+
+function orderTitle(order) {
+  if (order.external_order_number) return `Pedido ${orderDisplayLabel(order)}`;
+  const parts = [];
+  if (order.table_number != null) parts.push(`Mesa ${order.table_number}`);
+  if (order.tab_number != null) parts.push(`Comanda ${order.tab_number}`);
+  return parts.length ? parts.join(' · ') : 'Balcão';
 }
 
 function errorText(error, fallback) {
@@ -34,7 +64,7 @@ function errorText(error, fallback) {
   return typeof detail === 'string' ? detail : fallback;
 }
 
-// Pedidos cancelados pela plataforma que ainda esperam "Ciente".
+// Pedidos e itens cancelados (qualquer pedido) que ainda esperam "Ciente".
 export function useCancelledOrders() {
   const [cancelled, setCancelled] = useState([]);
   const mounted = useRef(false);
@@ -189,38 +219,53 @@ export function CancelledOrdersPanel({ orders, station, itemFilter, onAcked, dar
   return (
     <div className="space-y-2" data-testid="kds-cancelled-panel">
       <p className={`text-sm font-bold ${dark ? 'text-slate-300' : 'text-muted-foreground'}`}>
-        Pedidos cancelados — não preparar. Toque em “Ciente” para tirar da tela.
+        Cancelados — não preparar. Toque em “Ciente” para tirar da tela.
       </p>
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-        {list.map(order => (
+        {list.map(order => ({ order, view: cancelledItemsFor(order, itemFilter, station) })).map(({ order, view }) => (
           <div
             key={order.id}
             className="rounded-xl border-4 border-slate-500 bg-slate-700 text-slate-100 p-4 space-y-2"
             data-testid={`kds-cancelled-${order.id}`}
           >
             <div className="rounded bg-slate-950 text-white text-center py-2 text-lg font-black tracking-[0.3em]">
-              ✕ CANCELADO
+              {view.wholeOrder ? '✕ PEDIDO CANCELADO' : '✕ ITEM CANCELADO'}
             </div>
             <TestOrderBand order={order} />
-            <div className="opacity-60 space-y-1">
-              <p className="font-bold">
-                {order.external_order_number
-                  ? `Pedido ${orderDisplayLabel(order)}`
-                  : `Mesa ${order.table_number ?? '—'}`}
-                {order.customer_name ? ` · ${order.customer_name}` : ''}
-              </p>
-              {cancelledItemsFor(order, itemFilter).map(item => (
-                <p key={item.id} className="text-lg font-bold line-through">
-                  {item.quantity}× {item.product_name}
-                </p>
+            <p className="font-bold opacity-80">
+              {orderTitle(order)}
+              {order.customer_name ? ` · ${order.customer_name}` : ''}
+            </p>
+            <div className="space-y-2">
+              {view.items.map(item => (
+                <div key={item.id} className="opacity-60" data-testid="kds-cancelled-item">
+                  <p className="text-lg font-bold line-through">
+                    {item.quantity}× {item.product_name}
+                  </p>
+                  {item.kds_item_cancel && (
+                    <>
+                      <p className="text-xs font-black tracking-wider">✕ CANCELADO</p>
+                      <p className="text-sm">
+                        <span className="font-bold">Motivo:</span> {item.cancellation_reason || 'não informado'}
+                      </p>
+                      <p className="text-xs">
+                        Cancelado por {item.cancelled_by_name || '—'} · {formatDate(item.kds_cancel_at)}
+                      </p>
+                    </>
+                  )}
+                </div>
               ))}
             </div>
-            <p className="text-sm">
-              <span className="font-bold">Motivo:</span> {order.cancellation_reason || 'não informado'}
-            </p>
-            <p className="text-xs opacity-80">
-              Cancelado por {order.cancelled_by_name || '—'} · {formatDate(order.cancelled_at)}
-            </p>
+            {view.wholeOrder && (
+              <>
+                <p className="text-sm">
+                  <span className="font-bold">Motivo:</span> {order.cancellation_reason || 'não informado'}
+                </p>
+                <p className="text-xs opacity-80">
+                  Cancelado por {order.cancelled_by_name || '—'} · {formatDate(order.cancelled_at)}
+                </p>
+              </>
+            )}
             <button
               type="button"
               className="w-full min-h-12 rounded-md bg-white text-slate-900 font-black uppercase"
