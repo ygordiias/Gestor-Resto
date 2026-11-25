@@ -216,7 +216,7 @@ export default function BarPage() {
   const visibleOrders = [...new Map(barItems.map(item => [item.orderId, item._order])).values()];
   useKdsAlerts({
     ready: !loading,
-    soundOn: sound.running,
+    sound,
     newOrderIds: pendingItems.map(item => itemKey(item)),
     pendingObsIds: visibleOrders.flatMap(order =>
       pendingObservations(order, STATION).map(obs => obs.id)),

@@ -24,3 +24,6 @@ openpyxl==3.1.5
 
 # Integração NostFood (cliente HTTP assíncrono)
 httpx==0.28.1
+
+# Base de fusos horários (ZoneInfo "America/Sao_Paulo"); o Windows não traz uma
+tzdata==2025.2
