@@ -315,6 +315,35 @@ def _breakdown(details: dict, delivery_fee: float) -> dict:
     }
 
 
+def _display_code(raw: dict, details: dict) -> Optional[str]:
+    """Código curto que o app da plataforma mostra (ex.: 252001).
+
+    99: items.order_index. Pedido direto na NostFood: o próprio order_number, quando
+    curto. O ID longo (order_number "99-5764...") fica só para a API.
+    """
+    code = _pick(details, "order_index", "display_id", "short_id", "codigo",
+                 default=_pick(raw, "display_id", "short_id", "codigo_curto"))
+    if code is not None:
+        return str(code)
+    number = str(_pick(raw, "order_number", "numero", default="") or "")
+    if number and "-" not in number and len(number) <= 10:
+        return number
+    return None
+
+
+PLATFORM_SHORT_LABEL = {"99food": "99", "ifood": "iFood"}
+
+
+def display_label(order: dict) -> Optional[str]:
+    """Rótulo para telas, impressão e avisos: "99 #252001". Sem código curto, o número externo."""
+    code = order.get("external_display_code")
+    if code:
+        prefix = PLATFORM_SHORT_LABEL.get(order.get("external_origin_platform") or "", "NostFood")
+        return f"{prefix} #{code}"
+    number = order.get("external_order_number")
+    return f"#{number}" if number else None
+
+
 def normalize_order(raw: dict) -> dict:
     cliente = raw.get("cliente") if isinstance(raw.get("cliente"), dict) else {}
     customer = raw.get("customer") if isinstance(raw.get("customer"), dict) else {}
@@ -375,6 +404,7 @@ def normalize_order(raw: dict) -> dict:
                                    default=_pick(raw, "food99_order_id", "ifood_order_id")),
         "financials": _financials(details),
         "breakdown": _breakdown(details, delivery_fee),
+        "display_code": _display_code(raw, details),
         "created_at": _pick(raw, "created_at", "data", "data_pedido"),
         "cancel_reason": _pick(raw, "motivo", "reason", "cancellation_reason", "motivo_cancelamento"),
     }
@@ -416,7 +446,7 @@ async def pending_to_collect() -> list:
     rows = await S.db.orders.find(
         {"is_closed": False, "is_test": {"$ne": True}, "external_source": SOURCE,
          "payment_status": "to_collect", "status": {"$ne": "cancelled"}}, {"_id": 0}).to_list(200)
-    return [{"order_id": o["id"], "order_number": o.get("external_order_number"),
+    return [{"order_id": o["id"], "order_number": o.get("external_order_number"), "display_label": display_label(o),
              "customer_name": o.get("customer_name"), "total": o.get("total", 0),
              "payment_method": o.get("payment_method"), "created_at": o.get("created_at")}
             for o in sorted(rows, key=lambda o: o.get("created_at") or "")]
@@ -426,7 +456,7 @@ async def not_received_between(start_iso: str, end_iso: str) -> list:
     rows = await S.db.orders.find(
         {"external_source": SOURCE, "payment_status": "not_received",
          "closed_at": {"$gte": start_iso, "$lte": end_iso}}, {"_id": 0}).to_list(200)
-    return [{"order_id": o["id"], "order_number": o.get("external_order_number"),
+    return [{"order_id": o["id"], "order_number": o.get("external_order_number"), "display_label": display_label(o),
              "customer_name": o.get("customer_name"), "total": o.get("total", 0),
              "reason": (o.get("not_received") or {}).get("reason"),
              "by_name": (o.get("not_received") or {}).get("by_name")} for o in rows]
@@ -742,8 +772,9 @@ async def _register_unlinked(order: dict, unlinked_items: list):
             "type": "unlinked_item",
             "order_id": order["id"],
             "order_number": order.get("external_order_number"),
+            "display_label": display_label(order),
             "items": [i["product_name"] for i in unlinked_items],
-            "message": f"Pedido {order.get('external_order_number')}: item sem ligação ({names})",
+            "message": f"Pedido {display_label(order)}: item sem ligação ({names})",
         })
 
 
@@ -789,7 +820,7 @@ async def upsert_from_snapshot(raw: dict, origin: str, is_test: bool = False,
     existing = await _find_order(ext_id, norm["order_number"])
     if existing:
         if norm["status"] and existing.get("nostfood_status") != norm["status"]:
-            await S.db.orders.update_one({"id": existing["id"]}, {"$set": {"nostfood_status": norm["status"]}})
+            await apply_remote_status(existing, norm["status"])
         return "exists"
     if await S.db.nostfood_tombstones.find_one({"external_id": ext_id}, {"_id": 0}):
         return "ignored_cancelled"
@@ -838,6 +869,7 @@ async def upsert_from_snapshot(raw: dict, origin: str, is_test: bool = False,
             "external_created_at": norm["created_at"],
             "external_origin_platform": norm["origin_platform"],
             "external_platform_order_id": norm["platform_order_id"],
+            "external_display_code": norm["display_code"],
             "external_financials": norm["financials"],
             **norm["breakdown"],  # descontos e taxas da plataforma: só registro
             "customer_name": norm["customer_name"],
@@ -879,6 +911,32 @@ async def upsert_from_snapshot(raw: dict, origin: str, is_test: bool = False,
     })
     await _register_unlinked(order, unlinked)
     return "created"
+
+
+async def apply_remote_status(order: dict, remote_status: str) -> None:
+    """Status novo vindo da NostFood para um pedido que já existe no Gestor.
+
+    Sempre espelha nostfood_status. Se o pedido ficou pronto/saiu/entregue lá fora,
+    os itens ainda abertos são dados como entregues (com baixa de estoque) e, se
+    entregue e pago online, o pedido fecha como repasse pendente: não pode ficar
+    aberto no caixa. Cobrar na entrega continua aberto até o caixa receber.
+    Nunca envia nada para a NostFood.
+    """
+    await S.db.orders.update_one({"id": order["id"]}, {"$set": {"nostfood_status": remote_status}})
+    order["nostfood_status"] = remote_status
+    if (remote_status not in DONE_STATUSES or order.get("is_closed") or order.get("is_test")
+            or order.get("status") == "cancelled"
+            or remote_status in (order.get("nostfood_sent_statuses") or [])):  # eco do próprio Gestor
+        return
+    for item in order.get("items", []):
+        if item.get("status") not in ("delivered", "cancelled"):
+            item["status"] = "delivered"
+    order["status"] = "delivered"
+    await S.db.orders.update_one({"id": order["id"]}, {"$set": {"status": "delivered"}})
+    await _import_finished(order, remote_status)
+    logger.info(f"[NOSTFOOD] pedido {display_label(order)}: status {remote_status} na NostFood"
+                f"{' -> fechado (repasse pendente)' if order.get('is_closed') else ''}")
+    await _emit_kds()
 
 
 async def _import_finished(order: dict, remote_status: str):
@@ -925,7 +983,8 @@ async def cancel_external(external_id, order_number, reason, origin) -> str:
         await S.sio.emit("nostfood_alert", {
             "type": "cancelled_after_close", "order_id": order["id"],
             "order_number": order.get("external_order_number"),
-            "message": f"Pedido {order.get('external_order_number')} cancelado na NostFood depois de finalizado no Gestor",
+            "display_label": display_label(order),
+            "message": f"Pedido {display_label(order)} cancelado na NostFood depois de finalizado no Gestor",
         })
         return "cancelled_after_close"
 
@@ -1034,12 +1093,13 @@ async def handle_event(event: dict) -> str:
         reason = _pick(data, "motivo", "reason", "cancellation_reason", "motivo_cancelamento")
         return await cancel_external(ext_id, order_number, reason, "webhook")
 
-    full = data if isinstance(_pick(data, "items", "itens"), list) else None
+    full = data if (isinstance(_pick(data, "items", "itens"), list)
+                    or _raw_items(data, _order_details(data))) else None
     if full is None:
-        if await _find_order(ext_id, order_number):
-            if status:
-                o = await _find_order(ext_id, order_number)
-                await S.db.orders.update_one({"id": o["id"]}, {"$set": {"nostfood_status": status}})
+        o = await _find_order(ext_id, order_number)
+        if o:
+            if status and o.get("nostfood_status") != status:
+                await apply_remote_status(o, status)
             return "status_mirrored"
         full = await fetch_remote_order(ext_id, order_number)
         if full is None:
@@ -1347,28 +1407,37 @@ def build_router(require_role, UserRole) -> APIRouter:
             await S.db.nostfood_unlinked.delete_one({"nostfood_key": key})
 
         # Pedidos ainda abertos passam a seguir a regra normal (estação e estoque).
+        # Vale também para refazer uma ligação errada: itens já ligados a OUTRO produto
+        # são corrigidos, desde que ainda não tenham baixado estoque.
+        # Quantidade e preço são do item da NostFood e nunca mudam aqui.
         station_type = await _product_station_type(product)
         updated_orders = 0
+        kept_deducted = 0
         cursor = S.db.orders.find({"external_source": SOURCE, "is_closed": False}, {"_id": 0})
         for order in await cursor.to_list(500):
             changed = False
             for item in order.get("items", []):
-                if not item.get("unlinked"):
-                    continue
                 same_id = nf_id is not None and item.get("external_item_id") == nf_id
                 same_name = nf_name is not None and normalize_name(item.get("external_name")) == normalize_name(nf_name)
-                if same_id or same_name or item.get("nostfood_key") in keys:
-                    item.update({"product_id": product_id, "product_name": product.get("name"),
-                                 "type": station_type, "unlinked": False,
-                                 "stock_pending": False})
-                    item.pop("stock_pending_reason", None)
-                    changed = True
+                if not (same_id or same_name or item.get("nostfood_key") in keys):
+                    continue
+                if not item.get("unlinked") and item.get("product_id") == product_id:
+                    continue  # já está certo
+                if not item.get("unlinked") and item.get("stock_deducted"):
+                    kept_deducted += 1  # já baixou estoque do produto antigo: não mexe
+                    continue
+                item.update({"product_id": product_id, "product_name": product.get("name"),
+                             "type": station_type, "unlinked": False,
+                             "stock_pending": False})
+                item.pop("stock_pending_reason", None)
+                changed = True
             if changed:
                 await S.db.orders.update_one({"id": order["id"]}, {"$set": {"items": order["items"]}})
                 updated_orders += 1
         if updated_orders:
             await _emit_kds()
-        return {"message": "Produto ligado", "keys": keys, "open_orders_updated": updated_orders}
+        return {"message": "Produto ligado", "keys": keys, "open_orders_updated": updated_orders,
+                "kept_stock_deducted": kept_deducted}
 
     @router.post("/pedidos/{order_id}/observacao")
     async def add_observation(order_id: str, body: dict, current_user: dict = cash):

@@ -20,6 +20,24 @@ const PLATFORM_COLOR = {
   other: 'bg-slate-700 text-white',
 };
 
+// Rótulo curto do pedido, igual ao app da plataforma: "99 #252001".
+// O ID longo (external_order_number) fica só para a API; sem código curto, ele é o reserva.
+const SHORT_LABEL = { '99food': '99', ifood: 'iFood' };
+
+export function orderDisplayLabel(order) {
+  if (!order) return '';
+  if (order.external_display_code) {
+    const prefix = SHORT_LABEL[order.external_origin_platform] || 'NostFood';
+    return `${prefix} #${order.external_display_code}`;
+  }
+  return order.external_order_number ? `#${order.external_order_number}` : '';
+}
+
+// Plataforma para cor/rótulo: a de origem (99/iFood) quando a NostFood informar.
+function badgePlatform(order) {
+  return (order.external_origin_platform || order.platform || 'other').toLowerCase();
+}
+
 export function isOnlineOrder(order) {
   return !!(order && (order.source === 'online' || order.platform));
 }
@@ -41,10 +59,11 @@ export function owesCash(order) {
 
 export function OnlineOrderBadge({ order, size = 'md', className = '' }) {
   if (!isOnlineOrder(order)) return null;
-  const platform = (order.platform || 'other').toLowerCase();
-  const label = PLATFORM_LABEL[platform] || 'ONLINE';
+  const platform = badgePlatform(order);
   const color = PLATFORM_COLOR[platform] || PLATFORM_COLOR.other;
-  const num = order.external_order_number ? `#${order.external_order_number}` : '';
+  const code = order.external_display_code
+    ? orderDisplayLabel(order)
+    : `${PLATFORM_LABEL[platform] || 'ONLINE'}${order.external_order_number ? ` #${order.external_order_number}` : ''}`;
   const isDelivery = (order.delivery_type || '').toLowerCase() === 'delivery';
   const isPickup = ['pickup', 'retirada'].includes((order.delivery_type || '').toLowerCase());
   const fulfill = isDelivery ? 'DELIVERY' : isPickup ? 'RETIRADA' : '';
@@ -58,7 +77,7 @@ export function OnlineOrderBadge({ order, size = 'md', className = '' }) {
       <span className="flex items-center gap-1.5" data-testid="online-order-label">
         <span>ONLINE</span>
         <span>•</span>
-        <span>{label}{num && ` ${num}`}</span>
+        <span>{code}</span>
         {fulfill && <><span>•</span><span>{fulfill}</span></>}
       </span>
       {order.is_test && (
@@ -82,14 +101,28 @@ export function OnlineOrderBadge({ order, size = 'md', className = '' }) {
 
 export function OnlineOrderInlineSummary({ order }) {
   if (!isOnlineOrder(order)) return null;
-  const platform = (order.platform || 'other').toLowerCase();
-  const label = PLATFORM_LABEL[platform] || 'ONLINE';
-  const num = order.external_order_number ? `#${order.external_order_number}` : '';
+  const platform = badgePlatform(order);
+  const code = order.external_display_code
+    ? orderDisplayLabel(order)
+    : `${PLATFORM_LABEL[platform] || 'ONLINE'}${order.external_order_number ? ` #${order.external_order_number}` : ''}`;
   const isDelivery = (order.delivery_type || '').toLowerCase() === 'delivery';
   const fulfill = isDelivery ? 'Delivery' : 'Retirada';
   return (
     <span data-testid="online-order-summary" className="font-semibold">
-      {label}{num && ` ${num}`} — {fulfill}
+      {code} — {fulfill}
     </span>
   );
+}
+
+// Nome do item no Gestor; se a ligação apontar para um produto de nome diferente
+// do item da NostFood, mostra os dois (ligação errada fica visível).
+const plain = v => String(v || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
+
+export function itemDisplayName(item) {
+  if (!item) return '';
+  const name = item.product_name || item.external_name || '';
+  if (item.external_name && !item.unlinked && plain(item.external_name) !== plain(name)) {
+    return `${name} (NostFood: ${item.external_name})`;
+  }
+  return name;
 }

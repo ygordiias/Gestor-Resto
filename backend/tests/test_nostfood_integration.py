@@ -910,3 +910,127 @@ def test_old_list_format_gets_neutral_breakdown(env):
     o = orders(env)[0]
     assert o["discount_total"] == 0.0 and o["delivery_fee_gross"] == 5.0 and o["delivery_fee_net"] == 5.0
 
+
+# ==================== código curto do pedido ====================
+def test_display_code_99_uses_order_index(env):
+    norm = nf.normalize_order(real_order())
+    assert norm["display_code"] == "252001"
+    env.remote.append(real_order())
+    asyncio.run(nf.poll_once())
+    o = orders(env)[0]
+    assert o["external_display_code"] == "252001"
+    assert o["external_order_number"] == "99-5764700000000000001"  # ID longo continua para a API
+    assert nf.display_label(o) == "99 #252001"
+
+
+def test_display_code_direct_order_and_fallbacks():
+    direto = nf.normalize_order(real_order("pedido_direto"))
+    assert direto["display_code"] == "900002"
+    assert nf.display_label({"external_display_code": "900002", "external_origin_platform": None}) == "NostFood #900002"
+    assert nf.display_label({"external_display_code": "77", "external_origin_platform": "ifood"}) == "iFood #77"
+    # sem código curto: ID longo / número de simulação como reserva
+    assert nf.normalize_order({"order_number": "99-123", "items": []})["display_code"] is None
+    assert nf.display_label({"external_order_number": "SIM-AB12"}) == "#SIM-AB12"
+
+
+# ==================== itens depois de ligar o produto ====================
+def _items_view(order):
+    return [(i["external_name"], i["product_name"], i["quantity"], i["unit_price"], i["type"]) for i in order["items"]]
+
+
+def test_simulated_order_items_after_linking(env):
+    status, body = call("POST", f"{N}/simular", token=T_ADMIN)
+    assert status == 200
+    oid = body["order"]["id"]
+    for nf_id, name, pid in (("sim-sansao", "Sansão", "p-sansao"), ("sim-coca-lata", "Coca-Cola lata", "p-coca")):
+        assert call("POST", f"{N}/ligar-produto", token=T_ADMIN,
+                    body={"nostfood_id": nf_id, "nostfood_name": name, "product_id": pid})[0] == 200
+    o = next(x for x in env.db.orders.docs if x["id"] == oid)
+    assert _items_view(o) == [("Sansão", "Sansão", 1, 32.0, "food"),
+                              ("Coca-Cola lata", "Coca-Cola Lata", 2, 6.0, "drink")]
+    # próximo pedido simulado já chega ligado e igual
+    status, body = call("POST", f"{N}/simular", token=T_ADMIN)
+    assert _items_view(body["order"]) == _items_view(o)
+
+
+def test_wrong_link_can_be_redone_on_open_orders(env):
+    _, body = call("POST", f"{N}/simular", token=T_ADMIN)
+    oid = body["order"]["id"]
+    # ligação trocada (o que aconteceu no teste local)
+    call("POST", f"{N}/ligar-produto", token=T_ADMIN, body={"nostfood_id": "sim-sansao", "nostfood_name": "Sansão", "product_id": "p-coca"})
+    call("POST", f"{N}/ligar-produto", token=T_ADMIN, body={"nostfood_id": "sim-coca-lata", "nostfood_name": "Coca-Cola lata", "product_id": "p-sansao"})
+    o = next(x for x in env.db.orders.docs if x["id"] == oid)
+    assert _items_view(o)[0][:4] == ("Sansão", "Coca-Cola Lata", 1, 32.0)  # quantidade e preço são do item da NostFood
+    # refazer corrige o pedido aberto
+    s1, b1 = call("POST", f"{N}/ligar-produto", token=T_ADMIN, body={"nostfood_id": "sim-sansao", "nostfood_name": "Sansão", "product_id": "p-sansao"})
+    s2, b2 = call("POST", f"{N}/ligar-produto", token=T_ADMIN, body={"nostfood_id": "sim-coca-lata", "nostfood_name": "Coca-Cola lata", "product_id": "p-coca"})
+    assert s1 == s2 == 200 and b1["open_orders_updated"] == 1 and b2["open_orders_updated"] == 1
+    o = next(x for x in env.db.orders.docs if x["id"] == oid)
+    assert _items_view(o) == [("Sansão", "Sansão", 1, 32.0, "food"),
+                              ("Coca-Cola lata", "Coca-Cola Lata", 2, 6.0, "drink")]
+
+
+def test_relink_keeps_items_that_already_deducted_stock(env):
+    env.db.nostfood_product_map.docs += [{"nostfood_key": "name:sansao", "product_id": "p-coca"},
+                                         {"nostfood_key": "id:11", "product_id": "p-coca"}]
+    send_event("order.created", remote_order(), event_id="e1")
+    o = orders(env)[0]
+    o["items"][0]["stock_deducted"] = True
+    _, body = call("POST", f"{N}/ligar-produto", token=T_ADMIN, body={"nostfood_id": "11", "nostfood_name": "Sansão", "product_id": "p-sansao"})
+    assert body["kept_stock_deducted"] == 1 and orders(env)[0]["items"][0]["product_id"] == "p-coca"
+
+
+# ==================== status da NostFood em pedido já importado ====================
+def test_paid_online_order_closes_when_delivered_on_nostfood(env):
+    link_all(env)
+    env.remote.append(remote_order(status="saiu_entrega"))
+    asyncio.run(nf.poll_once())
+    o = orders(env)[0]
+    assert o["is_closed"] is False  # saiu para entrega: ainda aberto
+    env.remote[:] = [remote_order(status="entregue")]
+    asyncio.run(nf.poll_once())
+    o = orders(env)[0]
+    assert o["is_closed"] is True and o["status"] == "delivered" and o["nostfood_status"] == "entregue"
+    assert o["settlement_status"] == "pending_platform"
+    assert all(i["status"] == "delivered" for i in o["items"])
+
+
+def test_pending_order_delivered_outside_gestor_closes_and_deducts_stock(env):
+    link_all(env)
+    env.remote.append(remote_order(status="aprovado"))
+    asyncio.run(nf.poll_once())
+    assert orders(env)[0]["items"][0]["status"] == "pending"
+    send_event("order.updated", {"order_number": "PED-498", "status": "entregue"}, event_id="evt_upd")
+    o = orders(env)[0]
+    assert o["is_closed"] is True and all(i["status"] == "delivered" for i in o["items"])
+    assert stock(env, "s-pao") == 9 and stock(env, "s-coca") == 22  # baixa de estoque feita
+    assert env.sent == []  # nunca envia nada para a NostFood
+
+
+def test_collect_on_delivery_stays_open_when_delivered(env):
+    link_all(env)
+    env.remote.append(remote_order(payment="dinheiro", status="aprovado"))
+    asyncio.run(nf.poll_once())
+    env.remote[:] = [remote_order(payment="dinheiro", status="entregue")]
+    asyncio.run(nf.poll_once())
+    o = orders(env)[0]
+    assert o["is_closed"] is False and o["payment_status"] == "to_collect"  # caixa ainda recebe
+
+
+def test_own_status_echo_does_not_touch_items(env):
+    link_all(env)
+    env.remote.append(remote_order(status="aprovado"))
+    asyncio.run(nf.poll_once())
+    o = orders(env)[0]
+    env.db.orders.docs[env.db.orders.docs.index(o)]["nostfood_sent_statuses"] = ["em_preparo", "pronto"]
+    env.remote[:] = [remote_order(status="pronto")]
+    asyncio.run(nf.poll_once())
+    o = orders(env)[0]
+    assert o["nostfood_status"] == "pronto" and o["is_closed"] is False
+    assert all(i["status"] == "pending" for i in o["items"])
+
+
+def test_webhook_with_real_format_is_full_snapshot(env):
+    send_event("order.created", real_order(), event_id="evt_real", resource_id="900001")
+    o = orders(env)[0]
+    assert len(o["items"]) == 2 and o["external_display_code"] == "252001"

@@ -23,6 +23,8 @@ import socketService from '../lib/socket';
 import { toast } from 'sonner';
 import {
   OnlineOrderBadge,
+  orderDisplayLabel,
+  itemDisplayName,
   isOnlineOrder,
   isCollectOnDelivery,
   isPlatformSettled,
@@ -87,7 +89,7 @@ function printPreBill(order, paperWidth = '80') {
       ? `Comanda ${order.tab_number} / Mesa ${order.table_number ?? '-'}`
       : order.table_number != null
         ? `Mesa ${order.table_number}`
-        : `Pedido ${order.external_order_number || order.id}`;
+        : `Pedido ${orderDisplayLabel(order) || order.id}`;
 
   const items = (order.items || []).filter(
     (item) => item.status !== 'cancelled'
@@ -97,7 +99,7 @@ function printPreBill(order, paperWidth = '80') {
     <tr>
       <td>
         ${escapeReceipt(item.quantity)}x
-        ${escapeReceipt(item.product_name)}
+        ${escapeReceipt(itemDisplayName(item))}
       </td>
       <td class="right">
         ${escapeReceipt(
@@ -697,7 +699,7 @@ export default function CashierPage() {
     if (collect.length) {
       toast.error(
         'Pedidos a cobrar na entrega ainda pendentes: ' +
-        collect.map(o => `${o.external_order_number} (${formatCurrency(o.total)})`).join(', ') +
+        collect.map(o => `${orderDisplayLabel(o)} (${formatCurrency(o.total)})`).join(', ') +
         '. Receba o pagamento ou, se o cliente não pagou, um admin marca "Não recebido".',
         { duration: 10000 }
       );
@@ -1042,7 +1044,7 @@ export default function CashierPage() {
     if (!term) return true;
     return [order.tab_number != null ? String(order.tab_number) : '',
       order.table_number != null ? String(order.table_number) : '',
-      order.external_order_number || '', order.waiter_name || '']
+      order.external_order_number || '', orderDisplayLabel(order), order.waiter_name || '']
       .some(value => String(value).toLowerCase().includes(term));
   });
 
@@ -1261,7 +1263,7 @@ export default function CashierPage() {
                                 className="flex justify-between gap-2 text-xs sm:text-sm"
                               >
                                 <span className="truncate">
-                                  {item.quantity}x {item.product_name}
+                                  {item.quantity}x {itemDisplayName(item)}
                                 </span>
                                 <span>
                                   {formatCurrency(item.unit_price * item.quantity)}
@@ -1337,7 +1339,7 @@ export default function CashierPage() {
                         >
                           <span className="flex-1 min-w-0">
                             <span className="block truncate">
-                              {item.quantity}x {item.product_name}
+                              {item.quantity}x {itemDisplayName(item)}
                             </span>
                             {item.notes && (
                               <span className="block text-[11px] text-muted-foreground">
@@ -1414,7 +1416,7 @@ export default function CashierPage() {
                   {selectedOrder.external_source === 'nostfood' && (
                     <div className="rounded border p-3 text-xs sm:text-sm space-y-1" data-testid="cashier-delivery-info">
                       <p className="font-bold">
-                        Pedido {selectedOrder.external_order_number}
+                        Pedido {orderDisplayLabel(selectedOrder)}
                         {selectedOrder.customer_name ? ` · ${selectedOrder.customer_name}` : ''}
                       </p>
                       {selectedOrder.customer_phone && <p>Telefone: {selectedOrder.customer_phone}</p>}
@@ -1436,7 +1438,7 @@ export default function CashierPage() {
                       disabled={closingOrder}
                       onClick={async () => {
                         const reason = window.prompt(
-                          `Pedido ${selectedOrder.external_order_number}: o cliente não pagou?\n` +
+                          `Pedido ${orderDisplayLabel(selectedOrder)}: o cliente não pagou?\n` +
                           'Informe o motivo (obrigatório). O pedido sai do caixa e não conta como venda.',
                           ''
                         );
@@ -1804,7 +1806,7 @@ export default function CashierPage() {
                             onClick={() => selectOrder(o)}
                           >
                             <span className="truncate">
-                              {o.external_order_number} · {o.customer_name || 'cliente'} · {o.payment_method}
+                              {orderDisplayLabel(o)} · {o.customer_name || 'cliente'} · {o.payment_method}
                             </span>
                             <span className="font-bold shrink-0">{formatCurrency(o.total)}</span>
                           </button>

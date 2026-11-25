@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { ordersAPI } from '../lib/api';
 import socketService from '../lib/socket';
-import { isOnlineOrder } from '../components/OnlineOrderBadge';
+import { isOnlineOrder, orderDisplayLabel } from '../components/OnlineOrderBadge';
 import { useKdsSound, useKdsAlerts } from '../lib/kdsSound';
 import {
   CancelledOrdersPanel,
@@ -291,7 +291,7 @@ export default function GrillPage() {
                           </p>
 
                           <p className="text-sm">
-                            Pedido: {order.external_order_number || order.external_order_id || order.id?.slice(0, 8)}
+                            Pedido: {orderDisplayLabel(order) || order.external_order_id || order.id?.slice(0, 8)}
                           </p>
                         </>
                       ) : (

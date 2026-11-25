@@ -4,6 +4,7 @@ import { Volume2, VolumeX } from 'lucide-react';
 import { kdsAPI } from '../lib/api';
 import socketService from '../lib/socket';
 import { formatDate } from '../lib/utils';
+import { orderDisplayLabel } from './OnlineOrderBadge';
 
 /**
  * Avisos comuns do KDS (Cozinha, Bar e Churrasqueira):
@@ -206,7 +207,7 @@ export function CancelledOrdersPanel({ orders, station, itemFilter, onAcked, dar
             <div className="opacity-60 space-y-1">
               <p className="font-bold">
                 {order.external_order_number
-                  ? `Pedido ${order.external_order_number}`
+                  ? `Pedido ${orderDisplayLabel(order)}`
                   : `Mesa ${order.table_number ?? '—'}`}
                 {order.customer_name ? ` · ${order.customer_name}` : ''}
               </p>
