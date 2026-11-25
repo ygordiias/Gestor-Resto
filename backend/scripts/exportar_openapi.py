@@ -4,7 +4,8 @@
 
 Não conecta em banco: MONGO_URL aponta para um endereço inexistente só
 durante o import (o driver só conecta quando usado e o startup não roda).
-SECRET_KEY é gerada na hora e descartada. Nenhum segredo é lido ou gravado.
+SECRET_KEY é gerada na hora e descartada, e CORS_ORIGINS recebe um valor
+só para a exportação. Nenhum segredo é lido ou gravado.
 
 Uso (a partir da raiz do repositório):
     python backend/scripts/exportar_openapi.py
@@ -25,6 +26,8 @@ def carregar_app():
     os.environ["MONGO_URL"] = "mongodb://127.0.0.1:1"
     os.environ["DB_NAME"] = "exportar_openapi"
     os.environ["SECRET_KEY"] = secrets.token_urlsafe(48)
+    # Obrigatória para o server.py subir; só vale durante a exportação.
+    os.environ["CORS_ORIGINS"] = "http://localhost:3000"
     sys.path.insert(0, str(BACKEND))
     import server  # noqa: E402
 

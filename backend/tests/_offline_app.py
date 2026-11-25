@@ -3,7 +3,7 @@ chama o ASGI direto, sem rede e sem httpx.
 
 - MONGO_URL aponta para um endereço inexistente só durante o import
   (o driver só conecta quando usado; o startup não é executado).
-- SECRET_KEY de teste gerada na hora.
+- SECRET_KEY de teste gerada na hora; CORS_ORIGINS de teste fixa.
 - Cada teste troca server.db por um banco falso (use monkeypatch).
 """
 import asyncio
@@ -14,9 +14,10 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-_saved_env = {k: os.environ.get(k) for k in ("MONGO_URL", "DB_NAME", "SECRET_KEY")}
+_saved_env = {k: os.environ.get(k) for k in ("MONGO_URL", "DB_NAME", "SECRET_KEY", "CORS_ORIGINS")}
 os.environ["MONGO_URL"] = "mongodb://127.0.0.1:1"
 os.environ["DB_NAME"] = "teste_offline"
+os.environ["CORS_ORIGINS"] = "http://frontend-teste.example,http://localhost:3000"
 os.environ.setdefault("SECRET_KEY", secrets.token_urlsafe(48))
 if len(os.environ["SECRET_KEY"]) < 32:
     os.environ["SECRET_KEY"] = secrets.token_urlsafe(48)
@@ -29,11 +30,15 @@ for _k, _v in _saved_env.items():
         os.environ[_k] = _v
 
 
-def call(method, path, token=None, body=None):
-    """Executa uma requisição no app ASGI. Devolve (status, json_ou_None)."""
+def call(method, path, token=None, body=None, headers=None, with_headers=False):
+    """Executa uma requisição no app ASGI. Devolve (status, json_ou_None) ou,
+    com with_headers=True, (status, json_ou_None, {cabeçalho: valor})."""
+    extra = headers or {}
     headers = [(b"content-type", b"application/json")]
     if token:
         headers.append((b"authorization", f"Bearer {token}".encode()))
+    for k, v in extra.items():
+        headers.append((k.lower().encode(), v.encode()))
     raw = json.dumps(body if body is not None else {}).encode()
     scope = {
         "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
@@ -53,6 +58,7 @@ def call(method, path, token=None, body=None):
     async def send(message):
         if message["type"] == "http.response.start":
             result["status"] = message["status"]
+            result["headers"] = {k.decode().lower(): v.decode() for k, v in message.get("headers", [])}
         elif message["type"] == "http.response.body":
             result["body"] += message.get("body", b"")
 
@@ -61,6 +67,8 @@ def call(method, path, token=None, body=None):
         data = json.loads(result["body"] or b"null")
     except ValueError:
         data = None
+    if with_headers:
+        return result["status"], data, result.get("headers", {})
     return result["status"], data
 
 
