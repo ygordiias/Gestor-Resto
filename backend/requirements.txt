@@ -21,3 +21,9 @@ python-socketio==5.16.0
 python-engineio==4.13.0
 
 openpyxl==3.1.5
+
+# Integração NostFood (cliente HTTP assíncrono)
+httpx==0.28.1
+
+# Base de fusos horários (ZoneInfo "America/Sao_Paulo"); o Windows não traz uma
+tzdata==2025.2

@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import Layout from '../components/Layout';
 import FinancialModulesPanel from '../components/FinancialModulesPanel';
+import PlatformTotals, { hasPlatformBreakdown } from '../components/PlatformTotals';
+import AddObservationDialog from '../components/AddObservationDialog';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
@@ -16,11 +18,20 @@ import {
   DialogDescription,
   DialogFooter,
 } from '../components/ui/dialog';
-import { ordersAPI, cashRegisterAPI, tablesAPI, invoicesAPI, productsAPI } from '../lib/api';
+import { ordersAPI, cashRegisterAPI, tablesAPI, invoicesAPI, productsAPI, nostfoodAPI } from '../lib/api';
 import { cn, formatCurrency, formatDate } from '../lib/utils';
 import socketService from '../lib/socket';
 import { toast } from 'sonner';
-import { OnlineOrderBadge, isOnlineOrder } from '../components/OnlineOrderBadge';
+import {
+  OnlineOrderBadge,
+  orderDisplayLabel,
+  itemDisplayName,
+  isOnlineOrder,
+  isCollectOnDelivery,
+  isPlatformSettled,
+  owesCash,
+} from '../components/OnlineOrderBadge';
+import { useAuth } from '../contexts/AuthContext';
 import {
   CreditCard,
   Receipt,
@@ -79,17 +90,39 @@ function printPreBill(order, paperWidth = '80') {
       ? `Comanda ${order.tab_number} / Mesa ${order.table_number ?? '-'}`
       : order.table_number != null
         ? `Mesa ${order.table_number}`
-        : `Pedido ${order.external_order_number || order.id}`;
+        : `Pedido ${orderDisplayLabel(order) || order.id}`;
 
   const items = (order.items || []).filter(
     (item) => item.status !== 'cancelled'
   );
 
+  // Observações novas (KDS): as de um item saem embaixo dele; as do pedido
+  // inteiro (ou de item que não aparece aqui) saem num bloco próprio.
+  const observations = order.observations || [];
+  const printedIds = new Set(items.map(item => item.id));
+  const observationLine = (obs) => {
+    const when = obs.created_at
+      ? new Date(obs.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+      : '';
+    const who = [obs.author_name, when].filter(Boolean).join(', ');
+    return `${escapeReceipt(obs.text)}${who ? ` (${escapeReceipt(who)})` : ''}`;
+  };
+  const itemObservations = (item) => observations
+    .filter(obs => obs.item_id === item.id)
+    .map(obs => `<tr><td colspan="2" class="note">Observação: ${observationLine(obs)}</td></tr>`)
+    .join('');
+  const orderObservations = observations.filter(obs => !obs.item_id || !printedIds.has(obs.item_id));
+  const orderObservationsHtml = orderObservations.length
+    ? `<div class="line"></div><p><strong>OBSERVAÇÕES</strong></p>${orderObservations
+      .map(obs => `<div class="note">${obs.item_name ? `${escapeReceipt(obs.item_name)}: ` : ''}${observationLine(obs)}</div>`)
+      .join('')}`
+    : '';
+
   const rows = items.map((item) => `
     <tr>
       <td>
         ${escapeReceipt(item.quantity)}x
-        ${escapeReceipt(item.product_name)}
+        ${escapeReceipt(itemDisplayName(item))}
       </td>
       <td class="right">
         ${escapeReceipt(
@@ -109,6 +142,7 @@ function printPreBill(order, paperWidth = '80') {
           </tr>`
         : ''
     }
+    ${itemObservations(item)}
   `).join('');
 
   const html = `
@@ -207,6 +241,7 @@ function printPreBill(order, paperWidth = '80') {
         <table>
           ${rows}
         </table>
+        ${orderObservationsHtml}
 
         <div class="line"></div>
 
@@ -525,6 +560,8 @@ function PaymentRow({ payment, index, onUpdate, onRemove, canRemove }) {
 }
 
 export default function CashierPage() {
+  const { user } = useAuth();
+  const isAdmin = ['admin', 'superadmin'].includes(user?.role);
   const [orders, setOrders] = useState([]);
     // Configuração da impressora térmica
   const [paperWidth, setPaperWidth] = useState(() => {
@@ -537,6 +574,7 @@ export default function CashierPage() {
   const [tables, setTables] = useState([]);
   const [register, setRegister] = useState(null);
   const [selectedOrderId, setSelectedOrderId] = useState(null);
+  const [observationOpen, setObservationOpen] = useState(false);
   const [orderSearch, setOrderSearch] = useState('');
   const [closingOrder, setClosingOrder] = useState(false);
   const [payments, setPayments] = useState([]);
@@ -683,7 +721,17 @@ export default function CashierPage() {
   // O primeiro clique em "Fechar Caixa" SOMENTE abre a prévia para impressão.
   const handleCloseRegister = async () => {
     if (closeFlowBusy || previewLoading) return;
-    if (orders.some(order => !isOnlineOrder(order))) {
+    const collect = orders.filter(owesCash);
+    if (collect.length) {
+      toast.error(
+        'Pedidos a cobrar na entrega ainda pendentes: ' +
+        collect.map(o => `${orderDisplayLabel(o)} (${formatCurrency(o.total)})`).join(', ') +
+        '. Receba o pagamento ou, se o cliente não pagou, um admin marca "Não recebido".',
+        { duration: 10000 }
+      );
+      return;
+    }
+    if (orders.some(order => !isOnlineOrder(order) && !order.is_test)) {
       toast.error('Finalize as comandas presenciais antes de fechar o caixa.');
       return;
     }
@@ -864,7 +912,7 @@ export default function CashierPage() {
       const handleCloseOrder = async () => {
   if (!selectedOrder || closingOrder) return;
 
-  if (isOnlineOrder(selectedOrder)) {
+  if (isPlatformSettled(selectedOrder)) {
   setClosingOrder(true);
 
   try {
@@ -1022,7 +1070,7 @@ export default function CashierPage() {
     if (!term) return true;
     return [order.tab_number != null ? String(order.tab_number) : '',
       order.table_number != null ? String(order.table_number) : '',
-      order.external_order_number || '', order.waiter_name || '']
+      order.external_order_number || '', orderDisplayLabel(order), order.waiter_name || '']
       .some(value => String(value).toLowerCase().includes(term));
   });
 
@@ -1241,7 +1289,7 @@ export default function CashierPage() {
                                 className="flex justify-between gap-2 text-xs sm:text-sm"
                               >
                                 <span className="truncate">
-                                  {item.quantity}x {item.product_name}
+                                  {item.quantity}x {itemDisplayName(item)}
                                 </span>
                                 <span>
                                   {formatCurrency(item.unit_price * item.quantity)}
@@ -1255,6 +1303,14 @@ export default function CashierPage() {
                             )}
                           </div>
 
+                          {Number(order.discount_total) > 0 && (
+                            <p className="pt-2 border-t text-xs text-muted-foreground" data-testid="order-card-discount">
+                              Subtotal {formatCurrency(order.subtotal)}
+                              {' · '}Desconto −{formatCurrency(order.discount_total)}
+                              {Number(order.delivery_fee_gross) > 0 && ` · Entrega +${formatCurrency(order.delivery_fee_gross)}`}
+                              {Number(order.platform_service_fee) > 0 && ` · Taxa +${formatCurrency(order.platform_service_fee)}`}
+                            </p>
+                          )}
                           <div className="pt-2 border-t flex justify-between items-center">
                             <span className="font-medium text-sm">Total:</span>
                             <span className="text-base sm:text-lg font-bold text-primary">
@@ -1309,11 +1365,16 @@ export default function CashierPage() {
                         >
                           <span className="flex-1 min-w-0">
                             <span className="block truncate">
-                              {item.quantity}x {item.product_name}
+                              {item.quantity}x {itemDisplayName(item)}
                             </span>
                             {item.notes && (
                               <span className="block text-[11px] text-muted-foreground">
                                 Obs.: {item.notes}
+                              </span>
+                            )}
+                            {item.unlinked && (
+                              <span className="block text-[10px] font-bold text-fuchsia-700">
+                                ITEM SEM LIGAÇÃO (ligue em Configurações › NostFood)
                               </span>
                             )}
                             {isCancelled && (
@@ -1349,6 +1410,9 @@ export default function CashierPage() {
                   </ScrollArea>
 
                   {/* Totais */}
+                  {hasPlatformBreakdown(selectedOrder) ? (
+                    <PlatformTotals order={selectedOrder} />
+                  ) : (
                   <div className="space-y-1 sm:space-y-2 border-t pt-2">
                     <div className="flex justify-between text-xs sm:text-sm">
                       <span>Subtotal:</span>
@@ -1360,6 +1424,12 @@ export default function CashierPage() {
                       </span>
                       <span>{formatCurrency(selectedOrder.service_fee)}</span>
                     </div>
+                    {Number(selectedOrder.delivery_fee) > 0 && (
+                      <div className="flex justify-between text-xs sm:text-sm">
+                        <span>Taxa de entrega:</span>
+                        <span>{formatCurrency(selectedOrder.delivery_fee)}</span>
+                      </div>
+                    )}
                     <div className="flex justify-between font-bold text-base sm:text-lg">
                       <span>Total:</span>
                       <span className="text-primary">
@@ -1367,8 +1437,75 @@ export default function CashierPage() {
                       </span>
                     </div>
                   </div>
+                  )}
 
-                  {isOnlineOrder(selectedOrder) ? (
+                  {selectedOrder.external_source === 'nostfood' && (
+                    <div className="rounded border p-3 text-xs sm:text-sm space-y-1" data-testid="cashier-delivery-info">
+                      <p className="font-bold">
+                        Pedido {orderDisplayLabel(selectedOrder)}
+                        {selectedOrder.customer_name ? ` · ${selectedOrder.customer_name}` : ''}
+                      </p>
+                      {selectedOrder.customer_phone && <p>Telefone: {selectedOrder.customer_phone}</p>}
+                      {selectedOrder.address && <p>Endereço: {selectedOrder.address}</p>}
+                      <p>
+                        Pagamento: {selectedOrder.payment_method || 'não informado'} ·{' '}
+                        <strong>
+                          {isCollectOnDelivery(selectedOrder) ? 'COBRAR NA ENTREGA' : 'PAGO ONLINE (repasse)'}
+                        </strong>
+                      </p>
+                    </div>
+                  )}
+
+                  {isAdmin && owesCash(selectedOrder) && !selectedOrder.is_closed && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="w-full border-destructive text-destructive hover:bg-destructive/10"
+                      disabled={closingOrder}
+                      onClick={async () => {
+                        const reason = window.prompt(
+                          `Pedido ${orderDisplayLabel(selectedOrder)}: o cliente não pagou?\n` +
+                          'Informe o motivo (obrigatório). O pedido sai do caixa e não conta como venda.',
+                          ''
+                        );
+                        if (!reason || !reason.trim()) return;
+                        try {
+                          await nostfoodAPI.notReceived(selectedOrder.id, reason.trim());
+                          toast.success('Pedido marcado como não recebido');
+                          clearSelection();
+                          await fetchData();
+                        } catch (e) {
+                          const detail = e?.response?.data?.detail;
+                          toast.error(typeof detail === 'string' ? detail : 'Erro ao marcar como não recebido');
+                        }
+                      }}
+                      data-testid="not-received-btn"
+                    >
+                      Não recebido (cliente não pagou)
+                    </Button>
+                  )}
+
+                  {!selectedOrder.is_closed && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="w-full border-yellow-500 text-yellow-700 hover:bg-yellow-500/10"
+                      onClick={() => setObservationOpen(true)}
+                      data-testid="add-observation-btn"
+                    >
+                      📢 Adicionar observação (cozinha/bar)
+                    </Button>
+                  )}
+                  {!selectedOrder.is_closed && (
+                    <AddObservationDialog
+                      order={selectedOrder}
+                      open={observationOpen}
+                      onOpenChange={setObservationOpen}
+                      onSent={fetchData}
+                    />
+                  )}
+
+                  {isPlatformSettled(selectedOrder) ? (
                     <div className="rounded border border-blue-500/30 bg-blue-500/5 p-3 text-sm">
                       <strong>Pagamento via plataforma</strong>
                       <p>Valor bruto: {formatCurrency(selectedOrder.total)}</p>
@@ -1471,7 +1608,7 @@ export default function CashierPage() {
                     onClick={handleCloseOrder}
                     disabled={
                       closingOrder ||
-                      (!isOnlineOrder(selectedOrder) &&
+                      (!isPlatformSettled(selectedOrder) &&
                         getTotalPayments + 0.001 < selectedOrder.total)
                     }
                     data-testid="close-order-btn"
@@ -1479,9 +1616,11 @@ export default function CashierPage() {
                     <Receipt className="h-4 w-4 mr-2" />
                     {closingOrder
                       ? 'Finalizando...'
-                      : isOnlineOrder(selectedOrder)
+                      : isPlatformSettled(selectedOrder)
                         ? 'Finalizar Pedido Online — Aguardando Repasse'
-                        : 'Fechar Comanda'}
+                        : isCollectOnDelivery(selectedOrder)
+                          ? 'Receber na Entrega e Fechar'
+                          : 'Fechar Comanda'}
                   </Button>
 
                   {/* Cortesia / Permuta */}
@@ -1676,6 +1815,30 @@ export default function CashierPage() {
                       <Receipt className="h-4 w-4 mr-2" />
                       Reimprimir último fechamento
                     </Button>
+
+                    {/* NostFood: a cobrar na entrega ainda pendentes (bloqueiam o fechamento) */}
+                    {orders.filter(owesCash).length > 0 && (
+                      <div className="rounded border border-amber-500 bg-amber-500/10 p-3 text-xs sm:text-sm space-y-1"
+                        data-testid="pending-to-collect">
+                        <p className="font-bold">A cobrar na entrega (pendentes)</p>
+                        {orders.filter(owesCash).map(o => (
+                          <button
+                            key={o.id}
+                            type="button"
+                            className="w-full flex justify-between gap-2 text-left hover:underline"
+                            onClick={() => selectOrder(o)}
+                          >
+                            <span className="truncate">
+                              {orderDisplayLabel(o)} · {o.customer_name || 'cliente'} · {o.payment_method}
+                            </span>
+                            <span className="font-bold shrink-0">{formatCurrency(o.total)}</span>
+                          </button>
+                        ))}
+                        <p className="text-muted-foreground">
+                          O caixa só fecha depois de receber ou marcar “Não recebido”.
+                        </p>
+                      </div>
+                    )}
 
                     {/* Fechamento definitivo do caixa */}
                     <Button

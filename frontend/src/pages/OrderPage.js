@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, useLocation, useNavigate } from 'react-router-dom';
 import Layout from '../components/Layout';
+import AddObservationDialog, { observableItems } from '../components/AddObservationDialog';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
@@ -49,6 +50,7 @@ export default function OrderPage() {
   const [linkingTab, setLinkingTab] = useState(false);
   const [tabRange, setTabRange] = useState(null); // {min, max} vindo do servidor
   const [notesDialog, setNotesDialog] = useState(null);
+  const [observationOpen, setObservationOpen] = useState(false);
   const [draftNotes, setDraftNotes] = useState('');
   const selectedTabRef = useRef('traditional');
   const cartRef = useRef([]);
@@ -527,6 +529,39 @@ export default function OrderPage() {
                       <span className="text-muted-foreground">Total: </span>
                       <span className="font-bold">{formatCurrency(currentOrder.total)}</span>
                     </div>
+                    {(currentOrder.observations || []).length > 0 && (
+                      <div className="space-y-1" data-testid="order-observations">
+                        {currentOrder.observations.map(obs => {
+                          const seen = Object.keys(obs.acks || {})
+                            .map(station => ({ kitchen: 'cozinha', bar: 'bar', grill: 'chapa' }[station] || station));
+                          return (
+                            <p key={obs.id} className="text-xs rounded bg-yellow-100 text-slate-900 px-2 py-1">
+                              📢 {obs.item_name ? `${obs.item_name}: ` : ''}{obs.text}
+                              <span className="text-slate-600">
+                                {' · '}{seen.length ? `visto: ${seen.join(', ')}` : 'aguardando ciente'}
+                              </span>
+                            </p>
+                          );
+                        })}
+                      </div>
+                    )}
+                    {!currentOrder.is_closed && observableItems(currentOrder).length > 0 && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="w-full border-yellow-500 text-yellow-700 hover:bg-yellow-500/10"
+                        onClick={() => setObservationOpen(true)}
+                        data-testid="order-add-observation-btn"
+                      >
+                        📢 Adicionar observação
+                      </Button>
+                    )}
+                    <AddObservationDialog
+                      order={currentOrder}
+                      open={observationOpen}
+                      onOpenChange={setObservationOpen}
+                      onSent={fetchTableOrders}
+                    />
                   </div>
                 )}
 

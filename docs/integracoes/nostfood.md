@@ -1,9 +1,63 @@
 # Integração NostFood (pedidos do iFood e da 99)
 
-> **Situação:** a integração **não está na `main`**. Está na branch `feat/integracao-nostfood`, em desenvolvimento.
-> Este documento foi escrito lendo o código, sem executá-lo, no commit `2db0dc8` ("lê itens e valores do formato real do pedidos.php"). Esse commit existe na branch local e ainda não foi enviado para `origin/feat/integracao-nostfood` (que está em `a9aa556` e ainda lê o formato antigo, com `items` como lista). Arquivo principal: `backend/nostfood_integration.py`. Exemplo real anonimizado: `backend/tests/fixtures/nostfood_pedidos_reais.json`.
+> Branch `feat/integracao-nostfood`. Arquivo principal: `backend/nostfood_integration.py`. Testes: `backend/tests/test_nostfood_integration.py` e `backend/tests/test_nostfood_security.py`. Exemplo real anonimizado: `backend/tests/fixtures/nostfood_pedidos_reais.json`.
 
 A NostFood junta os pedidos do iFood e da 99Food (e os pedidos feitos direto nela) e os entrega ao Gestor. O Gestor não fala direto com o iFood nem com a 99 nesta integração. Para a homologação direta com o iFood, veja [ifood-preparacao.md](ifood-preparacao.md).
+
+## Que dados saem e entram
+
+### Saídas: do Gestor para a NostFood
+
+Toda chamada HTTP para a NostFood passa por uma única função, `nostfood_request()`, com
+uma lista fixa (allowlist) de rotas e campos (`OUTBOUND_ALLOWLIST`). Qualquer outra rota,
+parâmetro ou campo é recusado antes de sair (`OutboundBlocked`) e registrado no log como
+`[NOSTFOOD][SAÍDA BLOQUEADA]`. Nenhum outro trecho do backend faz chamada HTTP.
+
+| Método | Rota (`NOSTFOOD_BASE_URL` + …) | Cabeçalho | Campos enviados | Quando sai |
+|---|---|---|---|---|
+| GET | `pedidos.php` | `X-API-Key` | query: `data_inicio`, `data_fim` (AAAA-MM-DD), `limit`, `offset` (inteiros ≥ 0). Sem corpo. | Polling a cada `NOSTFOOD_POLL_SECONDS` (mínimo 30 s) e quando um webhook chega sem o pedido completo. |
+| POST | `atualizar-pedido.php` | `X-API-Key` | JSON com exatamente 2 campos: `status` (`em_preparo` ou `pronto`) e **um** identificador: `pedido_id` (inteiro) ou, sem id numérico, `order_number` (texto). | Só com `NOSTFOOD_SEND_STATUS=true`, quando o KDS inicia o preparo ou quando todos os itens ficam prontos. Pedido de teste nunca envia. |
+
+Travas da função de saída:
+
+- `NOSTFOOD_SEND_STATUS` diferente de `true`: o POST é recusado dentro da própria função de saída, e não só por quem a chama.
+- `NOSTFOOD_BASE_URL` precisa começar com `https://`, porque a chave vai no cabeçalho.
+- Redirecionamentos não são seguidos, para que a chave não vá para outro endereço.
+- Nunca saem dados de cliente, valores, itens, cardápio, estoque, usuários nem nada do Gestor.
+  Não existem chamadas para criar produto, usuário ou pedido na NostFood.
+
+### Entradas: rotas em `/api/integrations/nostfood`
+
+O superadmin passa em todas as rotas com login (regra geral do `require_role`).
+Sem token, a resposta é 403 `Not authenticated` (padrão do FastAPI 0.110). Com token
+inválido, a resposta é 401. Nos dois casos o corpo tem só `detail`.
+
+| Método | Rota | Quem pode | O que faz |
+|---|---|---|---|
+| POST | `/webhook` | **Sem login**: só com HMAC válido (`X-NostFood-Signature`, `NOSTFOOD_WEBHOOK_SECRET`) | Recebe eventos de pedido. Corpo de até 256 KB (413 acima disso). Responde só `{"ok": true}` ou um erro com `detail`, sem nenhum dado do Gestor. Outros métodos: 405. |
+| GET | `/status` | admin | Estado da integração (ligada, tem chave, último polling). Nunca mostra a chave nem o segredo. |
+| POST | `/simular` | admin | Cria pedido de teste só no Gestor. Não chama a NostFood. |
+| DELETE | `/testes` | admin | Apaga os pedidos de teste. |
+| POST | `/pedidos/{order_id}/nao-recebido` | admin | Marca "Não recebido" num pedido a cobrar na entrega. |
+| GET | `/produtos-sem-ligacao` | admin | Itens da NostFood sem produto do Gestor. |
+| GET | `/ligacoes` | admin | Ligações item da NostFood → produto do Gestor. |
+| POST | `/ligar-produto` | admin | Cria ou refaz uma ligação. |
+| POST | `/pedidos/{order_id}/observacao` | admin, caixa | Nova observação no pedido (aparece no KDS). Rota antiga: usa a mesma lógica de `POST /api/orders/{id}/observacao`. |
+| POST | `/pedidos/{order_id}/observacao/{obs_id}/ciente` | admin, cozinha, bar | KDS confirma que viu a observação. Rota antiga: mesma lógica de `POST /api/orders/{id}/observacao/{obs_id}/ciente`. |
+| GET | `/kds/cancelados` | admin, garçom, caixa, cozinha, bar | Cancelados recentes de **qualquer pedido** (salão, balcão, online, NostFood) para o aviso do KDS: pedidos inteiros e itens cancelados em pedidos abertos. Admin e caixa recebem o pedido completo. Cozinha, bar e garçom recebem só o que o KDS usa: código, mesa, primeiro nome do cliente, itens (nome, quantidade, tipo, status), motivo, horário e autor do cancelamento. Não recebem telefone, endereço, troco, pagamento nem valores. |
+| POST | `/pedidos/{order_id}/cancelamento/ciente` | admin, cozinha, bar | KDS confirma que viu o cancelamento (do pedido inteiro e dos itens da tela). Vale para qualquer pedido. Cozinha e bar recebem a mesma visão reduzida do `/kds/cancelados`. |
+| GET | `/perdas` | admin | Perdas de estoque por cancelamento depois do preparo. |
+
+Um teste (`test_every_route_is_listed_here`) falha se uma rota nova entrar na integração
+sem ser adicionada a esta lista de rotas protegidas.
+
+### Outras rotas sem login no Gestor (fora da integração)
+
+Estas rotas não fazem parte da NostFood, mas qualquer um na internet pode chamá-las:
+`/health`, `/api/health`, `/api/ping`, `/api/`, `/api/auth/login`, `/api/login` e as rotas
+do cardápio público do cliente (`/api/public/config`, `/api/public/cardapio`,
+`/api/public/cardapio/categorias`, `POST /api/public/pedido` e
+`/api/public/pedido/{codigo}`). O cardápio público não expõe o custo dos produtos.
 
 ## Como os pedidos chegam
 
@@ -29,18 +83,12 @@ sequenceDiagram
     G->>NF: POST atualizar-pedido.php (só com NOSTFOOD_SEND_STATUS=true)
 ```
 
-- **Webhook** `POST /api/integrations/nostfood/webhook`: recusa se a integração estiver desligada ou sem segredo (503) e se a assinatura não bater (401). Assinatura: `X-NostFood-Signature: sha256=<HMAC-SHA256 do corpo bruto>`. Como a documentação da NostFood não diz se vem em hex ou base64, as duas formas são aceitas. Evento repetido (mesmo `event_id`) responde `{ok: true, duplicate: true}` sem processar de novo. O processamento roda em segundo plano depois da resposta.
+- **Webhook** `POST /api/integrations/nostfood/webhook`: recusa se a integração estiver desligada ou sem segredo (503) e se a assinatura não bater (401). Assinatura: `X-NostFood-Signature: sha256=<HMAC-SHA256 do corpo bruto>`. Como a documentação da NostFood não diz se vem em hex ou base64, as duas formas são aceitas. Corpo acima de 256 KB: 413. Evento repetido (mesmo `event_id`) responde só `{"ok": true}`, igual a um evento novo, sem processar de novo. O processamento roda em segundo plano depois da resposta.
 - **Polling de segurança:** a cada `NOSTFOOD_POLL_SECONDS` (padrão 90, mínimo 30), busca os pedidos do dia no horário de São Paulo e, na virada da meia-noite, também os do dia anterior. Pagina por `limit=1000` e `offset` enquanto `has_more` for verdadeiro.
 - **Sem duplicar:** índice único em `orders` por (`external_source`, `external_id`), trava por pedido e checagem dupla. Webhook e polling podem trazer o mesmo pedido sem problema.
 - **Data de ativação:** na primeira vez que liga, grava `nostfood_enabled_at`. Pedidos criados na NostFood antes disso são ignorados. Pedido sem data de criação nunca é importado no primeiro polling.
 
-### Endpoints da NostFood usados
-
-| Uso | Chamada |
-|---|---|
-| Listar pedidos | `GET {NOSTFOOD_BASE_URL}/pedidos.php?data_inicio=AAAA-MM-DD&data_fim=AAAA-MM-DD&limit=1000&offset=N`, header `X-API-Key`. Resposta `{success, data: {pedidos: [...], has_more}}` |
-| Atualizar status | `POST {NOSTFOOD_BASE_URL}/atualizar-pedido.php` com `{pedido_id ou order_number, status}`, header `X-API-Key` |
-
+As chamadas para a NostFood estão na tabela de saídas acima.
 Não existe consulta de um pedido só: para achar um pedido, o Gestor busca o dia (e o anterior) e procura pelo `id` ou `order_number`.
 
 ## Formato real do pedido (`pedidos.php`)
@@ -126,7 +174,17 @@ Valores em texto são aceitos com vírgula ou ponto e com "R$".
 
 ### Descontos da loja e da plataforma, taxa de serviço
 
-Os blocos financeiros `totais`, `other_fees`, `sponsorship_values` e `promotions_raw` são guardados **como vieram** em `orders.external_financials`. Hoje são **só registro**: não entram no caixa, no repasse nem nos relatórios. A API da NostFood não manda a comissão nem o valor do repasse.
+Os blocos financeiros `totais`, `other_fees`, `sponsorship_values` e `promotions_raw` são guardados **como vieram** em `orders.external_financials`. Deles saem os campos de exibição do pedido, que o caixa mostra para a conta fechar (subtotal − descontos + entrega + taxa de serviço = total):
+
+| Campo em `orders` | Origem |
+|---|---|
+| `discount_total` | `sponsorship_values.total_discount` → soma de `promotions_raw[].promo_discount` (centavos) → `totais.desconto` |
+| `discount_store` | `sponsorship_values.shop_subside_price` → soma de `promotions_raw[].shop_subside_price` |
+| `discount_platform` | `sponsorship_values.platform_subside_price` → `discount_total − discount_store` |
+| `platform_service_fee` | `totais.taxa_servico` |
+| `delivery_fee_gross`, `delivery_fee_net` | `totais.entrega_bruta`, `totais.entrega_liquida` (sem eles, `delivery_fee`) |
+
+São **só exibição e registro**: não entram no caixa, no repasse nem nos relatórios, que continuam usando `total`. A API da NostFood não manda a comissão nem o valor do repasse.
 
 Leitura do exemplo acima (interpretação a confirmar com a NostFood):
 
@@ -157,6 +215,10 @@ O pedido no Gestor fica sempre com `platform = "nostfood"` (caixa e relatórios 
 
 O id do pedido na plataforma (`food99_order_id` ou `ifood_order_id`) fica em `external_platform_order_id`.
 
+### Código curto do pedido
+
+O código que o app da plataforma mostra (ex.: `252001` na 99) fica em `external_display_code`: vem de `items.order_index` (ou `display_id`/`short_id`/`codigo`); em pedido direto na NostFood, é o próprio `order_number` quando curto e sem hífen. Telas, impressão, avisos do KDS e a busca do caixa mostram `99 #252001`, `iFood #…` ou `NostFood #…`. Sem código curto, mostram `#<order_number>`. O id longo (`99-5764…`) fica só para a API.
+
 ### Outros campos
 
 | Campo NostFood | No Gestor |
@@ -185,6 +247,8 @@ O código também aceita os nomes alternativos em português (`itens`, `cliente.
 
 **Status de volta para a NostFood:** quando a cozinha põe algum item em preparo, o Gestor envia `em_preparo`; quando todos os itens ficam prontos, envia `pronto`. Só envia com `NOSTFOOD_SEND_STATUS=true`; desligado (padrão), só escreve no log o que teria enviado. O status enviado é anotado antes, e o `order.updated` que volta da NostFood é ignorado (sem laço). Falha no envio fica em `nostfood_sync_errors` do pedido.
 
+**Status vindo da NostFood para um pedido que já existe** (webhook ou polling): o Gestor sempre guarda `nostfood_status`. Se lá ficou `pronto`, `saiu_entrega`, `enviado` ou `entregue` (e não é eco de um status que o próprio Gestor enviou), os itens ainda abertos são dados como entregues, com baixa de estoque, e o pedido sai do KDS. Se for `entregue` e pago online, o pedido fecha como repasse pendente. Cobrar na entrega continua aberto até o caixa receber. Pedido de teste, cancelado ou já fechado não muda.
+
 ### Pagamento: repasse ou cobrar na entrega
 
 - `pix_online`, `cartao_credito_online`, `cartao_debito_online`, `mercadopago_online`, `pago_online` ou qualquer método terminado em `_online` → `payment_status = "pending_platform"`: repasse da plataforma, **fora da gaveta**.
@@ -197,6 +261,7 @@ O código também aceita os nomes alternativos em português (`itens`, `cliente.
 - A ligação NostFood → produto do Gestor fica em `nostfood_product_map`, por id (`id:...`) ou por nome normalizado (`name:...`, sem acento, sem diferença de maiúsculas e espaços).
 - Item sem ligação **entra no pedido** e vai para a cozinha com alerta (`nostfood_alert`), mas não baixa estoque (fica com `stock_pending`). Fica listado em `nostfood_unlinked`.
 - Ao ligar o produto (`POST /ligar-produto`), os pedidos ainda abertos são corrigidos (estação e estoque).
+- **Refazer uma ligação errada:** ligar de novo o mesmo item a outro produto troca o produto nos pedidos abertos. Itens que já tiveram baixa de estoque ficam como estão, e a resposta diz quantos (`kept_stock_deducted`). O caixa mostra `Produto (NostFood: nome)` quando os nomes diferem.
 
 ### Estoque
 
@@ -206,7 +271,7 @@ A baixa usa a mesma ficha técnica do salão, mas **nunca trava** o KDS nem o ca
 
 - Item que **ainda não começou**: devolve a baixa, se houve.
 - Item em preparo, pronto ou entregue: vira **perda** (baixa de estoque e custo em `stock_losses`), não venda.
-- O KDS mostra o cancelado até cada tela (cozinha, bar) confirmar que viu, por até 12 horas.
+- O KDS mostra o cancelado até cada tela (cozinha, bar) confirmar que viu, por até 12 horas. O mesmo aviso vale para pedidos que não são da NostFood: veja [Aviso de cancelado no KDS](#aviso-de-cancelado-no-kds-qualquer-pedido).
 - Cancelamento que chega **antes** do pedido grava uma "lápide" (`nostfood_tombstones`) e o pedido não é criado depois.
 - Cancelamento depois de o pedido ser finalizado no Gestor só marca e alerta (`cancelled_after_close`) para conferência manual.
 
@@ -214,23 +279,41 @@ A baixa usa a mesma ficha técnica do salão, mas **nunca trava** o KDS nem o ca
 
 `POST /simular` cria um pedido falso só no Gestor (`is_test = true`), que nunca chama a NostFood, não mexe em estoque e não entra no caixa. `DELETE /testes` apaga todos os pedidos de teste e o que eles geraram. Webhook e polling nunca criam pedido de teste.
 
-## Rotas (`/api/integrations/nostfood`)
+## Aviso de cancelado no KDS (qualquer pedido)
 
-| Método | Rota | Permissão | Descrição |
+Código: `backend/kds_cancel.py`. Vale para Cozinha, Bar e Churrasqueira, cada tela só com os seus itens.
+
+- **Item cancelado num pedido aberto** (mesa, comanda, balcão, online): se o item ainda estava no KDS (pendente, em preparo ou pronto), ele ganha `kds_item_cancel`, `kds_ack_pending` e `cancel_acks`, e o pedido ganha `kds_item_cancel_pending`. A tela mostra o item esmaecido e riscado, com "✕ CANCELADO", motivo e quem cancelou, e toca o som de cancelado até a tela do item tocar em **Ciente**. Item já entregue não gera aviso.
+- **Pedido inteiro cancelado** (`/orders/{id}/cancel`, `/orders/{id}/cancel-quick` ou cancelamento da NostFood): o pedido ganha `kds_ack_pending` e `cancel_acks`. A tela mostra o card inteiro cancelado com os seus itens, motivo e quem cancelou, até tocar em **Ciente**.
+- Cozinha (itens `food`) e bar (itens `drink`) precisam confirmar. Depois das duas, o aviso some também da Churrasqueira, que é só visualização. Depois de 12 horas o aviso sai sozinho.
+- As rotas continuam em `/api/integrations/nostfood/kds/cancelados` e `/pedidos/{id}/cancelamento/ciente`, porque o frontend já as usa.
+
+## Observação nova no KDS (qualquer pedido)
+
+Código: `backend/order_observations.py`. Rotas gerais, para qualquer pedido aberto (mesa, comanda, balcão, online, NostFood):
+
+| Método | Rota | Quem pode | Corpo |
 |---|---|---|---|
-| POST | `/webhook` | assinatura HMAC | Recebe eventos `order.*` |
-| GET | `/status` | admin | Ligada, chave e segredo configurados (sim/não), URL, intervalo, envio de status, último polling e erro |
-| POST | `/simular` | admin | Pedido de teste |
-| DELETE | `/testes` | admin | Apaga pedidos de teste |
-| POST | `/pedidos/{id}/nao-recebido` | admin | Cobrar na entrega que não foi pago |
-| GET | `/produtos-sem-ligacao` | admin | Itens que chegaram sem ligação |
-| GET | `/ligacoes` | admin | Ligações existentes |
-| POST | `/ligar-produto` | admin | `{product_id, nostfood_id ou nostfood_name}` |
-| POST | `/pedidos/{id}/observacao` | admin, caixa | Observação nova para o KDS |
-| POST | `/pedidos/{id}/observacao/{obs}/ciente` | admin, cozinha, bar | Tela confirma a observação |
-| GET | `/kds/cancelados` | equipe | Cancelados aguardando confirmação (12 h) |
-| POST | `/pedidos/{id}/cancelamento/ciente` | admin, cozinha, bar | Tela confirma o cancelamento |
-| GET | `/perdas?data_inicio=&data_fim=` | admin | Perdas registradas e custo total |
+| POST | `/api/orders/{id}/observacao` | admin, caixa, garçom | `{text, item_id?}`: sem `item_id`, vale para o pedido inteiro |
+| POST | `/api/orders/{id}/observacao/{obs_id}/ciente` | admin, cozinha, bar | `{station}`: `kitchen`, `bar` ou `grill` |
+
+- A observação guarda texto (até 500 caracteres), item (`item_id`, `item_name`, `item_type`), telas (`stations`), autor e horário. Cada "Ciente" grava quem confirmou e quando em `acks[tela]`.
+- Item de comida vai para cozinha e churrasqueira; bebida, para o bar. Pedido inteiro: as telas dos itens do pedido. Item já entregue ou cancelado não recebe observação.
+- O Ciente de uma tela não apaga o aviso das outras. Uma tela que não está em `stations` recebe 400. Observações antigas (sem `stations`) valem para todas as telas.
+- No KDS: faixa amarela "NOVA OBSERVAÇÃO" no card, com o item quando houver, e dois bipes repetindo até o Ciente. Na pré-conta impressa, a observação do item sai embaixo dele e as do pedido inteiro num bloco "OBSERVAÇÕES".
+- Tempo real: `order_observation` (texto, item e autor, sem dados do cliente) por `emit_staff`, e `kitchen_update`/`bar_update` por `emit_orders`.
+
+## Tempo real (Socket.IO)
+
+A integração só envia eventos pelas funções por sala do `server.py`. Nenhum evento vai para "todo mundo conectado".
+
+| Evento | Função | Quem recebe |
+|---|---|---|
+| `kitchen_update`, `bar_update`, `new_online_order` | `emit_orders` | Admin, superadmin e caixa: pedido completo. Cozinha, bar e garçom: só o primeiro nome do cliente, sem telefone, endereço (`address`, `customer_address`, `latitude`, `longitude`) e troco. |
+| `order_cancelled`, `order_closed`, `order_observation` (emitido pelo `server.py`), `kds_cancelled` | `emit_staff` | Todos os usuários logados. Levam só ids e a observação. `kds_cancelled` leva só `{order_id}`: cada tela busca o aviso em `/kds/cancelados`, já filtrado pelo perfil. |
+| `nostfood_alert`, `stock_updated` | `emit_admins` | Só admin e superadmin. |
+
+O teste `test_nenhum_evento_para_cozinha_ou_bar_leva_telefone_ou_endereco` (`backend/tests/test_socket_dados_pessoais.py`) passa pelos fluxos da NostFood e do salão e confere cada evento que chega a cozinha, bar ou garçom.
 
 ## Variáveis de ambiente
 

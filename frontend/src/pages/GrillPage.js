@@ -2,7 +2,20 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { ordersAPI } from '../lib/api';
 import socketService from '../lib/socket';
-import { isOnlineOrder } from '../components/OnlineOrderBadge';
+import { isOnlineOrder, orderDisplayLabel } from '../components/OnlineOrderBadge';
+import { useKdsSound, useKdsAlerts } from '../lib/kdsSound';
+import {
+  CancelledOrdersPanel,
+  ObservationBanners,
+  SoundButton,
+  TestOrderBand,
+  UnlinkedItemBadge,
+  pendingCancelKeys,
+  pendingObservations,
+  useCancelledOrders,
+} from '../components/KdsNotices';
+
+const STATION = 'grill';
 import { AlertTriangle, ChefHat, Clock, Flame } from 'lucide-react';
 
 // Produtos que não devem aparecer na tela da chapa
@@ -146,6 +159,22 @@ export default function GrillPage() {
       return aTime - bTime;
     });
 
+  // Sons e avisos (pedido novo, observação, cancelado, atrasado)
+  const sound = useKdsSound();
+  const { cancelled, refreshCancelled } = useCancelledOrders();
+  useKdsAlerts({
+    ready: !loading,
+    sound,
+    newOrderIds: activeOrders.flatMap(({ order, items }) =>
+      items.filter(item => item.status === 'pending').map(item => `${order.id}:${item.id}`)),
+    pendingObsIds: activeOrders.flatMap(({ order }) =>
+      pendingObservations(order, STATION, belongsToGrill).map(obs => obs.id)),
+    pendingCancelIds: pendingCancelKeys(cancelled, STATION, belongsToGrill),
+    lateOrderIds: activeOrders
+      .filter(({ order }) => getTiming(order, now).late)
+      .map(({ order }) => String(order.id)),
+  });
+
   // Tela de carregamento, sem menu lateral
   if (loading) {
     return (
@@ -179,6 +208,8 @@ export default function GrillPage() {
             </div>
           </div>
 
+          <SoundButton sound={sound} dark />
+
           <div className="text-right">
             <p className="text-4xl font-black">
               {activeOrders.length}
@@ -190,6 +221,15 @@ export default function GrillPage() {
           </div>
 
         </div>
+
+        {/* CANCELADOS AGUARDANDO CIENTE */}
+        <CancelledOrdersPanel
+          orders={cancelled}
+          station={STATION}
+          itemFilter={belongsToGrill}
+          onAcked={refreshCancelled}
+          dark
+        />
 
         {/* SEM PEDIDOS */}
         {activeOrders.length === 0 ? (
@@ -249,7 +289,7 @@ export default function GrillPage() {
                           </p>
 
                           <p className="text-sm">
-                            Pedido: {order.external_order_id || order.id?.slice(0, 8)}
+                            Pedido: {orderDisplayLabel(order) || order.external_order_id || order.id?.slice(0, 8)}
                           </p>
                         </>
                       ) : (
@@ -304,6 +344,16 @@ export default function GrillPage() {
 
                   </div>
 
+                  <TestOrderBand order={order} />
+
+                  {/* OBSERVAÇÃO NOVA (pedido já em preparo) */}
+                  <ObservationBanners
+                    order={order}
+                    station={STATION}
+                    itemFilter={belongsToGrill}
+                    onAcked={fetchOrders}
+                  />
+
                   {/* PRODUTOS DO PEDIDO */}
                   <div className="border-t-2 border-white/40 pt-3 space-y-3">
 
@@ -326,6 +376,8 @@ export default function GrillPage() {
                           </span>
 
                         </div>
+
+                        <UnlinkedItemBadge item={item} />
 
                         {/* OBSERVAÇÕES EM DESTAQUE */}
                         {item.notes && (

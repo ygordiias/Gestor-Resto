@@ -7,7 +7,8 @@ import { Label } from '../components/ui/label';
 import { Switch } from '../components/ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
 import { toast } from 'sonner';
-import { Settings, Store, Receipt, Database, Save, Loader2 } from 'lucide-react';
+import NostfoodPanel from '../components/NostfoodPanel';
+import { Settings, Store, Receipt, Database, Save, Loader2, Bike } from 'lucide-react';
 
 const API = process.env.REACT_APP_BACKEND_URL;
 
@@ -87,7 +88,15 @@ export default function SettingsPage() {
               <Receipt className="h-4 w-4 mr-2" />
               Fiscal
             </TabsTrigger>
+            <TabsTrigger value="nostfood">
+              <Bike className="h-4 w-4 mr-2" />
+              NostFood
+            </TabsTrigger>
           </TabsList>
+
+          <TabsContent value="nostfood">
+            <NostfoodPanel />
+          </TabsContent>
 
           <TabsContent value="restaurant">
             <Card>

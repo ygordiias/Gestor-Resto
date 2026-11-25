@@ -13,7 +13,8 @@ import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
 import { ordersAPI } from '../lib/api';
 import { formatDate } from '../lib/utils';
-import socketService, { playNotificationSound } from '../lib/socket';
+import socketService from '../lib/socket';
+import { useKdsSound, useKdsAlerts } from '../lib/kdsSound';
 import { toast } from 'sonner';
 
 import {
@@ -28,6 +29,20 @@ import {
   OnlineOrderBadge,
   isOnlineOrder,
 } from '../components/OnlineOrderBadge';
+
+import {
+  CancelledOrdersPanel,
+  ObservationBanners,
+  SoundButton,
+  TestOrderBand,
+  UnlinkedItemBadge,
+  pendingCancelKeys,
+  pendingObservations,
+  useCancelledOrders,
+} from '../components/KdsNotices';
+
+const STATION = 'kitchen';
+const isKitchenItem = (item) => item.type === 'food';
 
 const STAGES = [
   {
@@ -163,8 +178,7 @@ export default function KitchenPage() {
       initialized.current &&
       [...next].some(id => !pendingIds.current.has(id))
     ) {
-      playNotificationSound();
-
+      // O som do pedido novo fica com useKdsAlerts (respeita o botão "Ativar som").
       toast.info('Novo pedido na cozinha!', {
         icon: <Bell className="h-4 w-4" />,
       });
@@ -277,6 +291,23 @@ export default function KitchenPage() {
   );
 
   columnsRef.current = groupsByStage;
+
+  // Sons e avisos (pedido novo, observação, cancelado, atrasado)
+  const sound = useKdsSound();
+  const { cancelled, refreshCancelled } = useCancelledOrders();
+  const visibleGroups = groupsByStage.flat();
+  useKdsAlerts({
+    ready: !loading,
+    sound,
+    newOrderIds: groupsByStage[0].flatMap(group =>
+      group.items.map(item => `${group.order.id}:${item.id}`)),
+    pendingObsIds: visibleGroups.flatMap(group =>
+      pendingObservations(group.order, STATION, isKitchenItem).map(obs => obs.id)),
+    pendingCancelIds: pendingCancelKeys(cancelled, STATION, isKitchenItem),
+    lateOrderIds: visibleGroups
+      .filter(group => getTiming(group.order, now).late)
+      .map(group => String(group.order.id)),
+  });
 
   // Seleciona uma comanda de forma estável
   const chooseGroup = useCallback((col, key) => {
@@ -738,11 +769,22 @@ export default function KitchenPage() {
 
         </div>
 
-        {/* LEGENDA */}
-        <div className="text-sm text-muted-foreground">
-          Cada cartão representa uma comanda ou pedido.
-          Verde: no prazo · Laranja: atenção · Vermelho: atrasado.
+        {/* LEGENDA E SOM */}
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="text-sm text-muted-foreground">
+            Cada cartão representa uma comanda ou pedido.
+            Verde: no prazo · Laranja: atenção · Vermelho: atrasado.
+          </div>
+          <SoundButton sound={sound} />
         </div>
+
+        {/* CANCELADOS AGUARDANDO CIENTE */}
+        <CancelledOrdersPanel
+          orders={cancelled}
+          station={STATION}
+          itemFilter={isKitchenItem}
+          onAcked={refreshCancelled}
+        />
 
         {/* INSTRUÇÕES DO TECLADO */}
         <div
@@ -885,6 +927,12 @@ export default function KitchenPage() {
                                   Entrada: {formatDate(order.created_at)}
                                 </p>
 
+                                {order.customer_name && (
+                                  <p className="text-sm font-bold">
+                                    {order.customer_name}
+                                  </p>
+                                )}
+
                               </div>
 
                               {/* CRONÔMETRO E ALERTAS */}
@@ -914,6 +962,16 @@ export default function KitchenPage() {
                               </div>
                             </div>
 
+                            <TestOrderBand order={order} />
+
+                            {/* OBSERVAÇÃO NOVA (pedido já na cozinha) */}
+                            <ObservationBanners
+                              order={order}
+                              station={STATION}
+                              itemFilter={isKitchenItem}
+                              onAcked={fetchOrders}
+                            />
+
                             {/* ITENS DA COMANDA */}
                             <div className="border-t border-white/40 pt-2 space-y-2">
 
@@ -926,6 +984,8 @@ export default function KitchenPage() {
                                   <p className="text-lg font-bold">
                                     {item.quantity}× {item.product_name}
                                   </p>
+
+                                  <UnlinkedItemBadge item={item} />
 
                                   {item.notes && (
                                     <p className="mt-1 bg-white text-slate-900 rounded p-2 text-sm font-bold">

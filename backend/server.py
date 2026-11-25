@@ -10,6 +10,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo.errors import PyMongoError
 import socketio
 import os
+import sys
 import logging
 import json
 import hashlib
@@ -23,6 +24,9 @@ from passlib.context import CryptContext
 from jose import JWTError, jwt
 from enum import Enum
 from bootstrap import ensure_initial_superadmin, require_cors_origins, require_secret_key
+import nostfood_integration as nostfood
+import kds_cancel
+import order_observations
 import physical_tabs
 import sobre
 
@@ -1045,8 +1049,8 @@ async def create_online_order(
     return {k: v for k, v in order_dict.items() if k != "_id"}
 
 async def emit_order_updates(items):
-    food_items = [i for i in items if i["type"] == OrderItemType.FOOD.value]
-    drink_items = [i for i in items if i["type"] == OrderItemType.DRINK.value]
+    food_items = [i for i in items if i.get("type") == OrderItemType.FOOD.value]
+    drink_items = [i for i in items if i.get("type") == OrderItemType.DRINK.value]
     
     if food_items:
         kitchen_orders = await db.orders.find({"is_closed": False}, {"_id": 0}).to_list(100)
@@ -1078,10 +1082,14 @@ async def update_item_status(order_id: str, item_id: str, status_data: dict):
     
     # Baixa automática de estoque: só quando muda para "delivered" pela primeira vez
     if new_status == "delivered" and previous_status != "delivered" and not target_item.get("stock_deducted"):
-        await deduct_stock(target_item["product_id"], target_item["quantity"])
-        target_item["stock_deducted"] = True
+        if nostfood.is_nostfood(order):
+            await nostfood.safe_deduct(order, target_item)  # falha vira pendência, não trava o KDS
+        else:
+            await deduct_stock(target_item["product_id"], target_item["quantity"])
+            target_item["stock_deducted"] = True
     
     await db.orders.update_one({"id": order_id}, {"$set": {"items": order["items"]}})
+    await nostfood.on_item_status_changed(order_id, new_status)
     
     # Emit updates
     updated_order = await db.orders.find_one({"id": order_id}, {"_id": 0})
@@ -1095,6 +1103,65 @@ async def update_item_status(order_id: str, item_id: str, status_data: dict):
         await emit_admins('stock_updated', stock_list)
     
     return {"message": "Item status updated"}
+
+# ==================== OBSERVAÇÃO NOVA PARA O KDS ====================
+# Qualquer pedido (mesa, comanda, balcão, online, NostFood). As rotas antigas em
+# /api/integrations/nostfood/pedidos/{id}/observacao chamam estas mesmas funções.
+OBSERVATION_ROLES = [UserRole.ADMIN, UserRole.CASHIER, UserRole.WAITER]
+OBSERVATION_ACK_ROLES = [UserRole.ADMIN, UserRole.KITCHEN, UserRole.BAR]
+
+
+async def add_order_observation(order_id: str, body: dict, current_user: dict) -> dict:
+    order = await db.orders.find_one({"id": order_id}, {"_id": 0})
+    if not order:
+        raise HTTPException(status_code=404, detail="Pedido não encontrado")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    try:
+        obs = order_observations.build(order, body, current_user, now_iso)
+    except order_observations.ObservationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    await db.orders.update_one({"id": order_id}, {"$push": {"observations": obs}})
+    # Texto, item e autor (equipe): sem dados do cliente.
+    await emit_staff("order_observation", {"order_id": order_id, "observation": obs})
+    await emit_order_updates(order.get("items", []))
+    return obs
+
+
+async def ack_order_observation(order_id: str, obs_id: str, body: dict, current_user: dict) -> dict:
+    station = str((body or {}).get("station") or "").strip().lower()
+    if station not in kds_cancel.KDS_STATIONS:
+        raise HTTPException(status_code=400, detail="Informe a tela: kitchen, bar ou grill")
+    order = await db.orders.find_one({"id": order_id}, {"_id": 0})
+    if not order:
+        raise HTTPException(status_code=404, detail="Pedido não encontrado")
+    observations = order.get("observations") or []
+    obs = next((o for o in observations if o.get("id") == obs_id), None)
+    if not obs:
+        raise HTTPException(status_code=404, detail="Observação não encontrada")
+    by = {"by_id": current_user.get("id"), "by_name": current_user.get("name"),
+          "at": datetime.now(timezone.utc).isoformat()}
+    try:
+        order_observations.apply_ack(obs, station, by)
+    except order_observations.ObservationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    await db.orders.update_one({"id": order_id}, {"$set": {"observations": observations}})
+    await emit_order_updates(order.get("items", []))
+    return obs
+
+
+@api_router.post("/orders/{order_id}/observacao")
+async def create_order_observation(order_id: str, body: dict,
+                                   current_user: dict = Depends(require_role(OBSERVATION_ROLES))):
+    """Observação nova (pedido inteiro ou um item) para o KDS. Body: {text, item_id?}."""
+    return await add_order_observation(order_id, body, current_user)
+
+
+@api_router.post("/orders/{order_id}/observacao/{obs_id}/ciente")
+async def confirm_order_observation(order_id: str, obs_id: str, body: dict,
+                                    current_user: dict = Depends(require_role(OBSERVATION_ACK_ROLES))):
+    """Tela do KDS confirma que viu a observação. Body: {station}."""
+    return await ack_order_observation(order_id, obs_id, body, current_user)
+
 
 @api_router.patch("/orders/{order_id}/cancel")
 async def cancel_order(order_id: str, data: dict, current_user: dict = Depends(get_current_user)):
@@ -1134,6 +1201,8 @@ async def cancel_order(order_id: str, data: dict, current_user: dict = Depends(g
             "cancelled_by_cashier_id": current_user.get("id"),
             "cancelled_by_cashier_name": current_user.get("name"),
             "cancellation_reason": reason,
+            # Aviso de cancelado no KDS até cada tela dar "Ciente".
+            **kds_cancel.order_cancel_fields(order),
         }}
     )
     # Libera a mesa
@@ -1141,8 +1210,19 @@ async def cancel_order(order_id: str, data: dict, current_user: dict = Depends(g
     await refresh_table_after_order(order.get("table_id"))
     await emit_staff('tables_updated', await get_tables())
     await emit_staff('order_closed', {"order_id": order_id})
+    await emit_order_updates(order.get("items", []))
+    await emit_staff('kds_cancelled', {"order_id": order_id})
     logger.info(f"[CANCEL] {current_user.get('name')} cancelou pedido {order_id} autorizado por {admin.get('name')} — {reason}")
     return {"message": "Comanda cancelada", "cancelled_by": admin.get("name"), "reason": reason}
+
+def _order_total(order: dict, subtotal: float, service_fee: float) -> float:
+    """Total = subtotal + serviço + taxa de entrega - descontos (nunca negativo).
+
+    Recalcular só subtotal + serviço perdia a taxa de entrega dos pedidos de delivery.
+    """
+    delivery_fee = float(order.get("delivery_fee") or 0)
+    discount = float(order.get("discount") or 0)
+    return round(max(0.0, subtotal + service_fee + delivery_fee - discount), 2)
 
 @api_router.patch("/orders/{order_id}/item/{item_id}/courtesy")
 async def mark_item_courtesy(order_id: str, item_id: str, data: dict, current_user: dict = Depends(require_role([UserRole.ADMIN, UserRole.CASHIER]))):
@@ -1191,7 +1271,7 @@ async def mark_item_courtesy(order_id: str, item_id: str, data: dict, current_us
             "items": order["items"],
             "subtotal": subtotal,
             "service_fee": service_fee,
-            "total": subtotal + service_fee,
+            "total": _order_total(order, subtotal, service_fee),
         }}
     )
     return await db.orders.find_one({"id": order_id}, {"_id": 0})
@@ -1275,11 +1355,14 @@ async def cancel_order_item(order_id: str, item_id: str, data: dict, current_use
         "stock_restored": stock_restored,
     }
 
+    previous_status = item.get("status")
+    kds_notice = False
     if cancel_qty == current_qty:
         # Cancelamento total do item — marca em lugar
         item["status"] = "cancelled"
         item["quantity_cancelled"] = cancel_qty
         item.update(cancel_meta)
+        kds_notice = kds_cancel.mark_item_cancelled(item, previous_status, now_iso)
         # Se estoque foi devolvido, a "conta" deste item deixa de estar deduzida.
         if stock_restored:
             item["stock_deducted"] = False
@@ -1303,6 +1386,7 @@ async def cancel_order_item(order_id: str, item_id: str, data: dict, current_use
             "stock_deducted": (stock_was_deducted and not stock_restored),
             **cancel_meta,
         }
+        kds_notice = kds_cancel.mark_item_cancelled(cancelled_line, previous_status, now_iso)
         order["items"].append(cancelled_line)
 
     # --- Recalcula totais (ignora itens cancelados) ---
@@ -1313,7 +1397,7 @@ async def cancel_order_item(order_id: str, item_id: str, data: dict, current_use
     )
     fee_pct = order.get("service_fee_percentage", 10)
     service_fee = subtotal * (fee_pct / 100)
-    total = subtotal + service_fee
+    total = _order_total(order, subtotal, service_fee)
 
     await db.orders.update_one(
         {"id": order_id},
@@ -1322,12 +1406,17 @@ async def cancel_order_item(order_id: str, item_id: str, data: dict, current_use
             "subtotal": subtotal,
             "service_fee": service_fee,
             "total": total,
+            # Aviso de item cancelado no KDS até a tela do item dar "Ciente".
+            **({"kds_item_cancel_pending": True, "kds_item_cancel_at": now_iso} if kds_notice else {}),
         }}
     )
 
     # Realtime
     updated = await db.orders.find_one({"id": order_id}, {"_id": 0})
     await emit_orders('order_updated', updated)
+    await emit_order_updates([item])
+    if kds_notice:
+        await emit_staff('kds_cancelled', {"order_id": order_id})
     if stock_restored:
         stock_list = await db.stock.find({}, {"_id": 0}).to_list(500)
         await emit_admins('stock_updated', stock_list)
@@ -1361,12 +1450,17 @@ async def complete_online_order(
         raise HTTPException(status_code=400, detail="Use o fechamento normal para pedidos presenciais")
     if order.get("status") == "cancelled" or order.get("is_comp"):
         raise HTTPException(status_code=400, detail="Pedido cancelado ou cortesia não pode gerar repasse")
+    if nostfood.is_to_collect(order) and not order.get("is_test"):
+        raise HTTPException(status_code=409, detail="Pedido cobrado na entrega: use Fechar Comanda e registre o pagamento")
     existing = await db.payments.count_documents({"order_id": order_id})
     if existing:
         raise HTTPException(status_code=409, detail="Pedido já possui pagamentos; confira antes de finalizar")
 
     for item in order.get("items", []):
         if item.get("status") == "cancelled" or item.get("stock_deducted"):
+            continue
+        if nostfood.is_nostfood(order):
+            await nostfood.safe_deduct(order, item)  # falha vira pendência, não trava o caixa
             continue
         await deduct_stock(item["product_id"], item["quantity"], order_code=order_id)
         item["stock_deducted"] = True
@@ -1471,8 +1565,17 @@ async def close_order(order_id: str, payment_data: dict, current_user: dict = De
         raise HTTPException(status_code=404, detail="Order not found")
     if order.get("is_closed"):
         raise HTTPException(status_code=409, detail="Pedido já está fechado")
-    if order.get("source") == "online":
+    collect_on_delivery = nostfood.is_to_collect(order)
+    if order.get("source") == "online" and not collect_on_delivery:
         raise HTTPException(status_code=409, detail="Pedido online deve usar Finalizar pedido online (aguardando repasse)")
+    if collect_on_delivery and order.get("status") == OrderStatus.CANCELLED.value:
+        raise HTTPException(status_code=409, detail="Pedido cancelado")
+    if order.get("is_test"):
+        raise HTTPException(status_code=409, detail="Pedido de teste não entra no caixa: use Finalizar pedido online")
+    claim_filter = (
+        {"external_source": "nostfood", "payment_status": "to_collect", "status": {"$ne": "cancelled"}}
+        if collect_on_delivery else {"source": {"$ne": "online"}}
+    )
 
     # Total SEMPRE o do banco, em centavos (nunca o enviado pelo navegador).
     total_cents = _close_cents(order.get("total"))
@@ -1488,7 +1591,7 @@ async def close_order(order_id: str, payment_data: dict, current_user: dict = De
         async with await client.start_session() as session:
             async with session.start_transaction():
                 claimed = await db.orders.update_one(
-                    {"id": order_id, "is_closed": False, "source": {"$ne": "online"}},
+                    {"id": order_id, "is_closed": False, **claim_filter},
                     {"$set": {
                         "is_closed": True,
                         "closed_at": closed_at,
@@ -1540,6 +1643,10 @@ async def close_order(order_id: str, payment_data: dict, current_user: dict = De
         if item.get("status") == "cancelled":
             continue
         if not item.get("stock_deducted"):
+            if collect_on_delivery:
+                await nostfood.safe_deduct(order, item)  # falha vira pendência do item
+                changed = True
+                continue
             try:
                 await deduct_stock(item["product_id"], item["quantity"], order_code=order.get("id", ""))
                 item["stock_deducted"] = True
@@ -1614,8 +1721,8 @@ async def sales_by_table(period: str = "daily", current_user: dict = Depends(req
         })
     return {"period": period, "start": start_iso, "rows": rows}
 
-@api_router.post("/orders/{order_id}/cancel-quick", dependencies=[Depends(require_role([UserRole.ADMIN]))])
-async def quick_cancel_order(order_id: str):
+@api_router.post("/orders/{order_id}/cancel-quick")
+async def quick_cancel_order(order_id: str, current_user: dict = Depends(require_role([UserRole.ADMIN]))):
     order = await db.orders.find_one({"id": order_id}, {"_id": 0})
     if not order:
         raise HTTPException(status_code=404, detail="Pedido não encontrado")
@@ -1633,16 +1740,25 @@ async def quick_cancel_order(order_id: str):
     # Cancelar todos os itens e o pedido
     cancelled_items = []
     for item in order["items"]:
+        if item.get("status") != "cancelled":
+            item["status_before_cancel"] = item.get("status")
         item["status"] = "cancelled"
         cancelled_items.append(item)
 
+    now_iso = datetime.now(timezone.utc).isoformat()
     await db.orders.update_one(
         {"id": order_id},
         {"$set": {
             "items": cancelled_items,
             "status": "cancelled",
             "is_closed": True,
-            "closed_at": datetime.now(timezone.utc).isoformat()
+            "closed_at": now_iso,
+            "cancelled_at": now_iso,
+            "cancelled_by_id": current_user.get("id"),
+            "cancelled_by_name": current_user.get("name"),
+            "cancellation_reason": "Cancelado antes do preparo",
+            # Aviso de cancelado no KDS até cada tela dar "Ciente".
+            **kds_cancel.order_cancel_fields({"items": cancelled_items}),
         }}
     )
 
@@ -1655,6 +1771,7 @@ async def quick_cancel_order(order_id: str):
     await emit_staff('order_cancelled', {"order_id": order_id})
     await emit_orders('kitchen_update', await db.orders.find({"is_closed": False}, {"_id": 0}).to_list(100))
     await emit_orders('bar_update', await db.orders.find({"is_closed": False}, {"_id": 0}).to_list(100))
+    await emit_staff('kds_cancelled', {"order_id": order_id})
 
     return {"message": "Pedido cancelado com sucesso"}
 
@@ -2048,7 +2165,10 @@ async def preview_cash_register(
         if order.get("status") == "cancelled" or order.get("is_comp"):
             continue
 
-        if order.get("source") == "online":
+        if nostfood.excluded_from_cash(order):  # teste ou "Não recebido"
+            continue
+
+        if nostfood.settles_on_platform(order):
             online_bucket(online_completed, order)
             continue
 
@@ -2092,14 +2212,13 @@ async def preview_cash_register(
     deposits = cents(register.get("deposits"))
     withdrawals = cents(register.get("withdrawals"))
 
-    open_orders = await db.orders.count_documents({
-        "is_closed": False,
-        "source": {"$ne": "online"}
-    })
+    open_orders = await db.orders.count_documents(nostfood.OPEN_CASH_ORDERS_QUERY)
     online_cursor = db.orders.find({
         "is_closed": False,
         "source": "online",
-        "status": {"$ne": "cancelled"}
+        "status": {"$ne": "cancelled"},
+        "payment_status": {"$ne": "to_collect"},
+        "is_test": {"$ne": True},
     }, {"_id": 0})
     async for order in online_cursor:
         online_bucket(online_open, order)
@@ -2131,6 +2250,9 @@ async def preview_cash_register(
             initial + methods["cash"] + deposits - withdrawals
         ),
         "warnings": warnings,
+        # NostFood: a cobrar na entrega ainda abertos (bloqueiam) e marcados "Não recebido".
+        "pending_to_collect": await nostfood.pending_to_collect(),
+        "not_received": await nostfood.not_received_between(opened_at, generated_at),
     }
     report["preview_token"] = _make_closing_preview_token(report, current_user["id"])
     return report
@@ -2152,10 +2274,7 @@ async def close_register(
         )
 
     # Não permite fechar com comandas pendentes.
-    pending = await db.orders.count_documents({
-        "is_closed": False,
-        "source": {"$ne": "online"},
-    })
+    pending = await db.orders.count_documents(nostfood.OPEN_CASH_ORDERS_QUERY)
     if pending:
         raise HTTPException(
             status_code=409,
@@ -2232,6 +2351,9 @@ async def close_register(
     }, {"_id": 0})
 
     async for order in cursor:
+        if nostfood.excluded_from_cash(order):  # teste ou "Não recebido"
+            continue
+
         if order.get("status") == "cancelled":
             cancelled_orders += 1
             continue
@@ -2241,7 +2363,7 @@ async def close_register(
             courtesy_amount += cents(order.get("total"))
             continue
 
-        if order.get("source") == "online":
+        if nostfood.settles_on_platform(order):
             online_bucket(order)
             continue
 
@@ -2343,6 +2465,7 @@ async def close_register(
         "deposits": money(deposits),
         "withdrawals": money(withdrawals),
         "expected_cash": money(expected_cash),
+        "not_received": await nostfood.not_received_between(opened_at, closed_at),
     }
 
     if (report["total_sales"] != fresh["total_sales"]
@@ -2353,10 +2476,7 @@ async def close_register(
 
     # Checagem final para reduzir o risco de uma movimentação concorrente
     # entre a conferência e a gravação do relatório definitivo.
-    if await db.orders.count_documents({
-        "is_closed": False,
-        "source": {"$ne": "online"},
-    }):
+    if await db.orders.count_documents(nostfood.OPEN_CASH_ORDERS_QUERY):
         raise HTTPException(status_code=409, detail="Nova comanda presencial aberta; reimprima a prévia")
     latest = await preview_cash_register(current_user)
     if token.get("digest") != _closing_preview_hash(latest):
@@ -2505,8 +2625,10 @@ async def get_sales_report(period: str = "daily", current_user: dict = Depends(r
     else:
         start_date = today - timedelta(days=1)
     
+    # Pedido cancelado não é venda (se começou a ser feito, o custo vai para stock_losses).
+    sold = _sold_orders_match(start_date)
     pipeline = [
-        {"$match": {"is_closed": True, "closed_at": {"$gte": start_date.isoformat()}, "is_comp": {"$ne": True}}},
+        {"$match": sold},
         {"$group": {
             "_id": None,
             "total_sales": {"$sum": "$total"},
@@ -2519,8 +2641,9 @@ async def get_sales_report(period: str = "daily", current_user: dict = Depends(r
     
     # Get top products
     product_pipeline = [
-        {"$match": {"is_closed": True, "closed_at": {"$gte": start_date.isoformat()}, "is_comp": {"$ne": True}}},
+        {"$match": sold},
         {"$unwind": "$items"},
+        {"$match": {"items.status": {"$ne": "cancelled"}}},
         {"$group": {
             "_id": "$items.product_name",
             "quantity": {"$sum": "$items.quantity"},
@@ -2549,8 +2672,12 @@ async def get_profit_report(period: str = "daily", current_user: dict = Depends(
         start_date = today - timedelta(days=30)
     
     # Get sales
+    # Mesmo filtro de /reports/sales (cancelado, teste e "Não recebido" não são venda).
+    # Cortesia continua contando aqui, como antes deste ajuste.
+    sold = _sold_orders_match(start_date)
+    sold.pop("is_comp")
     sales_pipeline = [
-        {"$match": {"is_closed": True, "closed_at": {"$gte": start_date.isoformat()}}},
+        {"$match": sold},
         {"$group": {"_id": None, "total": {"$sum": "$total"}}}
     ]
     sales = await db.orders.aggregate(sales_pipeline).to_list(1)
@@ -2579,7 +2706,8 @@ SOCKET_PII_ROLES = ("superadmin", "admin", "cashier")
 SOCKET_ADMIN_ROLES = ("superadmin", "admin")
 SOCKET_ALL_ROLES = ("superadmin", "admin", "waiter", "cashier", "kitchen", "bar")
 # Campos do pedido que só os perfis de SOCKET_PII_ROLES recebem.
-ORDER_PRIVATE_FIELDS = ("customer_phone", "address", "change_for")
+# customer_address, latitude e longitude: endereço dos pedidos da NostFood.
+ORDER_PRIVATE_FIELDS = ("customer_phone", "address", "change_for", "customer_address", "latitude", "longitude")
 SOCKET_ITEM_READY_ROLES = ("superadmin", "admin", "kitchen", "bar", "waiter")
 SOCKET_CLEANING_ROLES = ("superadmin", "admin", "waiter", "cashier")
 
@@ -3620,6 +3748,9 @@ register_operational_routes(
     require_role,
     UserRole
 )
+
+# Integração NostFood (iFood/99): rotas em /api/integrations/nostfood
+nostfood.register(api_router, app, sys.modules[__name__])
 
 # Registrar todas as rotas na aplicação
 app.include_router(api_router)
