@@ -8,6 +8,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../co
 import { toast } from 'sonner';
 import { Loader2 } from 'lucide-react';
 import { Logo } from '../components/Logo';
+import Assinatura from '../components/Assinatura';
 
 export default function LoginPage() {
   const [email, setEmail] = useState('');
@@ -121,6 +122,8 @@ export default function LoginPage() {
 
           </CardContent>
         </Card>
+
+        <Assinatura />
       </div>
     </div>
   );

@@ -24,6 +24,7 @@ from jose import JWTError, jwt
 from enum import Enum
 from bootstrap import ensure_initial_superadmin, require_secret_key
 import physical_tabs
+import sobre
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -63,7 +64,7 @@ sio = socketio.AsyncServer(
 )
 
 # Create FastAPI app
-app = FastAPI(title="Gestor Restô - Sistema de Gestão para Restaurante")
+app = FastAPI(title="Gestor Restô - Sistema de Gestão para Restaurante", version=sobre.VERSAO)
 api_router = APIRouter(prefix="/api")
 security = HTTPBearer()
 
@@ -133,6 +134,11 @@ async def health_check_api():
 @api_router.get("/ping")
 async def ping():
     return {"message": "pong", "timestamp": datetime.now(timezone.utc).isoformat()}
+
+@api_router.get("/versao")
+async def versao():
+    """Sistema, versão, autoria e commit em execução (sem autenticação, sem banco)."""
+    return sobre.info()
 
 # ==================== ENUMS ====================
 class UserRole(str, Enum):
