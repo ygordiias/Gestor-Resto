@@ -1568,9 +1568,12 @@ async def sales_by_table(period: str = "daily", current_user: dict = Depends(req
         start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     start_iso = start.isoformat()
 
-    # Busca pedidos fechados no periodo
+    # Pedidos fechados no período, sem cancelado, teste ou "Não recebido".
+    # A cortesia continua no filtro: ela aparece separada em comp_total.
+    sold = _sold_orders_match(start)
+    sold.pop("is_comp")
     pipeline = [
-        {"$match": {"is_closed": True, "closed_at": {"$gte": start_iso}}},
+        {"$match": sold},
         {"$group": {
             "_id": "$table_number",
             "total": {"$sum": {"$cond": [{"$eq": ["$is_comp", True]}, 0, "$total"]}},
@@ -2463,6 +2466,12 @@ async def create_invoice(invoice_data: InvoiceBase):
     return {k: v for k, v in inv_dict.items() if k != "_id"}
 
 # ==================== REPORTS ROUTES ====================
+def _sold_orders_match(start_date) -> dict:
+    """Pedidos que contam como venda: fechados, sem cancelado, cortesia, teste ou "Não recebido"."""
+    return {"is_closed": True, "closed_at": {"$gte": start_date.isoformat()},
+            "is_comp": {"$ne": True}, "status": {"$ne": "cancelled"},
+            "is_test": {"$ne": True}, "payment_status": {"$ne": "not_received"}}
+
 @api_router.get("/reports/sales")
 async def get_sales_report(period: str = "daily", current_user: dict = Depends(require_role([UserRole.ADMIN]))):
     today = datetime.now(timezone.utc)
