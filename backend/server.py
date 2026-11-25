@@ -2599,7 +2599,8 @@ SOCKET_PII_ROLES = ("superadmin", "admin", "cashier")
 SOCKET_ADMIN_ROLES = ("superadmin", "admin")
 SOCKET_ALL_ROLES = ("superadmin", "admin", "waiter", "cashier", "kitchen", "bar")
 # Campos do pedido que só os perfis de SOCKET_PII_ROLES recebem.
-ORDER_PRIVATE_FIELDS = ("customer_phone", "address", "change_for")
+# customer_address, latitude e longitude: endereço dos pedidos da NostFood.
+ORDER_PRIVATE_FIELDS = ("customer_phone", "address", "change_for", "customer_address", "latitude", "longitude")
 SOCKET_ITEM_READY_ROLES = ("superadmin", "admin", "kitchen", "bar", "waiter")
 SOCKET_CLEANING_ROLES = ("superadmin", "admin", "waiter", "cashier")
 

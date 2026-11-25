@@ -562,8 +562,9 @@ async def _open_orders():
 async def _emit_kds():
     try:
         orders = await _open_orders()
-        await S.sio.emit("kitchen_update", orders)
-        await S.sio.emit("bar_update", orders)
+        # Cozinha, bar e garçom: sem telefone, endereço e troco (emit_orders do server).
+        await S.emit_orders("kitchen_update", orders)
+        await S.emit_orders("bar_update", orders)
     except Exception as e:
         logger.warning(f"[NOSTFOOD] falha ao avisar o KDS: {e}")
 
@@ -834,7 +835,7 @@ async def _register_unlinked(order: dict, unlinked_items: list):
     if unlinked_items:
         names = ", ".join(i["product_name"] for i in unlinked_items)
         logger.warning(f"[NOSTFOOD] pedido {order.get('external_order_number')} com item sem ligação: {names}")
-        await S.sio.emit("nostfood_alert", {
+        await S.emit_admins("nostfood_alert", {
             "type": "unlinked_item",
             "order_id": order["id"],
             "order_number": order.get("external_order_number"),
@@ -969,7 +970,7 @@ async def upsert_from_snapshot(raw: dict, origin: str, is_test: bool = False,
     if item_status != "pending":
         await _register_unlinked(order, unlinked)
         return "created_history" if item_status == "delivered" else "created"
-    await S.sio.emit("new_online_order", {
+    await S.emit_orders("new_online_order", {
         "order_id": order["id"], "platform": SOURCE,
         "external_order_number": order["external_order_number"],
         "delivery_type": "delivery", "total": order["total"], "items_count": len(items),
@@ -1046,7 +1047,7 @@ async def cancel_external(external_id, order_number, reason, origin) -> str:
             "nostfood_cancel_reason": reason}})
         logger.warning(f"[NOSTFOOD] pedido {order.get('external_order_number')} cancelado na plataforma "
                        f"depois de finalizado no Gestor: conferir manualmente")
-        await S.sio.emit("nostfood_alert", {
+        await S.emit_admins("nostfood_alert", {
             "type": "cancelled_after_close", "order_id": order["id"],
             "order_number": order.get("external_order_number"),
             "display_label": display_label(order),
@@ -1122,13 +1123,13 @@ async def cancel_external(external_id, order_number, reason, origin) -> str:
 
     logger.info(f"[NOSTFOOD] pedido {order.get('external_order_number')} cancelado via {origin}: {reason} "
                 f"(perdas={len(loss_items)}, devolvidos={len(restored)})")
-    updated = await S.db.orders.find_one({"id": order["id"]}, {"_id": 0})
-    await S.sio.emit("order_cancelled", {"order_id": order["id"]})
-    await S.sio.emit("kds_cancelled", updated)
+    await S.emit_staff("order_cancelled", {"order_id": order["id"]})
+    # Só o id: cada tela busca o aviso em /kds/cancelados, já filtrado pelo perfil.
+    await S.emit_staff("kds_cancelled", {"order_id": order["id"]})
     await _emit_kds()
     if restored or loss_items:
         try:
-            await S.sio.emit("stock_updated", await S.db.stock.find({}, {"_id": 0}).to_list(500))
+            await S.emit_admins("stock_updated", await S.db.stock.find({}, {"_id": 0}).to_list(500))
         except Exception:
             pass
     return "cancelled_with_loss" if loss_items else "cancelled"
@@ -1434,7 +1435,7 @@ def build_router(require_role, UserRole) -> APIRouter:
             await S.db.stock_losses.delete_many({"order_id": {"$in": ids}})
             await S.db.payments.delete_many({"order_id": {"$in": ids}})
         await _emit_kds()
-        await S.sio.emit("kds_cancelled", None)
+        await S.emit_staff("kds_cancelled", None)
         logger.info(f"[NOSTFOOD] {removed.deleted_count} pedido(s) de teste apagado(s)")
         return {"deleted": removed.deleted_count}
 
@@ -1484,7 +1485,7 @@ def build_router(require_role, UserRole) -> APIRouter:
             })
         logger.warning(f"[NOSTFOOD] pedido {order.get('external_order_number')} marcado como NÃO RECEBIDO "
                        f"por {current_user.get('name')}: {reason}")
-        await S.sio.emit("order_closed", {"order_id": order_id})
+        await S.emit_staff("order_closed", {"order_id": order_id})
         await _emit_kds()
         return await S.db.orders.find_one({"id": order_id}, {"_id": 0})
 
@@ -1565,7 +1566,7 @@ def build_router(require_role, UserRole) -> APIRouter:
         obs = {"id": str(uuid.uuid4()), "text": text, "author_id": current_user.get("id"),
                "author_name": current_user.get("name"), "created_at": _now_iso(), "acks": {}}
         await S.db.orders.update_one({"id": order_id}, {"$push": {"observations": obs}})
-        await S.sio.emit("order_observation", {"order_id": order_id, "observation": obs})
+        await S.emit_staff("order_observation", {"order_id": order_id, "observation": obs})
         await _emit_kds()
         return obs
 
@@ -1606,8 +1607,10 @@ def build_router(require_role, UserRole) -> APIRouter:
         pending = any(s not in acks for s in _required_cancel_stations(order))
         await S.db.orders.update_one({"id": order_id}, {"$set": {"cancel_acks": acks, "kds_ack_pending": pending}})
         updated = await S.db.orders.find_one({"id": order_id}, {"_id": 0})
-        await S.sio.emit("kds_cancelled", updated)
-        return updated
+        await S.emit_staff("kds_cancelled", {"order_id": order_id})
+        if current_user.get("role") in FULL_ORDER_ROLES:
+            return updated
+        return kds_cancelled_view(updated)
 
     @router.get("/perdas", dependencies=[admin])
     async def list_losses(data_inicio: Optional[str] = Query(None), data_fim: Optional[str] = Query(None)):

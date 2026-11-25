@@ -45,7 +45,7 @@ inválido, a resposta é 401. Nos dois casos o corpo tem só `detail`.
 | POST | `/pedidos/{order_id}/observacao` | admin, caixa | Nova observação no pedido (aparece no KDS). |
 | POST | `/pedidos/{order_id}/observacao/{obs_id}/ciente` | admin, cozinha, bar | KDS confirma que viu a observação. |
 | GET | `/kds/cancelados` | admin, garçom, caixa, cozinha, bar | Pedidos cancelados recentes para o aviso do KDS. Admin e caixa recebem o pedido completo. Cozinha, bar e garçom recebem só o que o KDS usa: código, mesa, primeiro nome do cliente, itens (nome, quantidade, tipo, status), motivo, horário e autor do cancelamento. Não recebem telefone, endereço, troco, pagamento nem valores. |
-| POST | `/pedidos/{order_id}/cancelamento/ciente` | admin, cozinha, bar | KDS confirma que viu o cancelamento. |
+| POST | `/pedidos/{order_id}/cancelamento/ciente` | admin, cozinha, bar | KDS confirma que viu o cancelamento. Cozinha e bar recebem a mesma visão reduzida do `/kds/cancelados`. |
 | GET | `/perdas` | admin | Perdas de estoque por cancelamento depois do preparo. |
 
 Um teste (`test_every_route_is_listed_here`) falha se uma rota nova entrar na integração
@@ -278,6 +278,18 @@ A baixa usa a mesma ficha técnica do salão, mas **nunca trava** o KDS nem o ca
 ### Pedidos de teste
 
 `POST /simular` cria um pedido falso só no Gestor (`is_test = true`), que nunca chama a NostFood, não mexe em estoque e não entra no caixa. `DELETE /testes` apaga todos os pedidos de teste e o que eles geraram. Webhook e polling nunca criam pedido de teste.
+
+## Tempo real (Socket.IO)
+
+A integração só envia eventos pelas funções por sala do `server.py`. Nenhum evento vai para "todo mundo conectado".
+
+| Evento | Função | Quem recebe |
+|---|---|---|
+| `kitchen_update`, `bar_update`, `new_online_order` | `emit_orders` | Admin, superadmin e caixa: pedido completo. Cozinha, bar e garçom: só o primeiro nome do cliente, sem telefone, endereço (`address`, `customer_address`, `latitude`, `longitude`) e troco. |
+| `order_cancelled`, `order_closed`, `order_observation`, `kds_cancelled` | `emit_staff` | Todos os usuários logados. Levam só ids e a observação. `kds_cancelled` leva só `{order_id}`: cada tela busca o aviso em `/kds/cancelados`, já filtrado pelo perfil. |
+| `nostfood_alert`, `stock_updated` | `emit_admins` | Só admin e superadmin. |
+
+O teste `test_nenhum_evento_para_cozinha_ou_bar_leva_telefone_ou_endereco` (`backend/tests/test_socket_dados_pessoais.py`) passa pelos fluxos da NostFood e do salão e confere cada evento que chega a cozinha, bar ou garçom.
 
 ## Variáveis de ambiente
 
