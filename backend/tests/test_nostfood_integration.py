@@ -856,3 +856,57 @@ def test_link_by_name_ignores_case_accents_and_spaces(env, linked_as, arrives_as
     assert asyncio.run(nf.upsert_from_snapshot(o, "teste")) == "created_history"
     item = orders(env)[0]["items"][0]
     assert item["product_id"] == "p-sansao" and item["unlinked"] is False
+
+
+# ==================== descontos e taxas da plataforma ====================
+def _closes(b, subtotal, total):
+    return round(subtotal - b["discount_total"] + b["delivery_fee_gross"] + b["platform_service_fee"], 2) == total
+
+
+def test_breakdown_from_real_99_order():
+    norm = nf.normalize_order(real_order())
+    b = norm["breakdown"]
+    assert b == {"discount_total": 52.89, "discount_store": 26.83, "discount_platform": 26.06,
+                 "platform_service_fee": 4.2, "delivery_fee_gross": 6.88, "delivery_fee_net": 0.0}
+    assert _closes(b, norm["subtotal"], norm["total"])
+
+
+def test_breakdown_from_promotions_when_no_sponsorship():
+    o = real_order()
+    del o["items"]["sponsorship_values"]
+    b = nf.normalize_order(o)["breakdown"]
+    # promotions_raw em centavos: 2201+2400+688 = 52,89; loja 2201+0+482 = 26,83
+    assert (b["discount_total"], b["discount_store"], b["discount_platform"]) == (52.89, 26.83, 26.06)
+
+
+def test_breakdown_only_total_discount_has_unknown_split():
+    o = real_order()
+    del o["items"]["sponsorship_values"], o["items"]["promotions_raw"]
+    b = nf.normalize_order(o)["breakdown"]
+    assert b["discount_total"] == 52.89 and b["discount_store"] is None and b["discount_platform"] is None
+
+
+def test_breakdown_direct_order_has_no_discounts():
+    norm = nf.normalize_order(real_order("pedido_direto"))
+    b = norm["breakdown"]
+    assert b == {"discount_total": 0.0, "discount_store": 0.0, "discount_platform": 0.0,
+                 "platform_service_fee": 0.0, "delivery_fee_gross": 12.25, "delivery_fee_net": 12.25}
+    assert _closes(b, norm["subtotal"], norm["total"])
+
+
+def test_breakdown_saved_on_order_but_cash_uses_total(env):
+    env.remote.append(real_order())
+    asyncio.run(nf.poll_once())
+    o = orders(env)[0]
+    assert (o["discount_total"], o["discount_store"], o["discount_platform"]) == (52.89, 26.83, 26.06)
+    assert (o["platform_service_fee"], o["delivery_fee_gross"], o["delivery_fee_net"]) == (4.2, 6.88, 0.0)
+    # valores usados por caixa e relatórios não mudam
+    assert (o["subtotal"], o["delivery_fee"], o["total"], o["service_fee"]) == (122.32, 6.88, 80.51, 0.0)
+
+
+def test_old_list_format_gets_neutral_breakdown(env):
+    link_all(env)
+    send_event("order.created", remote_order())
+    o = orders(env)[0]
+    assert o["discount_total"] == 0.0 and o["delivery_fee_gross"] == 5.0 and o["delivery_fee_net"] == 5.0
+

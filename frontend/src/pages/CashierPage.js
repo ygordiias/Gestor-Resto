@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import Layout from '../components/Layout';
 import FinancialModulesPanel from '../components/FinancialModulesPanel';
+import PlatformTotals, { hasPlatformBreakdown } from '../components/PlatformTotals';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
@@ -1274,6 +1275,14 @@ export default function CashierPage() {
                             )}
                           </div>
 
+                          {Number(order.discount_total) > 0 && (
+                            <p className="pt-2 border-t text-xs text-muted-foreground" data-testid="order-card-discount">
+                              Subtotal {formatCurrency(order.subtotal)}
+                              {' · '}Desconto −{formatCurrency(order.discount_total)}
+                              {Number(order.delivery_fee_gross) > 0 && ` · Entrega +${formatCurrency(order.delivery_fee_gross)}`}
+                              {Number(order.platform_service_fee) > 0 && ` · Taxa +${formatCurrency(order.platform_service_fee)}`}
+                            </p>
+                          )}
                           <div className="pt-2 border-t flex justify-between items-center">
                             <span className="font-medium text-sm">Total:</span>
                             <span className="text-base sm:text-lg font-bold text-primary">
@@ -1373,6 +1382,9 @@ export default function CashierPage() {
                   </ScrollArea>
 
                   {/* Totais */}
+                  {hasPlatformBreakdown(selectedOrder) ? (
+                    <PlatformTotals order={selectedOrder} />
+                  ) : (
                   <div className="space-y-1 sm:space-y-2 border-t pt-2">
                     <div className="flex justify-between text-xs sm:text-sm">
                       <span>Subtotal:</span>
@@ -1397,6 +1409,7 @@ export default function CashierPage() {
                       </span>
                     </div>
                   </div>
+                  )}
 
                   {selectedOrder.external_source === 'nostfood' && (
                     <div className="rounded border p-3 text-xs sm:text-sm space-y-1" data-testid="cashier-delivery-info">

@@ -273,6 +273,48 @@ def _financials(details: dict) -> Optional[dict]:
     return out or None
 
 
+def _breakdown(details: dict, delivery_fee: float) -> dict:
+    """Descontos e taxas da plataforma, para a conta do pedido fechar:
+
+        subtotal - discount_total + delivery_fee_gross + platform_service_fee = total
+
+    Só registro: ainda não entra em caixa nem relatórios.
+    - discount_store: parte do desconto paga pela loja (sai do repasse);
+    - discount_platform: parte paga pela plataforma (subsídio);
+    - platform_service_fee: taxa de serviço cobrada do cliente pela plataforma;
+    - delivery_fee_gross/net: entrega antes e depois do desconto de entrega.
+    Fontes: sponsorship_values; na falta, promotions_raw (centavos); na falta, totais.desconto.
+    """
+    totais = details.get("totais") if isinstance(details.get("totais"), dict) else {}
+    spons = details.get("sponsorship_values") if isinstance(details.get("sponsorship_values"), dict) else {}
+    promos = [p for p in (details.get("promotions_raw") or []) if isinstance(p, dict)]
+
+    store = platform = None
+    if spons:
+        total_discount = _num(_pick(spons, "total_discount", default=_pick(totais, "desconto", default=0)))
+        store = _num(spons.get("shop_subside_price"), 0)
+        platform = _num(spons.get("platform_subside_price"), round(total_discount - store, 2))
+    elif promos:
+        total_discount = sum(_num(p.get("promo_discount"), 0) for p in promos) / 100
+        store = sum(_num(p.get("shop_subside_price"), 0) for p in promos) / 100
+        platform = total_discount - store
+    else:
+        total_discount = _num(_pick(totais, "desconto", default=0))
+        if not total_discount:
+            store = platform = 0.0  # sem desconto: nada a dividir
+
+    gross = _pick(totais, "entrega_bruta", default=None)
+    net = _pick(totais, "entrega_liquida", default=None)
+    return {
+        "discount_total": round(total_discount, 2),
+        "discount_store": round(store, 2) if store is not None else None,
+        "discount_platform": round(platform, 2) if platform is not None else None,
+        "platform_service_fee": round(_num(_pick(totais, "taxa_servico", default=0)), 2),
+        "delivery_fee_gross": round(_num(gross), 2) if gross is not None else round(delivery_fee, 2),
+        "delivery_fee_net": round(_num(net), 2) if net is not None else round(delivery_fee, 2),
+    }
+
+
 def normalize_order(raw: dict) -> dict:
     cliente = raw.get("cliente") if isinstance(raw.get("cliente"), dict) else {}
     customer = raw.get("customer") if isinstance(raw.get("customer"), dict) else {}
@@ -332,6 +374,7 @@ def normalize_order(raw: dict) -> dict:
         "platform_order_id": _pick(details, "food99_order_id", "ifood_order_id",
                                    default=_pick(raw, "food99_order_id", "ifood_order_id")),
         "financials": _financials(details),
+        "breakdown": _breakdown(details, delivery_fee),
         "created_at": _pick(raw, "created_at", "data", "data_pedido"),
         "cancel_reason": _pick(raw, "motivo", "reason", "cancellation_reason", "motivo_cancelamento"),
     }
@@ -796,6 +839,7 @@ async def upsert_from_snapshot(raw: dict, origin: str, is_test: bool = False,
             "external_origin_platform": norm["origin_platform"],
             "external_platform_order_id": norm["platform_order_id"],
             "external_financials": norm["financials"],
+            **norm["breakdown"],  # descontos e taxas da plataforma: só registro
             "customer_name": norm["customer_name"],
             "customer_phone": norm["customer_phone"],
             "address": norm["address_text"],
