@@ -260,7 +260,7 @@ def test_duplicate_event_is_ignored(env):
     link_all(env)
     assert send_event("order.created", remote_order(), event_id="evt_dup") == (200, {"ok": True})
     status, body = send_event("order.created", remote_order(), event_id="evt_dup")
-    assert status == 200 and body["duplicate"] is True
+    assert status == 200 and body == {"ok": True}
     assert len(env.db.nostfood_events.docs) == 1 and len(orders(env)) == 1
     assert env.db.nostfood_events.docs[0]["status"] == "processed"
 

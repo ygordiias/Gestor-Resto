@@ -568,13 +568,85 @@ async def _emit_kds():
         logger.warning(f"[NOSTFOOD] falha ao avisar o KDS: {e}")
 
 
+# ==================== SAÍDA PARA A NOSTFOOD (allowlist) ====================
+# Toda chamada HTTP para a NostFood passa por nostfood_request(). Só estas
+# rotas e campos podem sair; qualquer outra coisa é recusada e registrada no log.
+# Nunca sai cliente, valor, cardápio, estoque, usuário nem nada do Gestor.
+OUTBOUND_ALLOWLIST = {
+    ("GET", "pedidos.php"): {"params": {"data_inicio", "data_fim", "limit", "offset"}, "json": set()},
+    ("POST", "atualizar-pedido.php"): {"params": set(), "json": {"pedido_id", "order_number", "status"}},
+}
+OUTBOUND_STATUSES = {"em_preparo", "pronto"}  # únicos status que o Gestor envia
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+class OutboundBlocked(RuntimeError):
+    """Chamada para a NostFood recusada pela allowlist (nada foi enviado)."""
+
+
+def _block(reason: str):
+    logger.error(f"[NOSTFOOD][SAÍDA BLOQUEADA] {reason}")
+    raise OutboundBlocked(reason)
+
+
+def _check_outbound(method: str, route: str, params: Optional[dict], body: Optional[dict]) -> None:
+    rule = OUTBOUND_ALLOWLIST.get((method, route))
+    if rule is None:
+        _block(f"rota não permitida: {method} {route}")
+    params, body = params or {}, body or {}
+    extra = set(params) - rule["params"]
+    if extra:
+        _block(f"{method} {route}: parâmetros não permitidos: {sorted(extra)}")
+    extra = set(body) - rule["json"]
+    if extra:
+        _block(f"{method} {route}: campos não permitidos: {sorted(extra)}")
+    if body and not rule["json"]:
+        _block(f"{method} {route}: corpo não permitido")
+    if route == "pedidos.php":
+        for k in ("data_inicio", "data_fim"):
+            if k in params and not _DATE_RE.match(str(params[k])):
+                _block(f"pedidos.php: {k} fora do formato AAAA-MM-DD")
+        for k in ("limit", "offset"):
+            if k in params and not (isinstance(params[k], int) and not isinstance(params[k], bool) and params[k] >= 0):
+                _block(f"pedidos.php: {k} precisa ser inteiro >= 0")
+    if route == "atualizar-pedido.php":
+        if not send_status_enabled():
+            _block("atualizar-pedido.php com NOSTFOOD_SEND_STATUS=false")
+        if body.get("status") not in OUTBOUND_STATUSES:
+            _block(f"atualizar-pedido.php: status não permitido: {body.get('status')!r}")
+        ids = [k for k in ("pedido_id", "order_number") if k in body]
+        if len(ids) != 1:
+            _block("atualizar-pedido.php: informe só pedido_id ou só order_number")
+        value = body[ids[0]]
+        if ids[0] == "pedido_id" and not (isinstance(value, int) and not isinstance(value, bool)):
+            _block("atualizar-pedido.php: pedido_id precisa ser inteiro")
+        if ids[0] == "order_number" and not (isinstance(value, str) and value.strip()):
+            _block("atualizar-pedido.php: order_number precisa ser texto")
+    base = _base_url()
+    if not base.startswith("https://"):
+        _block("NOSTFOOD_BASE_URL precisa ser https:// (a chave da API vai no cabeçalho)")
+
+
+async def _http_send(method: str, url: str, params: Optional[dict], body: Optional[dict], headers: dict) -> dict:
+    import httpx
+    # follow_redirects=False: um redirecionamento nunca leva a chave para outro endereço.
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_SECONDS, follow_redirects=False) as client:
+        r = await client.request(method, url, params=params or None, json=body if body else None, headers=headers)
+        r.raise_for_status()
+        return r.json()
+
+
+async def nostfood_request(method: str, route: str, params: Optional[dict] = None,
+                           body: Optional[dict] = None) -> dict:
+    """Única porta de saída para a NostFood. Recusa (OutboundBlocked) o que não está na allowlist."""
+    method = method.upper()
+    _check_outbound(method, route, params, body)
+    return await _http_send(method, f"{_base_url()}/{route}", params, body, {"X-API-Key": _api_key()})
+
+
 # ==================== API DA NOSTFOOD ====================
 async def fetch_orders_page(params: dict) -> dict:
-    import httpx
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_SECONDS) as client:
-        r = await client.get(f"{_base_url()}/pedidos.php", params=params, headers={"X-API-Key": _api_key()})
-        r.raise_for_status()
-        body = r.json()
+    body = await nostfood_request("GET", "pedidos.php", params=params)
     if not body.get("success", True):
         raise RuntimeError(body.get("message") or "NostFood respondeu success=false")
     return body.get("data") or {}
@@ -608,19 +680,13 @@ async def fetch_remote_order(external_id, order_number) -> Optional[dict]:
 
 
 async def send_status(external_id, order_number, status: str) -> dict:
-    import httpx
     body = {"status": status}
     if external_id and str(external_id).isdigit():
         body["pedido_id"] = int(external_id)
     elif order_number:
         body["order_number"] = str(order_number)
-    else:
-        body["pedido_id"] = external_id
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_SECONDS) as client:
-        r = await client.post(f"{_base_url()}/atualizar-pedido.php", json=body,
-                              headers={"X-API-Key": _api_key()})
-        r.raise_for_status()
-        data = r.json()
+    # sem id nem número: nostfood_request recusa (antes saía pedido_id=None)
+    data = await nostfood_request("POST", "atualizar-pedido.php", body=body)
     if not data.get("success", True):
         raise RuntimeError(data.get("message") or "NostFood respondeu success=false")
     return data
@@ -1233,6 +1299,27 @@ def _required_cancel_stations(order: dict):
     return [s for s, t in (("kitchen", "food"), ("bar", "drink")) if t in types]
 
 
+WEBHOOK_MAX_BODY_BYTES = 256 * 1024
+
+
+async def _read_limited_body(request: Request) -> bytes:
+    """Corpo do webhook com limite de 256 KB (Content-Length e leitura em partes)."""
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            if int(declared) > WEBHOOK_MAX_BODY_BYTES:
+                raise HTTPException(status_code=413, detail="Corpo grande demais")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Content-Length inválido")
+    chunks, size = [], 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > WEBHOOK_MAX_BODY_BYTES:
+            raise HTTPException(status_code=413, detail="Corpo grande demais")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 def build_router(require_role, UserRole) -> APIRouter:
     router = APIRouter(prefix="/integrations/nostfood", tags=["nostfood"])
     admin = Depends(require_role([UserRole.ADMIN]))
@@ -1248,7 +1335,7 @@ def build_router(require_role, UserRole) -> APIRouter:
         if not secret:
             # Nunca aceita sem verificar a assinatura.
             raise HTTPException(status_code=503, detail="NOSTFOOD_WEBHOOK_SECRET não configurado: webhook recusado")
-        raw = await request.body()
+        raw = await _read_limited_body(request)
         if not verify_signature(raw, request.headers.get("X-NostFood-Signature"), secret):
             raise HTTPException(status_code=401, detail="Assinatura inválida")
         try:
@@ -1260,7 +1347,7 @@ def build_router(require_role, UserRole) -> APIRouter:
             raise HTTPException(status_code=400, detail="event_id ausente")
         await ensure_indexes()
         if await S.db.nostfood_events.find_one({"event_id": event_id}, {"_id": 0, "event_id": 1}):
-            return {"ok": True, "duplicate": True}
+            return {"ok": True}  # repetido: já registrado (a resposta nunca leva dado do Gestor)
         doc = {
             "event_id": event_id,
             "event_type": payload.get("event_type"),
@@ -1274,7 +1361,7 @@ def build_router(require_role, UserRole) -> APIRouter:
         try:
             await S.db.nostfood_events.insert_one(doc)
         except DuplicateKeyError:
-            return {"ok": True, "duplicate": True}
+            return {"ok": True}
         doc.pop("_id", None)
         background_tasks.add_task(process_event, doc)
         return {"ok": True}
