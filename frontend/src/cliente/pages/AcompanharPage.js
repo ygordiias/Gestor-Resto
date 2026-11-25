@@ -1,10 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, RefreshCw } from 'lucide-react';
-import { io } from 'socket.io-client';
 import FooterTecnoDias from '../components/FooterTecnoDias';
 
 const API = process.env.REACT_APP_BACKEND_URL;
+// Página pública: sem Socket.IO (ele exige login). Atualiza por consulta.
+const REFRESH_MS = 15000;
 
 const STATUS_MAP = {
   pending: { label: 'Recebido', color: '#fbbf24', bg: '#422006' },
@@ -33,17 +34,10 @@ export default function AcompanharPage() {
   useEffect(() => {
     fetchOrder();
 
-    // Socket.IO para atualizações em tempo real
-    const socket = io(API, { transports: ['websocket', 'polling'] });
-    socket.on('order_updated', (data) => {
-      if (data?.order_code === codigo) {
-        fetchOrder();
-      }
-    });
-    socket.on('kitchen_update', () => fetchOrder());
-    socket.on('bar_update', () => fetchOrder());
+    // Atualização periódica do status (só os dados deste pedido)
+    const refresh = setInterval(fetchOrder, REFRESH_MS);
 
-    return () => socket.disconnect();
+    return () => clearInterval(refresh);
   }, [codigo]);
 
   const overallStatus = order?.status || 'pending';
