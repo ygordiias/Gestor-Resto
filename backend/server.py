@@ -901,7 +901,12 @@ async def create_order(order_data: OrderCreate, current_user: dict = Depends(get
             item["created_at"] = item["created_at"].isoformat()
         
         existing_order["items"].extend(items)
-        subtotal = sum(item["unit_price"] * item["quantity"] for item in existing_order["items"])
+        # Itens cancelados não somam (mesma regra do cancelamento e da cortesia).
+        subtotal = sum(
+            (item.get("unit_price") or 0) * (item.get("quantity") or 0)
+            for item in existing_order["items"]
+            if item.get("status") != "cancelled"
+        )
         service_fee = subtotal * (existing_order.get("service_fee_percentage", 10) / 100)
 
         # Preserva waiter se pedido ainda nao tem
@@ -1234,10 +1239,25 @@ async def mark_item_courtesy(order_id: str, item_id: str, data: dict, current_us
     found = False
     for item in order.get("items", []):
         if item.get("id") == item_id:
+            was_courtesy = bool(item.get("is_courtesy"))
+            if is_courtesy:
+                # Guarda o preço cobrado antes de zerar (só na primeira marcação,
+                # para não sobrescrever com 0 se marcar de novo).
+                if not was_courtesy:
+                    item["courtesy_original_price"] = item.get("unit_price", 0)
+                item["unit_price"] = 0
+            elif was_courtesy:
+                original = item.get("courtesy_original_price")
+                if original is None:
+                    # Cortesia marcada antes de o preço ser guardado: usa o cadastro.
+                    product = await db.products.find_one({"id": item.get("product_id")}, {"_id": 0})
+                    if not product:
+                        raise HTTPException(status_code=409, detail="Preço original do item não encontrado")
+                    original = product.get("price", 0)
+                item["unit_price"] = float(original or 0)
+                item.pop("courtesy_original_price", None)
             item["is_courtesy"] = is_courtesy
             item["courtesy_reason"] = reason if is_courtesy else None
-            if is_courtesy:
-                item["unit_price"] = 0
             found = True
             break
     if not found:
@@ -1675,9 +1695,12 @@ async def sales_by_table(period: str = "daily", current_user: dict = Depends(req
         start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     start_iso = start.isoformat()
 
-    # Busca pedidos fechados no periodo
+    # Pedidos fechados no período, sem cancelado, teste ou "Não recebido".
+    # A cortesia continua no filtro: ela aparece separada em comp_total.
+    sold = _sold_orders_match(start)
+    sold.pop("is_comp")
     pipeline = [
-        {"$match": {"is_closed": True, "closed_at": {"$gte": start_iso}}},
+        {"$match": sold},
         {"$group": {
             "_id": "$table_number",
             "total": {"$sum": {"$cond": [{"$eq": ["$is_comp", True]}, 0, "$total"]}},
@@ -3590,13 +3613,24 @@ async def create_public_order(order_data: PublicOrderCreate):
     if order_data.delivery_type == "delivery" and not order_data.address:
         raise HTTPException(status_code=400, detail="Endereço obrigatório para delivery")
 
+    # Preço e nome vêm SEMPRE do cadastro: o "price" e o "name" enviados pelo
+    # navegador são ignorados. Produto inexistente ou indisponível é recusado.
+    products = []
+    for item in order_data.items:
+        if item.quantity < 1:
+            raise HTTPException(status_code=400, detail="Quantidade inválida")
+        product = await db.products.find_one({"id": item.product_id}, {"_id": 0})
+        if not product or product.get("is_available") is False:
+            raise HTTPException(status_code=400, detail="Produto indisponível no cardápio")
+        products.append(product)
+
     # Validar estoque usando items como dicts compatíveis com validate_stock
     stock_items = []
-    for item in order_data.items:
+    for item, product in zip(order_data.items, products):
         stock_items.append(type('obj', (object,), {
             'product_id': item.product_id,
             'quantity': item.quantity,
-            'product_name': item.name,
+            'product_name': product.get("name") or item.product_id,
         })())
     await validate_stock(stock_items)
 
@@ -3605,16 +3639,14 @@ async def create_public_order(order_data: PublicOrderCreate):
 
     # Montar items no formato do sistema existente
     order_items = []
-    for item in order_data.items:
-        product = await db.products.find_one({"id": item.product_id}, {"_id": 0})
-        item_type = product.get("type", "food") if product else "food"
+    for item, product in zip(order_data.items, products):
         order_items.append({
             "id": str(uuid.uuid4()),
             "product_id": item.product_id,
-            "product_name": item.name,
+            "product_name": product.get("name") or item.product_id,
             "quantity": item.quantity,
-            "unit_price": item.price,
-            "type": item_type,
+            "unit_price": float(product.get("price", 0) or 0),
+            "type": product.get("type", "food"),
             "status": "pending",
             "notes": None,
             "created_at": datetime.now(timezone.utc).isoformat(),
