@@ -47,6 +47,7 @@ export default function OrderPage() {
   const [selectedTab, setSelectedTab] = useState('traditional');
   const [tabInput, setTabInput] = useState('');
   const [linkingTab, setLinkingTab] = useState(false);
+  const [tabRange, setTabRange] = useState(null); // {min, max} vindo do servidor
   const [notesDialog, setNotesDialog] = useState(null);
   const [draftNotes, setDraftNotes] = useState('');
   const selectedTabRef = useRef('traditional');
@@ -91,6 +92,9 @@ export default function OrderPage() {
     if (!Number.isInteger(number) || number <= 0) {
       toast.error('Digite um número de comanda válido'); return;
     }
+    if (tabRange && (number < tabRange.min || number > tabRange.max)) {
+      toast.error(`Comanda ${number} fora da faixa permitida (${tabRange.min} a ${tabRange.max})`); return;
+    }
     setLinkingTab(true);
     try {
       await api.post(`/tables/${tableId}/tabs`, { tab_number: number });
@@ -105,6 +109,16 @@ export default function OrderPage() {
       toast.error(error.response?.data?.detail || 'Não foi possível vincular a comanda');
     } finally { setLinkingTab(false); }
   };
+
+  // Faixa das comandas físicas: mesma origem do servidor (GET /tabs/config).
+  // Se falhar, o servidor continua validando e devolve a mensagem.
+  useEffect(() => {
+    let active = true;
+    api.get('/tabs/config')
+      .then(res => { if (active && res.data) setTabRange(res.data); })
+      .catch(() => {});
+    return () => { active = false; };
+  }, []);
 
   const fetchData = useCallback(async () => {
     if (!isMountedRef.current) return;
@@ -339,7 +353,8 @@ export default function OrderPage() {
               ))}
             </div>
             <div className="flex gap-2 items-center">
-              <Input type="number" min="1" inputMode="numeric" placeholder="Número da comanda física"
+              <Input type="number" min={tabRange?.min ?? 1} max={tabRange?.max} inputMode="numeric"
+                placeholder={tabRange ? `Comanda física (${tabRange.min} a ${tabRange.max})` : 'Número da comanda física'}
                 value={tabInput} onChange={e => setTabInput(e.target.value)}
                 className="max-w-xs" />
               <Button onClick={linkTab} disabled={linkingTab || !tabInput.trim()}>
