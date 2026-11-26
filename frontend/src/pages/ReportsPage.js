@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import Layout from '../components/Layout';
 import AdvancedReportsPanel from '../components/AdvancedReportsPanel';
+import PromotionsReport from '../components/PromotionsReport';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { Button } from '../components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
@@ -139,6 +140,9 @@ export default function ReportsPage() {
             </Card>
           ))}
         </div>
+
+        {/* Promoções, descontos manuais e cortesias de item: separados */}
+        <PromotionsReport summary={salesData.summary} />
 
         {/* Profit Details */}
         <Card>

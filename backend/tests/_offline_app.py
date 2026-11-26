@@ -40,10 +40,11 @@ def call(method, path, token=None, body=None, headers=None, with_headers=False):
     for k, v in extra.items():
         headers.append((k.lower().encode(), v.encode()))
     raw = json.dumps(body if body is not None else {}).encode()
+    path, _, query = path.partition("?")
     scope = {
         "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
         "method": method, "scheme": "http", "path": path, "raw_path": path.encode(),
-        "query_string": b"", "root_path": "", "headers": headers,
+        "query_string": query.encode(), "root_path": "", "headers": headers,
         "client": ("127.0.0.1", 1), "server": ("testserver", 80),
     }
     sent = {"done": False}

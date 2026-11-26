@@ -8,7 +8,8 @@ import { Switch } from '../components/ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
 import { toast } from 'sonner';
 import NostfoodPanel from '../components/NostfoodPanel';
-import { Settings, Store, Receipt, Database, Save, Loader2, Bike } from 'lucide-react';
+import PromotionsPanel from '../components/PromotionsPanel';
+import { Settings, Store, Receipt, Database, Save, Loader2, Bike, Tag } from 'lucide-react';
 
 const API = process.env.REACT_APP_BACKEND_URL;
 
@@ -75,7 +76,7 @@ export default function SettingsPage() {
     <Layout title="Configurações">
       <div className="space-y-6 max-w-4xl" data-testid="settings-page">
         <Tabs defaultValue="restaurant">
-          <TabsList className="mb-6">
+          <TabsList className="mb-6 h-auto flex-wrap">
             <TabsTrigger value="restaurant">
               <Store className="h-4 w-4 mr-2" />
               Estabelecimento
@@ -92,10 +93,18 @@ export default function SettingsPage() {
               <Bike className="h-4 w-4 mr-2" />
               NostFood
             </TabsTrigger>
+            <TabsTrigger value="promotions" data-testid="settings-tab-promotions">
+              <Tag className="h-4 w-4 mr-2" />
+              Promoções
+            </TabsTrigger>
           </TabsList>
 
           <TabsContent value="nostfood">
             <NostfoodPanel />
+          </TabsContent>
+
+          <TabsContent value="promotions">
+            <PromotionsPanel />
           </TabsContent>
 
           <TabsContent value="restaurant">

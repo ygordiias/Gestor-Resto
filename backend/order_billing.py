@@ -1,5 +1,5 @@
-"""Cobrança no caixa: totais, desconto por item, cortesia por quantidade e
-pagamento parcial.
+"""Cobrança no caixa: totais, desconto por item, cortesia por quantidade,
+promoção gerencial e pagamento parcial.
 
 Só funções puras (sem banco): quem chama lê o pedido, aplica a mudança na cópia
 e grava. Valores em centavos para não errar no arredondamento.
@@ -13,6 +13,11 @@ Regras:
 - Item cancelado não soma.
 - Desconto não é cortesia: cada um tem seu total no pedido
   (`item_discount_total` e `item_courtesy_total`).
+- Promoção (promotions.py) é gravada no item quando ele é lançado
+  (`promo_*`) e fica nele mesmo que a promoção acabe depois. Tem seu próprio
+  total (`item_promo_total`), separado do desconto manual e da cortesia.
+- Desconto manual não acumula com promoção: vale o maior. Os dois são medidos
+  sobre o preço cheio (`promo_original_price`).
 - Unidades já pagas (pagamento parcial por item) não recebem desconto,
   cortesia nem cancelamento, e o total nunca fica abaixo do que já foi pago.
 """
@@ -28,6 +33,7 @@ DISCOUNT_FIELDS = (
     "discount_approved_by_name", "discount_at",
 )
 COURTESY_AUDIT_FIELDS = ("courtesy_by_id", "courtesy_by_name", "courtesy_at")
+PROMO_FIELDS = ("promo_id", "promo_name", "promo_original_price", "promo_price", "promo_type", "promo_value")
 
 
 class BillingError(ValueError):
@@ -98,6 +104,32 @@ def line_discount_cents(item: dict) -> int:
     return max(0, cents(item["discount_original_price"]) - cents(item.get("unit_price"))) * qty(item)
 
 
+def has_promo(item: dict) -> bool:
+    return bool(item.get("promo_id")) and item.get("promo_price") is not None
+
+
+def line_promo_cents(item: dict) -> int:
+    """Desconto da promoção na linha. Sai quando um desconto manual maior a substitui."""
+    if not has_promo(item) or item.get("discount_original_price") is not None:
+        return 0
+    return max(0, cents(item.get("promo_original_price")) - cents(item.get("promo_price"))) * qty(item)
+
+
+def full_price_cents(item: dict) -> int:
+    """Preço cheio por unidade (antes de promoção e de desconto manual)."""
+    if has_promo(item):
+        return cents(item.get("promo_original_price"))
+    return cents(item.get("discount_original_price", item.get("unit_price")))
+
+
+def base_price(item: dict) -> float:
+    """Preço por unidade sem o desconto manual (com a promoção, se houver)."""
+    if has_promo(item):
+        return float(item["promo_price"])
+    original = item.get("discount_original_price")
+    return float(original if original is not None else item.get("unit_price") or 0)
+
+
 def line_courtesy_cents(item: dict) -> int:
     if not item.get("is_courtesy"):
         return 0
@@ -120,6 +152,7 @@ def totals(order: dict) -> dict:
         "total": money(total),
         "item_discount_total": money(sum(line_discount_cents(i) for i in items)),
         "item_courtesy_total": money(sum(line_courtesy_cents(i) for i in items)),
+        "item_promo_total": money(sum(line_promo_cents(i) for i in items)),
     }
 
 
@@ -230,9 +263,9 @@ def mark_courtesy(order: dict, item_id: str, quantity, reason: str, user: dict, 
         item.update(_author(user, "courtesy", now_iso))
         return item
     target = take_units(order, item_id, quantity)
-    # Item com desconto: a cortesia guarda o preço cheio e o desconto sai.
-    original = target.get("discount_original_price")
-    target["courtesy_original_price"] = float(original if original is not None else target.get("unit_price") or 0)
+    # Item com desconto manual: o desconto sai e a cortesia guarda o preço sem
+    # ele (o cheio, ou o da promoção, que continua no item e no relatório).
+    target["courtesy_original_price"] = base_price(target)
     _clear_discount(target)
     target["unit_price"] = 0
     target["is_courtesy"] = True
@@ -259,6 +292,27 @@ def unmark_courtesy(item: dict, fallback_price) -> dict:
     item["is_courtesy"] = False
     item["courtesy_reason"] = None
     return item
+
+
+_MERGE_KEYS = ("product_id", "status", "stock_deducted", "promo_id", "notes", "type")
+
+
+def merge_back(order: dict, item: dict) -> dict:
+    """Depois de desfazer cortesia/desconto, junta a linha de volta à linha de origem
+    (ex.: 2 + 1 volta a ser 3) quando as duas ficaram iguais. Senão não mexe."""
+    origin_id = item.get("split_from")
+    if not origin_id or paid_qty(item):
+        return item
+    origin = next((i for i in order.get("items") or [] if i.get("id") == origin_id), None)
+    if (origin is None or origin.get("status") == "cancelled" or origin.get("is_courtesy")
+            or item.get("is_courtesy") or origin.get("discount_original_price") is not None
+            or item.get("discount_original_price") is not None
+            or cents(origin.get("unit_price")) != cents(item.get("unit_price"))
+            or any(origin.get(k) != item.get(k) for k in _MERGE_KEYS)):
+        return item
+    origin["quantity"] = qty(origin) + qty(item)
+    order["items"] = [i for i in order["items"] if i is not item]
+    return origin
 
 
 # --------------------------------------------------------- desconto
@@ -292,14 +346,20 @@ def discount_pct(original_cents: int, unit_cents: int) -> float:
 
 
 def preview_discount(order: dict, item_id: str, kind: str, value) -> float:
-    """% equivalente do desconto pedido (para decidir se precisa de admin)."""
+    """% equivalente do desconto pedido, sobre o preço cheio (para decidir se precisa de admin)."""
     item = order["items"][find_index(order, item_id)]
-    original = cents(item.get("discount_original_price", item.get("unit_price")))
+    original = full_price_cents(item)
     return discount_pct(original, discounted_unit_cents(original, kind, value))
 
 
 def apply_discount(order: dict, item_id: str, quantity, kind: str, value, reason: str,
-                   user: dict, approver: dict, now_iso: str) -> dict:
+                   user: dict, approver: dict, now_iso: str) -> tuple:
+    """Aplica o desconto manual. Devolve (linha, aviso ou None).
+
+    Não acumula com promoção: se a promoção já dá desconto igual ou maior, recusa
+    (409: vale a promoção); se o manual for maior, ele substitui a promoção na
+    linha e o aviso diz isso.
+    """
     reason = (reason or "").strip()
     if not reason:
         raise BillingError("Informe o motivo do desconto")
@@ -308,11 +368,19 @@ def apply_discount(order: dict, item_id: str, quantity, kind: str, value, reason
         raise BillingError("Item em cortesia não recebe desconto")
     if item.get("status") == "cancelled":
         raise BillingError("Item cancelado")
-    original = item.get("discount_original_price", item.get("unit_price"))
-    original_c = cents(original)
+    original_c = full_price_cents(item)
     if original_c <= 0:
         raise BillingError("Item sem preço não recebe desconto")
     unit_c = discounted_unit_cents(original_c, kind, value)
+    warning = None
+    if has_promo(item):
+        promo_c = cents(item.get("promo_price"))
+        if promo_c <= unit_c:
+            raise BillingError(
+                f"O desconto não acumula com a Promoção: {item.get('promo_name')} "
+                f"({discount_pct(original_c, promo_c):g}%), que já é igual ou maior. Vale a promoção.", 409)
+        warning = (f"O desconto não acumula com a Promoção: {item.get('promo_name')}. "
+                   "Vale o desconto manual, que é maior.")
     target = take_units(order, item_id, quantity)
     target["discount_original_price"] = money(original_c)
     target["unit_price"] = money(unit_c)
@@ -327,17 +395,19 @@ def apply_discount(order: dict, item_id: str, quantity, kind: str, value, reason
     else:
         target.pop("discount_approved_by_id", None)
         target.pop("discount_approved_by_name", None)
-    return target
+    return target, warning
 
 
 def remove_discount(order: dict, item_id: str) -> dict:
+    """Tira o desconto manual. Item lançado na promoção volta ao preço da promoção."""
     item = order["items"][find_index(order, item_id)]
     if item.get("discount_original_price") is None:
         raise BillingError("Item não tem desconto")
     if paid_qty(item):
         raise BillingError("Linha com unidades já pagas: estorne o pagamento antes de tirar o desconto", 409)
-    item["unit_price"] = float(item["discount_original_price"])
+    restored = base_price(item)  # antes de limpar: usa discount_original_price
     _clear_discount(item)
+    item["unit_price"] = restored
     return item
 
 

@@ -103,9 +103,13 @@ Não existe cadastro público.
 | GET | `/api/orders/open` | equipe | Pedidos abertos |
 | GET | `/api/orders/table/{table_id}` | equipe | Pedido aberto da mesa |
 | GET | `/api/orders/{id}` | equipe | Um pedido |
-| POST | `/api/orders` | logado | Lança itens. Com `tab_number`, soma na comanda já vinculada; sem, usa o pedido sem comanda da mesa. Recalcula subtotal, 10% e total |
+| POST | `/api/orders` | logado | Lança itens. Com `tab_number`, soma na comanda já vinculada; sem, usa o pedido sem comanda da mesa. Aplica a promoção ativa do salão e recalcula subtotal, 10% e total |
 | PUT | `/api/orders/{id}/item/{item_id}/status` | status | `{status}`. Ao virar `delivered` pela primeira vez, dá baixa no estoque |
-| PATCH | `/api/orders/{id}/item/{item_id}/courtesy` | caixa | `{is_courtesy, reason}`. Zera o preço do item e recalcula |
+| PATCH | `/api/orders/{id}/item/{item_id}/courtesy` | caixa | `{is_courtesy, reason, quantity?}`. Cortesia de `quantity` unidades (divide a linha); desmarcar devolve o preço guardado |
+| PATCH | `/api/orders/{id}/item/{item_id}/discount` | caixa | `{type: percent\|value, value, reason, quantity?, admin_email?, admin_password?}`. Desconto por item; acima de 10% só admin. Pode devolver `warning` (não acumula com promoção) |
+| DELETE | `/api/orders/{id}/item/{item_id}/discount` | caixa | Tira o desconto manual do item |
+| POST | `/api/orders/{id}/partial-payments` | caixa | `{payments, amount}` ou `{payments, items: [{item_id, quantity}]}`. Recebe parte da conta; devolve `order`, `partial_payment`, `change` e `remaining` |
+| POST | `/api/orders/{id}/partial-payments/{pid}/reverse` | admin ou senha admin | `{reason, admin_email?, admin_password?}`. Estorna um pagamento parcial |
 | PATCH | `/api/orders/{id}/item/{item_id}/cancel` | senha admin | `{quantity, reason, admin_email, admin_password, restore_stock}`. Cancela total ou parcial |
 | PATCH | `/api/orders/{id}/cancel` | senha admin | `{reason, admin_email, admin_password}`. Cancela a comanda inteira e libera mesa e comanda |
 | POST | `/api/orders/{id}/cancel-quick` | admin | Cancela se nenhum item saiu de `pending` |
@@ -155,7 +159,8 @@ Formas de pagamento aceitas: `cash`, `pix`, `credit`, `debit`, `voucher` e `card
 
 | Método | Rota | Permissão | Descrição |
 |---|---|---|---|
-| GET | `/api/reports/sales?period=daily\|weekly\|monthly` | admin | Total, número de pedidos, ticket médio e 10 produtos mais vendidos (sem cortesia) |
+| GET | `/api/reports/sales?period=daily\|weekly\|monthly` | admin | Total, número de pedidos, ticket médio, concedido nos itens (`item_promo_total`, `item_discount_total`, `item_courtesy_total`) e 10 produtos mais vendidos (sem cortesia) |
+| GET | `/api/reports/promotions?start=AAAA-MM-DD&end=AAAA-MM-DD` | admin | Total concedido por promoção e por dia, separado do desconto manual e da cortesia (padrão: hoje) |
 | GET | `/api/reports/profit?period=` | admin | Estimativa simplificada: custo fixo de 35% das vendas |
 | GET | `/api/reports/sales-by-table?period=` | caixa | Consumo por mesa, separando cortesia |
 | GET | `/api/reports/service-fees/weekly?week=AAAA-MM-DD` | admin | Taxa de serviço por dia na semana (segunda a domingo), só pedidos do salão conciliados |
@@ -207,6 +212,16 @@ Formas de pagamento aceitas: `cash`, `pix`, `credit`, `debit`, `voucher` e `card
 |---|---|---|---|
 | GET | `/api/settings` | admin | `{restaurant, operations, fiscal}` |
 | PUT | `/api/settings` | admin | Salva os blocos enviados. Nome, endereço e CNPJ também vão para a configuração pública |
+
+## Promoções
+
+| Método | Rota | Permissão | Descrição |
+|---|---|---|---|
+| GET | `/api/promotions` | admin | Lista com `status` (ativa, agendada, encerrada, desligada), `applies_now` e `history` |
+| GET | `/api/promotions/active?channel=salao\|balcao\|cardapio` | equipe | Promoções valendo agora no canal (prévia na tela de lançamento) |
+| POST | `/api/promotions` | admin | `{name, discount_type: percent\|value, discount_value, category_ids, product_ids, start_date, end_date, weekdays?, start_time?, end_time?, channels}` |
+| PUT | `/api/promotions/{id}` | admin | Edita (itens já lançados não mudam) |
+| PATCH | `/api/promotions/{id}/active` | admin | `{is_active}`. Liga ou desliga sem apagar o histórico |
 
 ## Cardápio público (cliente)
 
