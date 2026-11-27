@@ -460,3 +460,63 @@ def test_previa_mostra_parciais_de_comandas_abertas(db):
     assert status == 200
     assert report["open_partial_payments"] == {"orders": 1, "amount": 20.0}
     assert report["open_orders"] == 1  # o fechamento do caixa continua bloqueado
+
+
+# =====================================================================
+# Pedido fechado: o pagamento que fecha entra em paid_amount e na lista
+# =====================================================================
+def _close_scenario(db, monkeypatch, kind):
+    """Devolve (id do pedido, pagamentos do fechamento, parcial antes ou None)."""
+    if kind == "comanda":  # comanda física (tab 210), com um parcial antes
+        return "o-1", [{"method": "cash", "amount": 80.0}], 50.0
+    if kind == "mesa":  # mesa sem comanda física
+        o = salon_order("o-mesa", tab=None)
+        db.orders.docs.append(o)
+        return "o-mesa", [{"method": "pix", "amount": o["total"]}], None
+    # NostFood "Receber na entrega": fecha pelo mesmo fechamento do caixa.
+    async def noop(*a, **k):
+        return None
+    monkeypatch.setattr(server.nostfood, "safe_deduct", noop)
+    o = {"id": "o-nf", "source": "online", "external_source": "nostfood", "payment_status": "to_collect",
+         "table_id": None, "status": "pending", "is_closed": False, "is_comp": False,
+         "created_at": "2026-11-26T20:00:00+00:00",
+         "items": [item("i-nf", "p-burger", "X-Burger", 2, 30.0)]}
+    o.update(billing.totals(o))
+    db.orders.docs.append(o)
+    return "o-nf", [{"method": "cash", "amount": 100.0}], None
+
+
+@pytest.mark.parametrize("kind", ["comanda", "mesa", "nostfood"])
+def test_pedido_fechado_fica_com_falta_pagar_zero(db, monkeypatch, kind):
+    oid, close_payments, partial = _close_scenario(db, monkeypatch, kind)
+    if partial:
+        status, body = caixa("POST", f"/api/orders/{oid}/partial-payments",
+                             {"amount": partial, "payments": [{"method": "pix", "amount": partial}]})
+        assert status == 200, body
+    due = billing.money(billing.remaining_cents(order(db, oid)))
+
+    status, body = caixa("POST", f"/api/orders/{oid}/close", {"payments": close_payments})
+    assert status == 200, body
+
+    o = order(db, oid)
+    assert o["is_closed"] is True
+    assert o["paid_amount"] == o["total"]
+    assert billing.remaining_cents(o) == 0  # Falta pagar = 0
+    final = o["partial_payments"][-1]
+    assert final["kind"] == "final" and final["status"] == "active"
+    assert final["amount"] == due and final["created_by_name"] == "Caixa Ana" and final["created_at"]
+    assert final["register_id"] == "reg-1"
+    given = sum(p["amount"] for p in close_payments)
+    assert final["change"] == round(given - due, 2)
+    # Os valores gravados na lista já saem sem o troco (somam o que entrou).
+    assert round(sum(p["amount"] for p in final["payments"]), 2) == due
+    assert [p["kind"] for p in o["partial_payments"]] == (["partial", "final"] if partial else ["final"])
+
+
+def test_cortesia_permuta_fechada_nao_vira_pagamento(db):
+    order(db)["is_comp"] = True
+    status, body = caixa("POST", "/api/orders/o-1/close", {"payments": []})
+    assert status == 200, body
+    o = order(db)
+    assert o["is_closed"] is True
+    assert not o.get("paid_amount") and not o.get("partial_payments")

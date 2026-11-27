@@ -1449,6 +1449,7 @@ async def create_partial_payment(order_id: str, data: dict, current_user: dict =
     partial_id = str(uuid.uuid4())
     entry = {
         "id": partial_id,
+        "kind": "partial",
         "amount": billing.money(target),
         "payments": [{"method": p["method"], "amount": billing.money(p["amount_cents"])} for p in lines],
         "change": billing.money(change),
@@ -1881,29 +1882,55 @@ async def close_order(order_id: str, payment_data: dict, current_user: dict = De
     closed_at = datetime.now(timezone.utc).isoformat()
     payment_docs = []
 
+    # O pagamento que fecha entra no pedido igual aos parciais: soma em paid_amount
+    # (pedido fechado fica com Falta pagar = 0) e vai para a lista de pagamentos.
+    # Cortesia/permuta não é pagamento: não mexe em paid_amount.
+    close_set = {
+        "is_closed": True,
+        "closed_at": closed_at,
+        "status": OrderStatus.DELIVERED.value,
+        "closed_by_id": current_user["id"],
+    }
+    final_entry = None
+    if not is_comp:
+        close_set["paid_amount"] = billing.money(billing.paid_cents(order) + total_cents)
+        if total_cents > 0:
+            lines, change = billing.settle_change(payments, total_cents)
+            final_entry = {
+                "id": str(uuid.uuid4()),
+                "kind": "final",
+                "amount": billing.money(total_cents),
+                "payments": [{"method": p["method"], "amount": billing.money(p["amount_cents"])} for p in lines],
+                "change": billing.money(change),
+                "items": [],
+                "created_at": closed_at,
+                "created_by_id": current_user.get("id"),
+                "created_by_name": current_user.get("name"),
+                "status": "active",
+            }
+
     # Fechamento, pagamentos e total_sales: juntos ou nada (transação).
     # Sem suporte a transação no banco, a rota falha e NÃO grava nada.
     try:
         async with await client.start_session() as session:
             async with session.start_transaction():
+                register = await db.cash_registers.find_one({"is_open": True}, {"_id": 0}, session=session)
+                close_update = {"$set": close_set}
+                if final_entry:
+                    close_update["$push"] = {"partial_payments": {
+                        **final_entry, "register_id": register["id"] if register else None}}
                 claimed = await db.orders.update_one(
                     # billing_version: se a cobrança mudou depois da leitura (item novo,
                     # desconto, pagamento parcial), não fecha com o valor velho.
                     {"id": order_id, "is_closed": False, **claim_filter,
                      "billing_version": order.get("billing_version")},
-                    {"$set": {
-                        "is_closed": True,
-                        "closed_at": closed_at,
-                        "status": OrderStatus.DELIVERED.value,
-                        "closed_by_id": current_user["id"],
-                    }},
+                    close_update,
                     session=session,
                 )
                 if claimed.modified_count != 1:
                     # Duplo clique / outra aba: outro pedido já fechou esta comanda.
                     raise _OrderAlreadyClosed()
 
-                register = await db.cash_registers.find_one({"is_open": True}, {"_id": 0}, session=session)
                 for p in payments:
                     payment_obj = Payment(order_id=order_id, amount=p["amount_cents"] / 100, method=p["method"])
                     pay_dict = payment_obj.model_dump()

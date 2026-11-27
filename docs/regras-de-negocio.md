@@ -44,6 +44,7 @@ Fonte: `server.py` (`close_order`, `_validate_close_payments`).
 - Pedido em cortesia/permuta não exige pagamento.
 - Fechamento, pagamentos e soma no caixa aberto (`total_sales`) acontecem numa **transação**: tudo ou nada. Se o banco não aceitar transação, a rota devolve 503 e não grava nada. Duplo clique ou outra aba: só o primeiro fecha, o segundo recebe 409.
 - **Com pagamento parcial, o fechamento cobra só o que falta** (`total − paid_amount`) e só esse restante soma no `total_sales`. Comanda já zerada fecha sem pagamento novo.
+- **O pagamento que fecha entra no pedido igual aos parciais**: soma em `paid_amount` e vai para `partial_payments` com `kind = "final"` (forma, valor já sem o troco, troco, autor, horário e `register_id`). Pedido fechado fica com Falta pagar = 0. Vale para mesa, comanda física e NostFood "Receber na entrega" (mesmo fechamento). Cortesia/permuta fechada não é pagamento e não mexe em `paid_amount`.
 - O fechamento é condicionado à `billing_version` lida: se entrou item, desconto, cortesia ou pagamento parcial depois que a tela carregou, devolve 409 e não grava nada.
 - Cada pagamento grava `register_id` do caixa aberto, quem lançou e `kind` (`final` no fechamento, `partial` no pagamento parcial).
 - Depois de confirmado: baixa de estoque dos itens que ainda não tiveram baixa (cortesia também), libera a comanda e a mesa e avisa as telas.
