@@ -9,8 +9,9 @@ import { Input } from '../components/ui/input';
 import { Textarea } from '../components/ui/textarea';
 import { ScrollArea } from '../components/ui/scroll-area';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
-import api, { productsAPI, categoriesAPI, ordersAPI, tablesAPI } from '../lib/api';
+import api, { productsAPI, categoriesAPI, ordersAPI, tablesAPI, promotionsAPI } from '../lib/api';
 import { cn, formatCurrency, getStatusLabel, getStatusColor } from '../lib/utils';
+import { bestPromoFor, hasPromo, promoLabel } from '../lib/billing';
 import { useAuth } from '../contexts/AuthContext';
 import socketService, { playNotificationSound } from '../lib/socket';
 import { toast } from 'sonner';
@@ -27,6 +28,29 @@ import {
   Bell,
   Sparkles
 } from 'lucide-react';
+
+// Preço do cardápio com a promoção que vale agora (só prévia: o servidor aplica ao lançar).
+function ProductPrice({ product, promos }) {
+  const best = bestPromoFor(promos, product, product.price);
+  if (!best) {
+    return (
+      <p className="text-base sm:text-lg font-bold text-primary mt-1">
+        {formatCurrency(product.price)}
+      </p>
+    );
+  }
+  return (
+    <div className="mt-1" data-testid={`product-promo-${product.id}`}>
+      <p className="text-base sm:text-lg font-bold text-primary">
+        <span className="text-xs sm:text-sm text-muted-foreground line-through mr-2 font-normal">
+          {formatCurrency(product.price)}
+        </span>
+        {formatCurrency(best.price)}
+      </p>
+      <Badge className="text-[10px] bg-emerald-600 hover:bg-emerald-600">Promoção: {best.promo.name}</Badge>
+    </div>
+  );
+}
 
 export default function OrderPage() {
   const { tableId } = useParams();
@@ -52,6 +76,7 @@ export default function OrderPage() {
   const [notesDialog, setNotesDialog] = useState(null);
   const [observationOpen, setObservationOpen] = useState(false);
   const [draftNotes, setDraftNotes] = useState('');
+  const [activePromos, setActivePromos] = useState([]);
   const selectedTabRef = useRef('traditional');
   const cartRef = useRef([]);
   const cartIdRef = useRef(0);
@@ -130,6 +155,11 @@ export default function OrderPage() {
         categoriesAPI.getAll(),
         !table ? tablesAPI.getAll() : Promise.resolve({ data: [table] }),
       ]);
+
+      // Promoções valendo agora no salão: só prévia (sem elas, mostra o preço do cadastro).
+      promotionsAPI.active('salao')
+        .then(res => { if (isMountedRef.current) setActivePromos(res.data || []); })
+        .catch(() => {});
 
       if (isMountedRef.current) {
         setProducts(productsRes.data.filter(p => p.is_available));
@@ -295,7 +325,11 @@ export default function OrderPage() {
   const foodProducts = filteredProducts.filter(p => p.type === 'food');
   const drinkProducts = filteredProducts.filter(p => p.type === 'drink');
 
-  const cartTotal = cart.reduce((sum, item) => sum + item.unit_price * item.quantity, 0);
+  // Prévia da promoção no carrinho (o servidor confirma ao lançar).
+  const cartPromo = (item) =>
+    bestPromoFor(activePromos, products.find(p => p.id === item.product_id), item.unit_price);
+  const cartPrice = (item) => cartPromo(item)?.price ?? item.unit_price;
+  const cartTotal = cart.reduce((sum, item) => sum + cartPrice(item) * item.quantity, 0);
 
   if (loading) {
     return (
@@ -441,9 +475,7 @@ export default function OrderPage() {
                             <p className="text-xs sm:text-sm text-muted-foreground line-clamp-1">
                               {product.description}
                             </p>
-                            <p className="text-base sm:text-lg font-bold text-primary mt-1">
-                              {formatCurrency(product.price)}
-                            </p>
+                            <ProductPrice product={product} promos={activePromos} />
                           </div>
                           <Button size="icon" variant="outline" className="shrink-0 h-8 w-8 sm:h-10 sm:w-10">
                             <Plus className="h-4 w-4" />
@@ -483,9 +515,7 @@ export default function OrderPage() {
                             <p className="text-xs sm:text-sm text-muted-foreground line-clamp-1">
                               {product.description}
                             </p>
-                            <p className="text-base sm:text-lg font-bold text-primary mt-1">
-                              {formatCurrency(product.price)}
-                            </p>
+                            <ProductPrice product={product} promos={activePromos} />
                           </div>
                           <Button size="icon" variant="outline" className="shrink-0 h-8 w-8 sm:h-10 sm:w-10">
                             <Plus className="h-4 w-4" />
@@ -518,7 +548,14 @@ export default function OrderPage() {
                     <ScrollArea className="h-24 sm:h-32 rounded border p-2">
                       {currentOrder.items.map((item) => (
                         <div key={item.id} className="flex justify-between text-xs sm:text-sm py-1">
-                          <span className="truncate">{item.quantity}x {item.product_name}</span>
+                          <span className="truncate">
+                            {item.quantity}x {item.product_name}
+                            {hasPromo(item) && (
+                              <span className="block text-[11px] font-medium text-emerald-700">
+                                {promoLabel(item)}
+                              </span>
+                            )}
+                          </span>
                           <Badge className={cn('text-xs ml-2', getStatusColor(item.status))} variant="outline">
                             {getStatusLabel(item.status)}
                           </Badge>
@@ -581,8 +618,18 @@ export default function OrderPage() {
                               <div className="min-w-0">
                                 <p className="font-medium text-xs sm:text-sm truncate">{item.product_name}</p>
                                 <p className="text-primary font-bold text-sm">
-                                  {formatCurrency(item.unit_price * item.quantity)}
+                                  {cartPromo(item) && (
+                                    <span className="text-xs text-muted-foreground line-through font-normal mr-1">
+                                      {formatCurrency(item.unit_price * item.quantity)}
+                                    </span>
+                                  )}
+                                  {formatCurrency(cartPrice(item) * item.quantity)}
                                 </p>
+                                {cartPromo(item) && (
+                                  <p className="text-[11px] font-medium text-emerald-700">
+                                    Promoção: {cartPromo(item).promo.name}
+                                  </p>
+                                )}
                               </div>
                               <Button
                                 variant="ghost"

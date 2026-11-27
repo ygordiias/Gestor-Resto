@@ -26,8 +26,10 @@ from enum import Enum
 from bootstrap import ensure_initial_superadmin, require_cors_origins, require_secret_key
 import nostfood_integration as nostfood
 import kds_cancel
+import order_billing as billing
 import order_observations
 import physical_tabs
+import promotions
 import sobre
 
 ROOT_DIR = Path(__file__).parent
@@ -864,6 +866,27 @@ async def get_order(order_id: str):
         raise HTTPException(status_code=404, detail="Order not found")
     return order
 
+async def _apply_launch_promotions(items: list, channel) -> None:
+    """Promoção gerencial no LANÇAMENTO (promotions.py): o item guarda o preço cheio,
+    o preço com desconto e o nome da promoção. channel=None (NostFood/iFood/99): nada."""
+    if not channel or not items:
+        return
+    active = await db.promotions.find({"is_active": True}, {"_id": 0}).to_list(None)
+    if not active:
+        return
+    moment = promotions.now_local()
+    products = {}
+    for item in items:
+        if item.get("is_courtesy") or item.get("promo_id"):
+            continue
+        pid = item.get("product_id")
+        if pid not in products:
+            products[pid] = await db.products.find_one({"id": pid}, {"_id": 0})
+        best = promotions.best_for(active, products[pid], billing.cents(item.get("unit_price")), channel, moment)
+        if best:
+            promotions.apply_to_item(item, *best)
+
+
 @api_router.post("/orders", response_model=dict)
 async def create_order(order_data: OrderCreate, current_user: dict = Depends(get_current_user)):
     # Vincula automaticamente o garcom autenticado quando aplicavel
@@ -899,31 +922,30 @@ async def create_order(order_data: OrderCreate, current_user: dict = Depends(get
         items = [OrderItem(**item.model_dump()).model_dump() for item in order_data.items]
         for item in items:
             item["created_at"] = item["created_at"].isoformat()
-        
-        existing_order["items"].extend(items)
-        # Itens cancelados não somam (mesma regra do cancelamento e da cortesia).
-        subtotal = sum(
-            (item.get("unit_price") or 0) * (item.get("quantity") or 0)
-            for item in existing_order["items"]
-            if item.get("status") != "cancelled"
-        )
-        service_fee = subtotal * (existing_order.get("service_fee_percentage", 10) / 100)
+        await _apply_launch_promotions(items, promotions.order_channel(existing_order))
 
-        # Preserva waiter se pedido ainda nao tem
-        update_set = {
-            "items": existing_order["items"],
-            "subtotal": subtotal,
-            "service_fee": service_fee,
-            "total": subtotal + service_fee,
-        }
-        if not existing_order.get("waiter_id") and order_data.waiter_id:
-            update_set["waiter_id"] = order_data.waiter_id
-            update_set["waiter_name"] = order_data.waiter_name
-
-        await db.orders.update_one(
-            {"id": existing_order["id"]},
-            {"$set": update_set}
-        )
+        # Gravação condicionada à versão da cobrança: se um pagamento parcial,
+        # desconto ou fechamento entrou no meio, relê a comanda e tenta de novo.
+        for _attempt in range(3):
+            existing_order["items"].extend(items)
+            # Itens cancelados não somam; 10% só no salão (order_billing.totals).
+            update_set = {"items": existing_order["items"], **billing.totals(existing_order)}
+            # Preserva waiter se pedido ainda nao tem
+            if not existing_order.get("waiter_id") and order_data.waiter_id:
+                update_set["waiter_id"] = order_data.waiter_id
+                update_set["waiter_name"] = order_data.waiter_name
+            saved = await db.orders.update_one(
+                {"id": existing_order["id"], "is_closed": False,
+                 "billing_version": existing_order.get("billing_version")},
+                {"$set": update_set, "$inc": {"billing_version": 1}}
+            )
+            if saved.matched_count == 1:
+                break
+            existing_order = await db.orders.find_one({"id": existing_order["id"], "is_closed": False})
+            if not existing_order:
+                raise HTTPException(status_code=409, detail="A comanda foi fechada enquanto o pedido era lançado")
+        else:
+            raise HTTPException(status_code=409, detail="A comanda está sendo alterada no caixa; tente lançar de novo")
         updated_order = await db.orders.find_one({"id": existing_order["id"]}, {"_id": 0})
         
         # Emit events for kitchen and bar
@@ -953,12 +975,10 @@ async def create_order(order_data: OrderCreate, current_user: dict = Depends(get
     order_dict["created_at"] = order_dict["created_at"].isoformat()
     for item in order_dict["items"]:
         item["created_at"] = item["created_at"].isoformat()
-    
-    subtotal = sum(item["unit_price"] * item["quantity"] for item in order_dict["items"])
-    order_dict["subtotal"] = subtotal
-    order_dict["service_fee"] = subtotal * (order_dict["service_fee_percentage"] / 100)
-    order_dict["total"] = order_dict["subtotal"] + order_dict["service_fee"]
-    
+    await _apply_launch_promotions(order_dict["items"], promotions.order_channel(order_dict))
+    order_dict.update(billing.totals(order_dict))
+    order_dict["billing_version"] = 0
+
     await db.orders.insert_one(order_dict)
     await db.tables.update_one(
         {"id": order_data.table_id},
@@ -1002,6 +1022,8 @@ async def create_online_order(
         oi = OrderItem(**it.model_dump()).model_dump()
         oi["created_at"] = oi["created_at"].isoformat()
         items_out.append(oi)
+    # Promoção só no "Outro" (balcão); iFood/99 têm o preço da plataforma.
+    await _apply_launch_promotions(items_out, promotions.order_channel({"source": "online", "platform": platform}))
 
     subtotal = sum(i["unit_price"] * i["quantity"] for i in items_out)
 
@@ -1032,6 +1054,7 @@ async def create_online_order(
         "created_by_id": current_user.get("id"),
         "created_by_name": current_user.get("name"),
     }
+    order_dict.update(_item_adjustment_totals(order_dict))
 
     await db.orders.insert_one(order_dict)
 
@@ -1163,6 +1186,15 @@ async def confirm_order_observation(order_id: str, obs_id: str, body: dict,
     return await ack_order_observation(order_id, obs_id, body, current_user)
 
 
+def _refuse_if_partially_paid(order: dict, action: str) -> None:
+    """Comanda com pagamento parcial não é cancelada nem vira cortesia inteira: estorne antes."""
+    if billing.paid_cents(order) > 0:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Esta comanda já tem {billing.brl(billing.paid_cents(order))} pagos. "
+                   f"Estorne os pagamentos parciais antes de {action}.")
+
+
 @api_router.patch("/orders/{order_id}/cancel")
 async def cancel_order(order_id: str, data: dict, current_user: dict = Depends(get_current_user)):
     """Cancela uma comanda aberta. Exige credenciais de admin/superadmin no payload."""
@@ -1187,10 +1219,12 @@ async def cancel_order(order_id: str, data: dict, current_user: dict = Depends(g
         raise HTTPException(status_code=400, detail="Comanda já fechada")
     if order.get("status") == OrderStatus.CANCELLED.value:
         raise HTTPException(status_code=400, detail="Comanda já cancelada")
+    _refuse_if_partially_paid(order, "cancelar a comanda")
 
     now_iso = datetime.now(timezone.utc).isoformat()
-    await db.orders.update_one(
-        {"id": order_id},
+    # Condicionado à versão da cobrança: um pagamento parcial no meio impede o cancelamento.
+    saved = await db.orders.update_one(
+        {"id": order_id, "is_closed": False, "billing_version": order.get("billing_version")},
         {"$set": {
             "status": OrderStatus.CANCELLED.value,
             "is_closed": True,
@@ -1203,8 +1237,10 @@ async def cancel_order(order_id: str, data: dict, current_user: dict = Depends(g
             "cancellation_reason": reason,
             # Aviso de cancelado no KDS até cada tela dar "Ciente".
             **kds_cancel.order_cancel_fields(order),
-        }}
+        }, "$inc": {"billing_version": 1}}
     )
+    if saved.matched_count != 1:
+        raise HTTPException(status_code=409, detail=BILLING_CONFLICT)
     # Libera a mesa
     await release_physical_tab(order)
     await refresh_table_after_order(order.get("table_id"))
@@ -1224,57 +1260,305 @@ def _order_total(order: dict, subtotal: float, service_fee: float) -> float:
     discount = float(order.get("discount") or 0)
     return round(max(0.0, subtotal + service_fee + delivery_fee - discount), 2)
 
-@api_router.patch("/orders/{order_id}/item/{item_id}/courtesy")
-async def mark_item_courtesy(order_id: str, item_id: str, data: dict, current_user: dict = Depends(require_role([UserRole.ADMIN, UserRole.CASHIER]))):
-    """Marca item individual como cortesia. Zera preco, mantem estoque a deduzir."""
-    reason = (data.get("reason") or "").strip()
-    is_courtesy = bool(data.get("is_courtesy", True))
-    if is_courtesy and not reason:
-        raise HTTPException(status_code=400, detail="Informe o motivo da cortesia")
-    order = await db.orders.find_one({"id": order_id})
+# ==================== COBRANÇA NO CAIXA (order_billing.py) ====================
+# Cortesia por quantidade, desconto por item, pagamento parcial e estorno.
+# Toda mudança de cobrança grava com `billing_version` (+1 a cada mudança): se
+# outra pessoa mexeu na comanda entre a leitura e a gravação, nada é gravado (409).
+
+BILLING_CONFLICT = "A comanda mudou enquanto você editava (outro lançamento ou pagamento). Confira e tente de novo."
+
+
+def _item_adjustment_totals(order: dict) -> dict:
+    """Totais separados de desconto manual, cortesia e promoção dos itens."""
+    t = billing.totals(order)
+    return {k: t[k] for k in ("item_discount_total", "item_courtesy_total", "item_promo_total")}
+
+
+def _billing_http(exc: billing.BillingError) -> HTTPException:
+    return HTTPException(status_code=exc.status_code, detail=str(exc))
+
+
+async def _authorize_admin(current_user: dict, data: dict, what: str) -> dict:
+    """Admin logado passa direto; senão exige e-mail e senha de um admin (como no cancelamento)."""
+    if current_user.get("role") in ("admin", "superadmin"):
+        return current_user
+    admin_email = (data.get("admin_email") or "").strip().lower() if isinstance(data.get("admin_email"), str) else ""
+    admin_password = data.get("admin_password") or ""
+    if not admin_email or not admin_password:
+        raise HTTPException(status_code=403, detail=f"{what}: só com autorização do administrador")
+    admin = await db.users.find_one({"email": admin_email})
+    if not admin or admin.get("role") not in ("admin", "superadmin") or not admin.get("is_active", True):
+        raise HTTPException(status_code=403, detail="Administrador inválido")
+    if not verify_password(admin_password, admin.get("password", "")):
+        raise HTTPException(status_code=403, detail="Senha do administrador inválida")
+    return admin
+
+
+async def _load_open_order(order_id: str) -> dict:
+    order = await db.orders.find_one({"id": order_id}, {"_id": 0})
     if not order:
         raise HTTPException(status_code=404, detail="Comanda não encontrada")
-    if order.get("is_closed"):
-        raise HTTPException(status_code=400, detail="Comanda já fechada")
-    found = False
-    for item in order.get("items", []):
-        if item.get("id") == item_id:
-            was_courtesy = bool(item.get("is_courtesy"))
-            if is_courtesy:
-                # Guarda o preço cobrado antes de zerar (só na primeira marcação,
-                # para não sobrescrever com 0 se marcar de novo).
-                if not was_courtesy:
-                    item["courtesy_original_price"] = item.get("unit_price", 0)
-                item["unit_price"] = 0
-            elif was_courtesy:
-                original = item.get("courtesy_original_price")
-                if original is None:
-                    # Cortesia marcada antes de o preço ser guardado: usa o cadastro.
-                    product = await db.products.find_one({"id": item.get("product_id")}, {"_id": 0})
-                    if not product:
-                        raise HTTPException(status_code=409, detail="Preço original do item não encontrado")
-                    original = product.get("price", 0)
-                item["unit_price"] = float(original or 0)
-                item.pop("courtesy_original_price", None)
-            item["is_courtesy"] = is_courtesy
-            item["courtesy_reason"] = reason if is_courtesy else None
-            found = True
-            break
-    if not found:
-        raise HTTPException(status_code=404, detail="Item não encontrado")
-    # Recalcula totais
-    subtotal = sum(i["unit_price"] * i["quantity"] for i in order["items"] if i.get("status") != "cancelled")
-    service_fee = subtotal * (order.get("service_fee_percentage", 10) / 100)
-    await db.orders.update_one(
-        {"id": order_id},
-        {"$set": {
-            "items": order["items"],
-            "subtotal": subtotal,
-            "service_fee": service_fee,
-            "total": _order_total(order, subtotal, service_fee),
-        }}
+    try:
+        billing.ensure_editable(order)
+    except billing.BillingError as exc:
+        raise _billing_http(exc)
+    return order
+
+
+async def _save_billing(order: dict, session=None) -> dict:
+    """Recalcula os totais e grava itens + totais, condicionado à versão lida."""
+    new_totals = billing.totals(order)
+    try:
+        billing.ensure_total_covers_paid(order, new_totals)
+    except billing.BillingError as exc:
+        raise _billing_http(exc)
+    saved = await db.orders.update_one(
+        {"id": order["id"], "is_closed": False, "billing_version": order.get("billing_version")},
+        {"$set": {"items": order["items"], **new_totals}, "$inc": {"billing_version": 1}},
+        session=session,
     )
-    return await db.orders.find_one({"id": order_id}, {"_id": 0})
+    if saved.matched_count != 1:
+        raise HTTPException(status_code=409, detail=BILLING_CONFLICT)
+    return await db.orders.find_one({"id": order["id"]}, {"_id": 0})
+
+
+@api_router.patch("/orders/{order_id}/item/{item_id}/courtesy")
+async def mark_item_courtesy(order_id: str, item_id: str, data: dict, current_user: dict = Depends(require_role([UserRole.ADMIN, UserRole.CASHIER]))):
+    """Cortesia por item, por quantidade (ex.: 1 de 3 lanches: a linha vira 2 + 1 cortesia).
+
+    Body: {is_courtesy, reason, quantity?}. Preço zero, continua baixando estoque.
+    Desmarcar devolve o preço guardado (regra do PR #8) e junta a linha de volta.
+    """
+    order = await _load_open_order(order_id)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    try:
+        if bool(data.get("is_courtesy", True)):
+            billing.mark_courtesy(order, item_id, data.get("quantity"), data.get("reason"), current_user, now_iso)
+        else:
+            item = order["items"][billing.find_index(order, item_id)]
+            fallback = None
+            if item.get("is_courtesy") and item.get("courtesy_original_price") is None:
+                # Cortesia marcada antes de o preço ser guardado: usa o cadastro.
+                product = await db.products.find_one({"id": item.get("product_id")}, {"_id": 0})
+                fallback = product.get("price", 0) if product else None
+            billing.unmark_courtesy(item, fallback)
+            billing.merge_back(order, item)
+    except billing.BillingError as exc:
+        raise _billing_http(exc)
+    updated = await _save_billing(order)
+    await emit_orders('order_updated', updated)
+    return updated
+
+
+@api_router.patch("/orders/{order_id}/item/{item_id}/discount")
+async def apply_item_discount(order_id: str, item_id: str, data: dict, current_user: dict = Depends(require_role(CASH_ROLES))):
+    """Desconto manual por item. Body: {quantity?, type: value|percent, value, reason,
+    admin_email?, admin_password?}. Caixa dá até 10%; acima disso só admin.
+    `value` em R$ é por unidade. Não acumula com promoção (vale o maior)."""
+    order = await _load_open_order(order_id)
+    try:
+        billing.ensure_salon_billing(order)
+        pct = billing.preview_discount(order, item_id, data.get("type"), data.get("value"))
+    except billing.BillingError as exc:
+        raise _billing_http(exc)
+    approver = None
+    if pct > billing.CASHIER_MAX_DISCOUNT_PCT:
+        approver = await _authorize_admin(
+            current_user, data, f"Desconto acima de {billing.CASHIER_MAX_DISCOUNT_PCT}% ({pct:g}%)")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    try:
+        _, warning = billing.apply_discount(order, item_id, data.get("quantity"), data.get("type"),
+                                            data.get("value"), data.get("reason"), current_user, approver, now_iso)
+    except billing.BillingError as exc:
+        raise _billing_http(exc)
+    updated = await _save_billing(order)
+    await emit_orders('order_updated', updated)
+    logger.info(f"[DESCONTO] pedido={order_id} item={item_id} {pct:g}% por={current_user.get('name')}"
+                f"{' autorizado_por=' + approver.get('name') if approver and approver is not current_user else ''}")
+    return {**updated, "warning": warning} if warning else updated
+
+
+@api_router.delete("/orders/{order_id}/item/{item_id}/discount")
+async def remove_item_discount(order_id: str, item_id: str, current_user: dict = Depends(require_role(CASH_ROLES))):
+    """Tira o desconto manual do item (volta ao preço cheio ou ao da promoção)."""
+    order = await _load_open_order(order_id)
+    try:
+        item = billing.remove_discount(order, item_id)
+        billing.merge_back(order, item)
+    except billing.BillingError as exc:
+        raise _billing_http(exc)
+    updated = await _save_billing(order)
+    await emit_orders('order_updated', updated)
+    return updated
+
+
+async def _open_register_or_409(session=None) -> dict:
+    register = await db.cash_registers.find_one({"is_open": True}, {"_id": 0}, session=session)
+    if not register:
+        raise HTTPException(status_code=409, detail="Abra o caixa antes de receber pagamentos")
+    return register
+
+
+@api_router.post("/orders/{order_id}/partial-payments")
+async def create_partial_payment(order_id: str, data: dict, current_user: dict = Depends(require_role(CASH_ROLES))):
+    """Recebe PARTE da conta. Body: {payments: [{method, amount}], amount?} ou
+    {payments, items: [{item_id, quantity}]} (valor dos itens + 10% do salão).
+
+    A comanda continua aberta com "Pago" e "Falta pagar". Cada pagamento grava
+    forma, valor, autor e horário e entra no caixa na hora (db.payments + total_sales).
+    """
+    order = await _load_open_order(order_id)
+    try:
+        billing.ensure_salon_billing(order)
+    except billing.BillingError as exc:
+        raise _billing_http(exc)
+    await _open_register_or_409()
+
+    remaining = billing.remaining_cents(order)
+    if remaining <= 0:
+        raise HTTPException(status_code=409, detail="Não há valor a pagar nesta comanda")
+    chosen = []
+    try:
+        if data.get("items"):
+            target, chosen = billing.items_share_cents(order, data.get("items"))
+            billing.mark_items_paid(order, chosen)
+            all_paid = all(billing.paid_qty(i) >= billing.qty(i) for i in billing.active_items(order)
+                           if billing.cents(i.get("unit_price")) > 0)
+            if target > remaining:
+                # Parte já paga por valor: os itens levam só o que falta.
+                target = remaining
+            elif all_paid and remaining - target <= len(chosen) + 1:
+                # Últimos itens: leva o resto exato (sem sobrar centavo do arredondamento dos 10%).
+                target = remaining
+        else:
+            amount = data.get("amount")
+            if isinstance(amount, bool) or not isinstance(amount, (int, float)) or not math.isfinite(amount):
+                raise billing.BillingError("Valor inválido")
+            target = billing.cents(amount)
+    except billing.BillingError as exc:
+        raise _billing_http(exc)
+    if target <= 0:
+        raise HTTPException(status_code=400, detail="O valor deve ser maior que zero")
+    if target > remaining:
+        raise HTTPException(status_code=409, detail=f"Valor maior que o que falta pagar ({billing.brl(remaining)})")
+
+    normalized = _validate_close_payments(target, data.get("payments"), False)
+    lines, change = billing.settle_change(normalized, target)
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    partial_id = str(uuid.uuid4())
+    entry = {
+        "id": partial_id,
+        "kind": "partial",
+        "amount": billing.money(target),
+        "payments": [{"method": p["method"], "amount": billing.money(p["amount_cents"])} for p in lines],
+        "change": billing.money(change),
+        "items": chosen,
+        "created_at": now_iso,
+        "created_by_id": current_user.get("id"),
+        "created_by_name": current_user.get("name"),
+        "status": "active",
+    }
+    try:
+        async with await client.start_session() as session:
+            async with session.start_transaction():
+                register = await _open_register_or_409(session=session)
+                saved = await db.orders.update_one(
+                    {"id": order_id, "is_closed": False, "billing_version": order.get("billing_version")},
+                    {"$set": {"items": order["items"],
+                              "paid_amount": billing.money(billing.paid_cents(order) + target)},
+                     "$push": {"partial_payments": {**entry, "register_id": register["id"]}},
+                     "$inc": {"billing_version": 1}},
+                    session=session,
+                )
+                if saved.matched_count != 1:
+                    raise _OrderAlreadyClosed()
+                docs = []
+                for p in lines:
+                    doc = Payment(order_id=order_id, amount=p["amount_cents"] / 100, method=p["method"]).model_dump()
+                    doc.update({
+                        "created_at": now_iso, "created_by_id": current_user.get("id"),
+                        "created_by_name": current_user.get("name"), "register_id": register["id"],
+                        "kind": "partial", "partial_id": partial_id, "change_cents": p.get("change_cents", 0),
+                    })
+                    docs.append(doc)
+                await db.payments.insert_many(docs, session=session)
+                await db.cash_registers.update_one(
+                    {"id": register["id"], "is_open": True},
+                    {"$inc": {"total_sales": target / 100}}, session=session)
+    except _OrderAlreadyClosed:
+        raise HTTPException(status_code=409, detail=BILLING_CONFLICT)
+    except PyMongoError as exc:
+        logger.error("[partial_payment] falha na transação (%s); nada foi gravado", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Falha ao registrar o pagamento. Nada foi gravado; tente novamente.")
+
+    updated = await db.orders.find_one({"id": order_id}, {"_id": 0})
+    await emit_orders('order_updated', updated)
+    logger.info(f"[PARCIAL] pedido={order_id} valor={billing.brl(target)} por={current_user.get('name')}")
+    return {"order": updated, "partial_payment": entry, "change": billing.money(change),
+            "remaining": billing.money(billing.remaining_cents(updated))}
+
+
+@api_router.post("/orders/{order_id}/partial-payments/{partial_id}/reverse")
+async def reverse_partial_payment(order_id: str, partial_id: str, data: dict, current_user: dict = Depends(require_role(CASH_ROLES))):
+    """Estorno de pagamento parcial: só admin (logado ou com credenciais), com motivo,
+    só com a comanda aberta. Os pagamentos saem de db.payments para db.payment_reversals."""
+    reason = (data.get("reason") or "").strip() if isinstance(data.get("reason"), str) else ""
+    if not reason:
+        raise HTTPException(status_code=400, detail="Informe o motivo do estorno")
+    admin = await _authorize_admin(current_user, data, "Estorno")
+    order = await _load_open_order(order_id)
+    partials = order.get("partial_payments") or []
+    entry = next((p for p in partials if p.get("id") == partial_id), None)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Pagamento parcial não encontrado")
+    if entry.get("status") == "reversed":
+        raise HTTPException(status_code=409, detail="Pagamento já estornado")
+
+    amount = billing.cents(entry.get("amount"))
+    billing.mark_items_paid(order, entry.get("items"), sign=-1)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    entry.update({"status": "reversed", "reversed_at": now_iso, "reversal_reason": reason,
+                  "reversed_by_id": admin.get("id"), "reversed_by_name": admin.get("name"),
+                  "reversed_by_cashier_id": current_user.get("id"),
+                  "reversed_by_cashier_name": current_user.get("name")})
+    try:
+        async with await client.start_session() as session:
+            async with session.start_transaction():
+                saved = await db.orders.update_one(
+                    {"id": order_id, "is_closed": False, "billing_version": order.get("billing_version")},
+                    {"$set": {"items": order["items"], "partial_payments": partials,
+                              "paid_amount": billing.money(max(0, billing.paid_cents(order) - amount))},
+                     "$inc": {"billing_version": 1}},
+                    session=session,
+                )
+                if saved.matched_count != 1:
+                    raise _OrderAlreadyClosed()
+                docs = await db.payments.find({"order_id": order_id, "partial_id": partial_id}, {"_id": 0},
+                                              session=session).to_list(None)
+                for doc in docs:
+                    doc.update({"reversed_at": now_iso, "reversal_reason": reason,
+                                "reversed_by_id": admin.get("id"), "reversed_by_name": admin.get("name")})
+                if docs:
+                    await db.payment_reversals.insert_many(docs, session=session)
+                await db.payments.delete_many({"order_id": order_id, "partial_id": partial_id}, session=session)
+                register_id = entry.get("register_id") or (docs[0].get("register_id") if docs else None)
+                if register_id:
+                    await db.cash_registers.update_one(
+                        {"id": register_id, "is_open": True},
+                        {"$inc": {"total_sales": -amount / 100}}, session=session)
+    except _OrderAlreadyClosed:
+        raise HTTPException(status_code=409, detail=BILLING_CONFLICT)
+    except PyMongoError as exc:
+        logger.error("[partial_reverse] falha na transação (%s); nada foi gravado", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Falha ao estornar. Nada foi gravado; tente novamente.")
+
+    updated = await db.orders.find_one({"id": order_id}, {"_id": 0})
+    await emit_orders('order_updated', updated)
+    logger.info(f"[ESTORNO] pedido={order_id} parcial={partial_id} valor={billing.brl(amount)} "
+                f"por={current_user.get('name')} autorizado_por={admin.get('name')} — {reason}")
+    return {"order": updated, "reversed": entry}
+
 
 @api_router.patch("/orders/{order_id}/item/{item_id}/cancel")
 async def cancel_order_item(order_id: str, item_id: str, data: dict, current_user: dict = Depends(get_current_user)):
@@ -1326,6 +1610,12 @@ async def cancel_order_item(order_id: str, item_id: str, data: dict, current_use
     current_qty = int(item.get("quantity") or 0)
     if cancel_qty > current_qty:
         raise HTTPException(status_code=400, detail="Quantidade a cancelar maior que a atual")
+    # Unidade já paga (pagamento parcial por item) não é cancelada: estorne antes.
+    unpaid_qty = current_qty - billing.paid_qty(item)
+    if cancel_qty > unpaid_qty:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Só {unpaid_qty} unidade(s) desta linha não foram pagas. Estorne o pagamento antes de cancelar.")
 
     restore_flag = bool(data.get("restore_stock", False))
     stock_was_deducted = bool(item.get("stock_deducted"))
@@ -1384,32 +1674,36 @@ async def cancel_order_item(order_id: str, item_id: str, data: dict, current_use
             # Se estoque estava deduzido e foi restaurado, marca essa linha como nao-deduzida
             # (a devolucao ja compensou). Se nao foi restaurado, mantem True para nao rededuzir.
             "stock_deducted": (stock_was_deducted and not stock_restored),
+            "paid_quantity": 0,  # as unidades pagas ficam na linha que continua
             **cancel_meta,
         }
         kds_notice = kds_cancel.mark_item_cancelled(cancelled_line, previous_status, now_iso)
         order["items"].append(cancelled_line)
 
-    # --- Recalcula totais (ignora itens cancelados) ---
-    subtotal = sum(
-        (it.get("unit_price") or 0) * (it.get("quantity") or 0)
-        for it in order["items"]
-        if it.get("status") != "cancelled"
-    )
-    fee_pct = order.get("service_fee_percentage", 10)
-    service_fee = subtotal * (fee_pct / 100)
-    total = _order_total(order, subtotal, service_fee)
+    # --- Recalcula totais (ignora itens cancelados; 10% só no salão) ---
+    new_totals = billing.totals(order)
+    try:
+        billing.ensure_total_covers_paid(order, new_totals)
+    except billing.BillingError as exc:
+        raise _billing_http(exc)
 
-    await db.orders.update_one(
-        {"id": order_id},
+    saved = await db.orders.update_one(
+        {"id": order_id, "is_closed": False, "billing_version": order.get("billing_version")},
         {"$set": {
             "items": order["items"],
-            "subtotal": subtotal,
-            "service_fee": service_fee,
-            "total": total,
+            **new_totals,
             # Aviso de item cancelado no KDS até a tela do item dar "Ciente".
             **({"kds_item_cancel_pending": True, "kds_item_cancel_at": now_iso} if kds_notice else {}),
-        }}
+        }, "$inc": {"billing_version": 1}}
     )
+    if saved.matched_count != 1:
+        if stock_restored:
+            # Nada foi cancelado: desfaz a devolução de estoque feita acima.
+            try:
+                await deduct_stock(item["product_id"], cancel_qty, order_code=order.get("id", ""))
+            except Exception:
+                logger.exception(f"[CANCEL-ITEM] pedido={order_id}: falha ao desfazer a devolução de estoque")
+        raise HTTPException(status_code=409, detail=BILLING_CONFLICT)
 
     # Realtime
     updated = await db.orders.find_one({"id": order_id}, {"_id": 0})
@@ -1578,39 +1872,73 @@ async def close_order(order_id: str, payment_data: dict, current_user: dict = De
     )
 
     # Total SEMPRE o do banco, em centavos (nunca o enviado pelo navegador).
-    total_cents = _close_cents(order.get("total"))
+    # Com pagamento parcial, cobra só o que falta (total - já pago).
+    total_cents = billing.remaining_cents(order)
+    if total_cents < 0:
+        raise HTTPException(status_code=409, detail="O pago passou do total da comanda. Estorne um pagamento parcial.")
     is_comp = bool(order.get("is_comp"))
     payments = _validate_close_payments(total_cents, payment_data.get("payments"), is_comp)
 
     closed_at = datetime.now(timezone.utc).isoformat()
     payment_docs = []
 
+    # O pagamento que fecha entra no pedido igual aos parciais: soma em paid_amount
+    # (pedido fechado fica com Falta pagar = 0) e vai para a lista de pagamentos.
+    # Cortesia/permuta não é pagamento: não mexe em paid_amount.
+    close_set = {
+        "is_closed": True,
+        "closed_at": closed_at,
+        "status": OrderStatus.DELIVERED.value,
+        "closed_by_id": current_user["id"],
+    }
+    final_entry = None
+    if not is_comp:
+        close_set["paid_amount"] = billing.money(billing.paid_cents(order) + total_cents)
+        if total_cents > 0:
+            lines, change = billing.settle_change(payments, total_cents)
+            final_entry = {
+                "id": str(uuid.uuid4()),
+                "kind": "final",
+                "amount": billing.money(total_cents),
+                "payments": [{"method": p["method"], "amount": billing.money(p["amount_cents"])} for p in lines],
+                "change": billing.money(change),
+                "items": [],
+                "created_at": closed_at,
+                "created_by_id": current_user.get("id"),
+                "created_by_name": current_user.get("name"),
+                "status": "active",
+            }
+
     # Fechamento, pagamentos e total_sales: juntos ou nada (transação).
     # Sem suporte a transação no banco, a rota falha e NÃO grava nada.
     try:
         async with await client.start_session() as session:
             async with session.start_transaction():
+                register = await db.cash_registers.find_one({"is_open": True}, {"_id": 0}, session=session)
+                close_update = {"$set": close_set}
+                if final_entry:
+                    close_update["$push"] = {"partial_payments": {
+                        **final_entry, "register_id": register["id"] if register else None}}
                 claimed = await db.orders.update_one(
-                    {"id": order_id, "is_closed": False, **claim_filter},
-                    {"$set": {
-                        "is_closed": True,
-                        "closed_at": closed_at,
-                        "status": OrderStatus.DELIVERED.value,
-                        "closed_by_id": current_user["id"],
-                    }},
+                    # billing_version: se a cobrança mudou depois da leitura (item novo,
+                    # desconto, pagamento parcial), não fecha com o valor velho.
+                    {"id": order_id, "is_closed": False, **claim_filter,
+                     "billing_version": order.get("billing_version")},
+                    close_update,
                     session=session,
                 )
                 if claimed.modified_count != 1:
                     # Duplo clique / outra aba: outro pedido já fechou esta comanda.
                     raise _OrderAlreadyClosed()
 
-                register = await db.cash_registers.find_one({"is_open": True}, {"_id": 0}, session=session)
                 for p in payments:
                     payment_obj = Payment(order_id=order_id, amount=p["amount_cents"] / 100, method=p["method"])
                     pay_dict = payment_obj.model_dump()
                     pay_dict["created_at"] = pay_dict["created_at"].isoformat()
                     pay_dict["created_by_id"] = current_user["id"]
+                    pay_dict["created_by_name"] = current_user.get("name")
                     pay_dict["register_id"] = register["id"] if register else None
+                    pay_dict["kind"] = "final"
                     payment_docs.append(pay_dict)
                 if payment_docs:
                     await db.payments.insert_many(payment_docs, session=session)
@@ -1623,7 +1951,10 @@ async def close_order(order_id: str, payment_data: dict, current_user: dict = De
                         session=session,
                     )
     except _OrderAlreadyClosed:
-        raise HTTPException(status_code=409, detail="Pedido já está fechado")
+        raise HTTPException(
+            status_code=409,
+            detail="Pedido já está fechado ou mudou (item, desconto ou pagamento parcial) "
+                   "depois que a tela carregou. Confira e tente de novo.")
     except PyMongoError as exc:
         if _transaction_unsupported(exc):
             logger.error("[close_order] banco sem suporte a transação (%s); nada foi gravado", type(exc).__name__)
@@ -1673,12 +2004,18 @@ async def mark_order_comp(order_id: str, data: dict, current_user: dict = Depend
     is_comp = bool(data.get("is_comp", True))
     if is_comp and not reason:
         raise HTTPException(status_code=400, detail="Informe o motivo da cortesia/permuta")
+    order = await db.orders.find_one({"id": order_id}, {"_id": 0})
+    if not order:
+        raise HTTPException(status_code=404, detail="Pedido não encontrado")
+    if is_comp:
+        _refuse_if_partially_paid(order, "marcar a comanda inteira como cortesia/permuta")
     result = await db.orders.update_one(
-        {"id": order_id},
-        {"$set": {"is_comp": is_comp, "comp_reason": reason if is_comp else None}}
+        {"id": order_id, "billing_version": order.get("billing_version")},
+        {"$set": {"is_comp": is_comp, "comp_reason": reason if is_comp else None},
+         "$inc": {"billing_version": 1}}
     )
     if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Pedido não encontrado")
+        raise HTTPException(status_code=409, detail=BILLING_CONFLICT)
     return await db.orders.find_one({"id": order_id}, {"_id": 0})
 
 @api_router.get("/reports/sales-by-table")
@@ -1728,6 +2065,7 @@ async def quick_cancel_order(order_id: str, current_user: dict = Depends(require
         raise HTTPException(status_code=404, detail="Pedido não encontrado")
     if order.get("is_closed"):
         raise HTTPException(status_code=400, detail="Pedido já está fechado")
+    _refuse_if_partially_paid(order, "cancelar o pedido")
 
     # Verificar se algum item já passou de "pending"
     for item in order.get("items", []):
@@ -2091,7 +2429,42 @@ _CLOSE_PREVIEW_FIELDS = (
     "register_id", "payment_methods", "total_sales", "total_change",
     "closed_orders", "open_orders", "online_completed", "online_open",
     "initial_amount", "deposits", "withdrawals", "expected_cash", "warnings",
+    "item_discount_total", "item_courtesy_total", "item_promo_total",
 )
+
+
+def _new_adjustments() -> dict:
+    return {"discount": 0, "courtesy": 0, "promo": 0, "promos": {}}
+
+
+def _add_adjustments(acc: dict, order: dict) -> None:
+    """Soma (em centavos) desconto manual, cortesia e promoção dos itens de um pedido vendido."""
+    for item in billing.active_items(order):
+        acc["discount"] += billing.line_discount_cents(item)
+        acc["courtesy"] += billing.line_courtesy_cents(item)
+        promo = billing.line_promo_cents(item)
+        if promo:
+            acc["promo"] += promo
+            name = item.get("promo_name") or "Promoção"
+            acc["promos"][name] = acc["promos"].get(name, 0) + promo
+
+
+def _serialize_adjustments(acc: dict) -> dict:
+    return {
+        "item_discount_total": billing.money(acc["discount"]),
+        "item_courtesy_total": billing.money(acc["courtesy"]),
+        "item_promo_total": billing.money(acc["promo"]),
+        "item_promo_by_name": {k: billing.money(v) for k, v in sorted(acc["promos"].items())},
+    }
+
+
+async def _open_partial_payments_summary() -> dict:
+    orders = 0
+    amount = 0
+    async for order in db.orders.find({"is_closed": False, "paid_amount": {"$gt": 0}}, {"_id": 0}):
+        orders += 1
+        amount += billing.paid_cents(order)
+    return {"orders": orders, "amount": billing.money(amount)}
 
 
 def _closing_preview_hash(report: dict) -> str:
@@ -2146,6 +2519,7 @@ async def preview_cash_register(
     warnings = []
     online_completed = {}
     online_open = {}
+    adjustments = _new_adjustments()
     def online_bucket(target, order):
         platform = order.get("platform") or order.get("origin") or "other"
         bucket = target.setdefault(platform, {"orders": 0, "gross": 0})
@@ -2207,6 +2581,7 @@ async def preview_cash_register(
         total_change += change
         total_sales += order_total
         closed_orders += 1
+        _add_adjustments(adjustments, order)
 
     initial = cents(register.get("initial_amount"))
     deposits = cents(register.get("deposits"))
@@ -2250,6 +2625,10 @@ async def preview_cash_register(
             initial + methods["cash"] + deposits - withdrawals
         ),
         "warnings": warnings,
+        # Descontos manuais, cortesias e promoções dos itens, separados.
+        **_serialize_adjustments(adjustments),
+        # Só informativo: comandas abertas com parte paga (o fechamento é bloqueado com comanda aberta).
+        "open_partial_payments": await _open_partial_payments_summary(),
         # NostFood: a cobrar na entrega ainda abertos (bloqueiam) e marcados "Não recebido".
         "pending_to_collect": await nostfood.pending_to_collect(),
         "not_received": await nostfood.not_received_between(opened_at, generated_at),
@@ -2338,6 +2717,7 @@ async def close_register(
     cancelled_orders = 0
     courtesy_orders = 0
     courtesy_amount = 0
+    adjustments = _new_adjustments()
     missing_payments = []
     payment_errors = []
     total_change = 0
@@ -2411,6 +2791,7 @@ async def close_register(
             total_change += change
             total_sales += order_total
             closed_orders += 1
+            _add_adjustments(adjustments, order)
 
     # Não encerra o caixa se houver pagamentos
     # que não podem ser conciliados corretamente.
@@ -2460,6 +2841,7 @@ async def close_register(
         "cancelled_orders": cancelled_orders,
         "courtesy_orders": courtesy_orders,
         "courtesy_amount": money(courtesy_amount),
+        **_serialize_adjustments(adjustments),
         "total_change": money(total_change),
         "initial_amount": money(initial),
         "deposits": money(deposits),
@@ -2633,7 +3015,11 @@ async def get_sales_report(period: str = "daily", current_user: dict = Depends(r
             "_id": None,
             "total_sales": {"$sum": "$total"},
             "total_orders": {"$sum": 1},
-            "avg_ticket": {"$avg": "$total"}
+            "avg_ticket": {"$avg": "$total"},
+            # Separados: desconto manual, cortesia de item e promoção (pedido antigo sem o campo soma 0).
+            "item_discount_total": {"$sum": {"$ifNull": ["$item_discount_total", 0]}},
+            "item_courtesy_total": {"$sum": {"$ifNull": ["$item_courtesy_total", 0]}},
+            "item_promo_total": {"$sum": {"$ifNull": ["$item_promo_total", 0]}},
         }}
     ]
     
@@ -2656,7 +3042,9 @@ async def get_sales_report(period: str = "daily", current_user: dict = Depends(r
     
     return {
         "period": period,
-        "summary": result[0] if result else {"total_sales": 0, "total_orders": 0, "avg_ticket": 0},
+        "summary": result[0] if result else {"total_sales": 0, "total_orders": 0, "avg_ticket": 0,
+                                             "item_discount_total": 0, "item_courtesy_total": 0,
+                                             "item_promo_total": 0},
         "top_products": top_products
     }
 
@@ -3324,6 +3712,152 @@ async def delete_production_recipe(recipe_id: str, current_user: dict = Depends(
         raise HTTPException(status_code=404, detail="Receita não encontrada")
     return {"message": "Receita excluída"}
 
+# ==================== PROMOÇÕES (promotions.py) ====================
+# Só admin cria, edita, liga e desliga. Nada é apagado: cada mudança vai para o
+# `history` da promoção, e os itens já lançados guardam a promoção que tiveram.
+
+def _promotion_view(promo: dict, moment: datetime) -> dict:
+    return {**promo, "status": promotions.status(promo, moment),
+            "applies_now": promotions.applies_at(promo, moment),
+            "schedule_label": promotions.describe_schedule(promo)}
+
+
+def _promotion_or_400(data: dict) -> dict:
+    try:
+        return promotions.normalize(data)
+    except promotions.PromotionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@api_router.get("/promotions")
+async def list_promotions(current_user: dict = Depends(require_role([UserRole.ADMIN]))):
+    moment = promotions.now_local()
+    promos = await db.promotions.find({}, {"_id": 0}).to_list(None)
+    promos.sort(key=lambda p: p.get("created_at") or "", reverse=True)
+    return [_promotion_view(p, moment) for p in promos]
+
+
+@api_router.get("/promotions/active")
+async def active_promotions(channel: str = "salao", current_user: dict = Depends(require_role(STAFF_ROLES))):
+    """Promoções valendo AGORA no canal (para a tela de lançamento mostrar o preço)."""
+    if channel not in promotions.CHANNELS:
+        raise HTTPException(status_code=400, detail="Canal inválido")
+    moment = promotions.now_local()
+    promos = await db.promotions.find({"is_active": True}, {"_id": 0}).to_list(None)
+    keep = ("id", "name", "discount_type", "discount_value", "category_ids", "product_ids", "channels")
+    return [{k: p.get(k) for k in keep} for p in promos
+            if channel in (p.get("channels") or []) and promotions.applies_at(p, moment)]
+
+
+@api_router.post("/promotions", status_code=201)
+async def create_promotion(data: dict, current_user: dict = Depends(require_role([UserRole.ADMIN]))):
+    fields = _promotion_or_400(data)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    promo = {
+        "id": str(uuid.uuid4()), **fields,
+        "is_active": data.get("is_active", True) is not False,
+        "created_at": now_iso, "created_by_id": current_user.get("id"), "created_by_name": current_user.get("name"),
+        "updated_at": now_iso, "updated_by_id": current_user.get("id"), "updated_by_name": current_user.get("name"),
+        "history": [{"action": "created", "at": now_iso, "by_id": current_user.get("id"),
+                     "by_name": current_user.get("name")}],
+    }
+    await db.promotions.insert_one(dict(promo))
+    return _promotion_view(promo, promotions.now_local())
+
+
+@api_router.put("/promotions/{promo_id}")
+async def update_promotion(promo_id: str, data: dict, current_user: dict = Depends(require_role([UserRole.ADMIN]))):
+    """Edita a regra. Itens já lançados não mudam (guardam a promoção que tiveram)."""
+    existing = await db.promotions.find_one({"id": promo_id}, {"_id": 0})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Promoção não encontrada")
+    fields = _promotion_or_400(data)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    changed = sorted(k for k, v in fields.items() if existing.get(k) != v)
+    await db.promotions.update_one({"id": promo_id}, {
+        "$set": {**fields, "updated_at": now_iso, "updated_by_id": current_user.get("id"),
+                 "updated_by_name": current_user.get("name")},
+        "$push": {"history": {"action": "edited", "at": now_iso, "by_id": current_user.get("id"),
+                              "by_name": current_user.get("name"), "fields": changed,
+                              "before": {k: existing.get(k) for k in changed}}},
+    })
+    return _promotion_view(await db.promotions.find_one({"id": promo_id}, {"_id": 0}), promotions.now_local())
+
+
+@api_router.patch("/promotions/{promo_id}/active")
+async def toggle_promotion(promo_id: str, data: dict, current_user: dict = Depends(require_role([UserRole.ADMIN]))):
+    """Liga/desliga sem apagar nada. Desligada não entra em item novo; os já lançados mantêm."""
+    is_active = data.get("is_active")
+    if not isinstance(is_active, bool):
+        raise HTTPException(status_code=400, detail="Informe is_active (true ou false)")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    result = await db.promotions.update_one({"id": promo_id}, {
+        "$set": {"is_active": is_active, "updated_at": now_iso, "updated_by_id": current_user.get("id"),
+                 "updated_by_name": current_user.get("name")},
+        "$push": {"history": {"action": "activated" if is_active else "deactivated", "at": now_iso,
+                              "by_id": current_user.get("id"), "by_name": current_user.get("name")}},
+    })
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Promoção não encontrada")
+    return _promotion_view(await db.promotions.find_one({"id": promo_id}, {"_id": 0}), promotions.now_local())
+
+
+def _local_day_bounds(start: Optional[str], end: Optional[str]):
+    today = promotions.now_local().date()
+    try:
+        start_day = datetime.strptime(start, "%Y-%m-%d").date() if start else today
+        end_day = datetime.strptime(end, "%Y-%m-%d").date() if end else today
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Data inválida (use AAAA-MM-DD)")
+    if end_day < start_day:
+        raise HTTPException(status_code=400, detail="A data final é antes da inicial")
+    if (end_day - start_day).days > 366:
+        raise HTTPException(status_code=400, detail="Período máximo: 1 ano")
+    to_utc = lambda d: datetime.combine(d, datetime.min.time(), promotions.LOCAL_TZ).astimezone(timezone.utc)
+    return start_day, end_day, to_utc(start_day).isoformat(), to_utc(end_day + timedelta(days=1)).isoformat()
+
+
+@api_router.get("/reports/promotions")
+async def promotions_report(start: Optional[str] = None, end: Optional[str] = None,
+                            current_user: dict = Depends(require_role([UserRole.ADMIN]))):
+    """Total concedido por promoção e por dia, separado do desconto manual e da cortesia.
+    Período em datas do restaurante (AAAA-MM-DD, inclusive); padrão: hoje."""
+    start_day, end_day, start_iso, end_iso = _local_day_bounds(start, end)
+    query = {"is_closed": True, "closed_at": {"$gte": start_iso, "$lt": end_iso},
+             "is_comp": {"$ne": True}, "status": {"$ne": "cancelled"},
+             "is_test": {"$ne": True}, "payment_status": {"$ne": "not_received"}}
+    by_promo, by_day = {}, {}
+    totals = _new_adjustments()
+    async for order in db.orders.find(query, {"_id": 0}):
+        _add_adjustments(totals, order)
+        try:
+            day = datetime.fromisoformat(order["closed_at"]).astimezone(promotions.LOCAL_TZ).date().isoformat()
+        except (TypeError, ValueError):
+            day = str(order.get("closed_at"))[:10]
+        day_acc = by_day.setdefault(day, _new_adjustments())
+        _add_adjustments(day_acc, order)
+        seen = set()
+        for item in billing.active_items(order):
+            amount = billing.line_promo_cents(item)
+            if not amount:
+                continue
+            row = by_promo.setdefault(item["promo_id"], {"promo_id": item["promo_id"], "name": item.get("promo_name"),
+                                                          "units": 0, "amount": 0, "orders": 0})
+            row["units"] += billing.qty(item)
+            row["amount"] += amount
+            if item["promo_id"] not in seen:
+                row["orders"] += 1
+                seen.add(item["promo_id"])
+    return {
+        "start": start_day.isoformat(), "end": end_day.isoformat(),
+        "by_promotion": [{**r, "amount": billing.money(r["amount"])}
+                         for r in sorted(by_promo.values(), key=lambda r: -r["amount"])],
+        "by_day": [{"date": d, "promo": billing.money(a["promo"]), "discount": billing.money(a["discount"]),
+                    "courtesy": billing.money(a["courtesy"])} for d, a in sorted(by_day.items())],
+        "totals": {"promo": billing.money(totals["promo"]), "discount": billing.money(totals["discount"]),
+                   "courtesy": billing.money(totals["courtesy"])},
+    }
+
 # ==================== SETTINGS ROUTES ====================
 @api_router.get("/settings")
 async def get_settings(current_user: dict = Depends(require_role([UserRole.ADMIN]))):
@@ -3651,6 +4185,8 @@ async def create_public_order(order_data: PublicOrderCreate):
             "notes": None,
             "created_at": datetime.now(timezone.utc).isoformat(),
         })
+    # Cardápio próprio: promoção do canal "cardapio" sobre o preço do cadastro.
+    await _apply_launch_promotions(order_items, "cardapio")
 
     subtotal = sum(i["unit_price"] * i["quantity"] for i in order_items)
 
@@ -3689,6 +4225,7 @@ async def create_public_order(order_data: PublicOrderCreate):
         "payment_status": "pending",
         "change_for": order_data.change_for,
     }
+    order_dict.update(_item_adjustment_totals(order_dict))
 
     await db.orders.insert_one(order_dict)
 

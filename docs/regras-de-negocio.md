@@ -24,13 +24,12 @@ Fonte: `server.py` (`Order`, `create_order`, `create_online_order`, `create_publ
 
 - Pedido do salão nasce com `service_fee_percentage = 10`. `service_fee = subtotal × 10%` e `total = subtotal + service_fee`.
 - Pedido online **não tem 10%**: o lançamento manual (iFood, 99Food, outro), o cardápio público e a NostFood gravam `service_fee_percentage = 0`.
-- A cada item lançado, cancelado ou marcado como cortesia, subtotal, taxa e total são recalculados no servidor. No fechamento, o valor cobrado é sempre o total gravado no banco, nunca o enviado pelo navegador.
+- A cada item lançado, cancelado, marcado como cortesia ou com desconto, subtotal, taxa e total são recalculados no servidor (`order_billing.totals`). No fechamento, o valor cobrado é sempre o total gravado no banco, nunca o enviado pelo navegador.
+- **Os 10% saem do valor cobrado**: já sem cortesias, descontos manuais e promoções. Delivery, pedido online e NostFood nunca têm 10%. Item cancelado não soma.
 - O relatório semanal (`GET /api/reports/service-fees/weekly`) mostra a taxa por dia, de segunda a domingo no horário de São Paulo, só com pedidos do salão fechados, não cancelados, não cortesia e com pagamento conciliado. Ele **não** calcula lucro nem divide a gorjeta entre a equipe.
 - O relatório avançado separa `service_fee` das vendas de produto e considera taxa zero no online.
 
-**Pontos de atenção:**
-- Ao lançar novos itens numa comanda que já tem item cancelado, `create_order` soma **todos** os itens, inclusive os cancelados, no novo subtotal. O valor do item cancelado volta para o total. As rotas de cortesia e de cancelamento recalculam corretamente (ignoram cancelados).
-- Não há rota para tirar os 10% de uma comanda do salão (cliente que recusa a taxa).
+**Ponto de atenção:** não há rota para tirar os 10% de uma comanda do salão (cliente que recusa a taxa).
 
 ## Fechamento da comanda
 
@@ -44,7 +43,10 @@ Fonte: `server.py` (`close_order`, `_validate_close_payments`).
   - **troco só sai do dinheiro**: o que passar do total não pode ser maior que o valor pago em dinheiro.
 - Pedido em cortesia/permuta não exige pagamento.
 - Fechamento, pagamentos e soma no caixa aberto (`total_sales`) acontecem numa **transação**: tudo ou nada. Se o banco não aceitar transação, a rota devolve 503 e não grava nada. Duplo clique ou outra aba: só o primeiro fecha, o segundo recebe 409.
-- Cada pagamento grava `register_id` do caixa aberto e quem lançou.
+- **Com pagamento parcial, o fechamento cobra só o que falta** (`total − paid_amount`) e só esse restante soma no `total_sales`. Comanda já zerada fecha sem pagamento novo.
+- **O pagamento que fecha entra no pedido igual aos parciais**: soma em `paid_amount` e vai para `partial_payments` com `kind = "final"` (forma, valor já sem o troco, troco, autor, horário e `register_id`). Pedido fechado fica com Falta pagar = 0. Vale para mesa, comanda física e NostFood "Receber na entrega" (mesmo fechamento). Cortesia/permuta fechada não é pagamento e não mexe em `paid_amount`.
+- O fechamento é condicionado à `billing_version` lida: se entrou item, desconto, cortesia ou pagamento parcial depois que a tela carregou, devolve 409 e não grava nada.
+- Cada pagamento grava `register_id` do caixa aberto, quem lançou e `kind` (`final` no fechamento, `partial` no pagamento parcial).
 - Depois de confirmado: baixa de estoque dos itens que ainda não tiveram baixa (cortesia também), libera a comanda e a mesa e avisa as telas.
 
 ## Caixa
@@ -62,6 +64,8 @@ Fonte: `server.py` (`open_register`, `preview_cash_register`, `close_register`, 
   - os valores recalculados forem **idênticos** aos da prévia (qualquer venda, pagamento, sangria, reforço ou pedido online novo exige imprimir de novo);
   - não houver comanda sem pagamento ou com pagamento inconsistente.
 - O relatório final (`closing_report`) fica gravado no caixa: formas de pagamento, vendas do salão, online por plataforma, total de todos os canais, quantidade de fechadas, canceladas e cortesias, valor das cortesias, troco, sangrias, reforços e dinheiro esperado.
+- Prévia e relatório final trazem, **separados**, o concedido nos itens das vendas: `item_promo_total` (com `item_promo_by_name`), `item_discount_total` (desconto manual) e `item_courtesy_total` (cortesia de item). A cortesia do pedido inteiro continua em `courtesy_amount`.
+- A prévia mostra em `open_partial_payments` quanto já foi pago em comandas ainda abertas (só informativo: com comanda aberta o caixa não fecha). Esse valor já somou no `total_sales` do caixa na hora do pagamento e entra nas formas de pagamento da conferência quando a comanda fechar.
 - Pedidos online abertos **não** impedem o fechamento do caixa.
 - Para destravar um caixa com comanda inconsistente há scripts com simulação por padrão: `diagnostico_caixa.py` (só leitura), `corrigir_comandas_caixa.py` e `ajustar_excesso_pagamento.py`.
 
@@ -95,6 +99,7 @@ Fonte: `server.py` (`cancel_order_item`, `cancel_order`, `quick_cancel_order`).
 | Rápido | `POST /api/orders/{id}/cancel-quick` | Perfil admin | Só se todos os itens ainda estão `pending` (nenhum entrou em preparo), então não há baixa |
 
 - Só pedido **aberto** pode ser cancelado: comanda fechada é somente leitura.
+- Unidade já paga (pagamento parcial por itens) não é cancelada, e a comanda com qualquer valor pago não é cancelada nem vira cortesia/permuta inteira: estorne o pagamento antes (409). O total nunca fica abaixo do que já foi pago.
 - Cancelamento parcial divide a linha: a original fica com a quantidade restante e uma nova linha `cancelled` guarda a parte cancelada, com motivo, preço original, quem autorizou, quem operou, data e se o estoque foi devolvido.
 - Cancelamento de comanda inteira grava `cancelled_by_*` (admin que autorizou), `cancelled_by_cashier_*` (quem operou) e `cancellation_reason`, e libera comanda e mesa.
 - Pedido cancelado fica fora das vendas do caixa (contado em `cancelled_orders`), da taxa semanal e do relatório avançado.
@@ -105,12 +110,50 @@ Fonte: `server.py` (`cancel_order_item`, `cancel_order`, `quick_cancel_order`).
 
 ## Cortesia
 
-Fonte: `server.py` (`mark_item_courtesy`).
+Fonte: `order_billing.py` (`mark_courtesy`, `unmark_courtesy`, `merge_back`), `server.py` (`mark_item_courtesy`).
 
-- **Cortesia de item:** admin ou caixa, com motivo obrigatório, em comanda aberta. O preço do item vai a zero e os totais são recalculados (os 10% caem junto). O item **continua consumindo estoque**.
-- O relatório avançado não conta item em cortesia nos produtos mais vendidos.
+- **Cortesia de item:** admin ou caixa, com motivo obrigatório, em comanda aberta. O preço vai a zero e os totais são recalculados (os 10% caem junto). O item **continua consumindo estoque**.
+- **Por quantidade:** `quantity` escolhe quantas unidades. Em 3 lanches, marcar 1 divide a linha em 2 cobrados + 1 cortesia (a linha nova guarda `split_from`). Sem `quantity`, vale a linha inteira.
+- Grava `courtesy_original_price` (o preço que seria cobrado), `courtesy_reason`, `courtesy_by_id/name` e `courtesy_at`.
+- **Desmarcar** devolve o preço guardado (regra do PR #8; sem preço guardado, usa o cadastro) e junta a linha de volta na de origem quando as duas ficaram iguais (2 + 1 volta a 3).
+- Item com desconto manual que vira cortesia: o desconto sai e a cortesia guarda o preço sem ele (o cheio, ou o da promoção).
+- Unidade já paga não vira cortesia.
+- Cortesia de item tem total próprio no pedido (`item_courtesy_total`), separado do desconto e da promoção. O relatório avançado não conta item em cortesia nos produtos mais vendidos.
 
-**Ponto de atenção:** desmarcar a cortesia (`is_courtesy = false`) não devolve o preço original: o item continua com preço zero.
+## Desconto por item
+
+Fonte: `order_billing.py` (`apply_discount`, `remove_discount`), `server.py` (`apply_item_discount`, `remove_item_discount`).
+
+- `PATCH /api/orders/{id}/item/{item}/discount` com `type` (`percent` ou `value`, que é R$ por unidade), `value`, `reason` (obrigatório) e `quantity` opcional (divide a linha como na cortesia). Só comanda/mesa do salão aberta.
+- **Caixa dá até 10%.** Acima disso, só admin: admin logado, ou e-mail e senha de um admin no próprio pedido (`admin_email`, `admin_password`). O item grava quem deu (`discount_by_*`), quando (`discount_at`), o % equivalente e quem autorizou (`discount_approved_by_*`).
+- 100% ou mais é recusado: isso é cortesia.
+- `DELETE` na mesma rota tira o desconto (volta ao preço cheio, ou ao da promoção) e junta a linha de volta. Linha com unidade paga não perde o desconto sem estorno.
+- `unit_price` é sempre o preço **cobrado**; o preço cheio fica em `discount_original_price`. Total próprio no pedido: `item_discount_total`.
+
+## Pagamento parcial
+
+Fonte: `order_billing.py` (`items_share_cents`, `settle_change`), `server.py` (`create_partial_payment`, `reverse_partial_payment`).
+
+- `POST /api/orders/{id}/partial-payments`: recebe **parte** da conta, por valor (`amount`) ou por itens (`items: [{item_id, quantity}]`, valor dos itens + 10%), em uma ou várias formas (`payments`). Só salão, com caixa aberto, valor maior que zero e no máximo o que falta pagar. As formas seguem a regra do fechamento (troco só do dinheiro); o troco sai da linha em dinheiro, então os pagamentos gravados somam exatamente o valor recebido.
+- A comanda fica aberta com `paid_amount` ("Pago") e "Falta pagar" (`total − paid_amount`) até zerar. Cada pagamento entra em `partial_payments` do pedido e em `db.payments` (`kind = "partial"`, forma, valor, autor, horário e `register_id`) e soma no `total_sales` do caixa **na hora**, tudo numa transação.
+- Por itens: a unidade paga fica em `paid_quantity` e não pode ser paga de novo, cancelada, nem receber desconto ou cortesia. Os últimos itens levam o resto exato (sem sobrar centavo do arredondamento dos 10%).
+- **Estorno** (`POST .../partial-payments/{pid}/reverse`): só admin (logado ou com credenciais), motivo obrigatório, só com a comanda aberta. Os pagamentos saem de `db.payments` para `db.payment_reversals` (com motivo, autor e horário), o valor sai do `total_sales` e do `paid_amount`, e as unidades pagas voltam a ficar livres. A entrada no pedido fica marcada `reversed` (histórico).
+- Mesa com várias comandas: cada comanda tem seu próprio pago e falta pagar.
+- Toda mudança de cobrança (item novo, cortesia, desconto, cancelamento de item, parcial, estorno, fechamento) grava condicionada à `billing_version` do pedido: se outra pessoa mudou a comanda no meio, devolve 409 e nada é gravado.
+
+## Promoção gerencial
+
+Fonte: `promotions.py`, `server.py` (`/api/promotions`, `_apply_launch_promotions`, `promotions_report`).
+
+- **Só admin** cria, edita, liga e desliga (Configurações › Promoções). Campos: nome, desconto em % ou R$ por unidade, o que pega (categorias e/ou produtos), período (início e fim, inclusive), opcionalmente dias da semana e faixa de horário (pode passar da meia-noite: 01h de quarta ainda é a faixa de terça), e canais: salão, balcão (pedido "Outro" lançado no caixa) e cardápio próprio.
+- **Nunca vale para NostFood, iFood ou 99:** o preço vem da plataforma.
+- Vale para o item **no lançamento**: o item guarda `promo_original_price`, `promo_price` e `promo_name`, e mantém o desconto mesmo que a promoção acabe ou seja desligada depois. Editar a promoção também não muda item já lançado.
+- Horário e dia da semana são os do restaurante (America/Sao_Paulo).
+- Mais de uma promoção para o mesmo item: vale a de **maior desconto** (não acumula).
+- **Desconto manual não acumula com promoção:** se a promoção já dá desconto igual ou maior, o desconto é recusado com aviso (vale a promoção); se o manual for maior, ele substitui a promoção na linha, com aviso. Tirar o desconto volta ao preço da promoção.
+- Ligar/desligar não apaga nada: cada criação, edição e mudança de status vai para o `history` da promoção. Status: ativa (dentro do período), agendada, encerrada ou desligada.
+- Os 10% são calculados sobre o valor cobrado, já com a promoção.
+- Relatórios: total próprio no pedido (`item_promo_total`), separado do desconto manual e da cortesia; `GET /api/reports/promotions?start=&end=` dá o total concedido por promoção e por dia.
 
 ## Cortesia ou permuta do pedido inteiro
 
@@ -120,6 +163,7 @@ Fonte: `server.py` (`mark_order_comp`).
 - **Cortesia** e **permuta** usam a mesma marca (`is_comp`). A diferença fica só no texto do motivo (ex.: "Permuta: fotos do evento").
 - Pedido `is_comp` não entra no faturamento: fica fora de `total_sales`, das vendas do relatório, da taxa semanal e do relatório avançado. No fechamento do caixa aparece em `courtesy_orders` e `courtesy_amount`.
 - Não exige pagamento no fechamento, mas o estoque é baixado normalmente.
+- Comanda com pagamento parcial não vira cortesia/permuta inteira: estorne antes.
 
 **Ponto de atenção:** a rota não confere se o pedido está aberto. Marcar como cortesia um pedido já fechado muda relatórios do passado.
 

@@ -256,6 +256,28 @@ export const ordersAPI = {
   cancelItem: (orderId, itemId, payload) =>
     api.patch(`/orders/${orderId}/item/${itemId}/cancel`, payload),
   close: (orderId, payments) => api.post(`/orders/${orderId}/close`, { payments }),
+  // Cobrança no caixa: cortesia por quantidade, desconto por item, pagamento parcial e estorno.
+  // payload da cortesia: { is_courtesy, quantity?, reason }
+  courtesy: (orderId, itemId, payload) =>
+    api.patch(`/orders/${orderId}/item/${itemId}/courtesy`, payload),
+  // payload: { quantity?, type: 'value'|'percent', value, reason, admin_email?, admin_password? }
+  discount: (orderId, itemId, payload) =>
+    api.patch(`/orders/${orderId}/item/${itemId}/discount`, payload),
+  removeDiscount: (orderId, itemId) => api.delete(`/orders/${orderId}/item/${itemId}/discount`),
+  // payload: { payments: [{method, amount}], amount } ou { payments, items: [{item_id, quantity}] }
+  partialPayment: (orderId, payload) => api.post(`/orders/${orderId}/partial-payments`, payload),
+  // payload: { reason, admin_email?, admin_password? }
+  reversePartial: (orderId, partialId, payload) =>
+    api.post(`/orders/${orderId}/partial-payments/${partialId}/reverse`, payload),
+};
+
+// Promoções gerenciais (só admin cria/edita/desliga; "active" serve à tela de lançamento)
+export const promotionsAPI = {
+  list: () => api.get('/promotions'),
+  active: (channel = 'salao') => api.get('/promotions/active', { params: { channel } }),
+  create: (data) => api.post('/promotions', data),
+  update: (id, data) => api.put(`/promotions/${id}`, data),
+  setActive: (id, isActive) => api.patch(`/promotions/${id}/active`, { is_active: isActive }),
 };
 
 // Stock
@@ -286,6 +308,8 @@ export const reportsAPI = {
   getSales: (period) => api.get('/reports/sales', { params: { period } }),
   getProfit: (period) => api.get('/reports/profit', { params: { period } }),
   getSalesByTable: (period) => api.get('/reports/sales-by-table', { params: { period } }),
+  // start/end: 'AAAA-MM-DD' (datas do restaurante, inclusive)
+  getPromotions: (start, end) => api.get('/reports/promotions', { params: { start, end } }),
 };
 
 // Recipes (CMV)

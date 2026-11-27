@@ -3,6 +3,18 @@ import Layout from '../components/Layout';
 import FinancialModulesPanel from '../components/FinancialModulesPanel';
 import PlatformTotals, { hasPlatformBreakdown } from '../components/PlatformTotals';
 import AddObservationDialog from '../components/AddObservationDialog';
+import {
+  BillingSummary,
+  CourtesyDialog,
+  DiscountDialog,
+  ItemBillingActions,
+  ItemBillingInfo,
+  PartialPaymentDialog,
+  PartialPaymentsList,
+  isSalonBilling,
+  preBillLineExtras,
+} from '../components/CashierBilling';
+import { orderSummary } from '../lib/billing';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
@@ -133,6 +145,7 @@ function printPreBill(order, paperWidth = '80') {
         )}
       </td>
     </tr>
+    ${preBillLineExtras(item, escapeReceipt)}
     ${
       item.notes
         ? `<tr>
@@ -144,6 +157,26 @@ function printPreBill(order, paperWidth = '80') {
     }
     ${itemObservations(item)}
   `).join('');
+
+  // Promoções, descontos e cortesias saem separados (já estão fora do subtotal).
+  const summary = orderSummary(order);
+  const summaryRow = (label, value) => `
+          <tr>
+            <td>${escapeReceipt(label)}</td>
+            <td class="right">${escapeReceipt(formatCurrency(value))}</td>
+          </tr>`;
+  const adjustmentsHtml = [
+    summary.promo > 0 ? summaryRow('Promoções concedidas', summary.promo) : '',
+    summary.discount > 0 ? summaryRow('Descontos concedidos', summary.discount) : '',
+    summary.courtesy > 0 ? summaryRow('Cortesias', summary.courtesy) : '',
+  ].join('');
+  const paidHtml = summary.paid > 0 ? `
+        <table>
+          ${summaryRow('Pago', summary.paid)}
+          <tr><td><strong>FALTA PAGAR</strong></td>
+            <td class="right"><strong>${escapeReceipt(formatCurrency(summary.remaining))}</strong></td></tr>
+        </table>
+        <div class="line"></div>` : '';
 
   const html = `
     <!doctype html>
@@ -246,6 +279,7 @@ function printPreBill(order, paperWidth = '80') {
         <div class="line"></div>
 
         <table>
+          ${adjustmentsHtml}
           <tr>
             <td>Subtotal</td>
             <td class="right">
@@ -275,6 +309,7 @@ function printPreBill(order, paperWidth = '80') {
         </div>
 
         <div class="line"></div>
+        ${paidHtml}
 
         <p>Documento não fiscal.</p>
         <p>Pagamento não confirmado.</p>
@@ -402,9 +437,24 @@ function printCashPreview(report, paperWidth, receiptWindow) {
           <td>Comandas abertas</td>
           <td class="right">${escapeReceipt(report.open_orders || 0)}</td>
         </tr>
-     
+
 ${row('Troco considerado', report.total_change)}
       </table>
+
+      <div class="line"></div>
+
+      <p><strong>CONCEDIDO NOS ITENS</strong></p>
+      <table>
+        ${row('Promoções', report.item_promo_total)}
+        ${Object.entries(report.item_promo_by_name || {}).map(([name, value]) => row(`  ${name}`, value)).join('')}
+        ${row('Descontos manuais', report.item_discount_total)}
+        ${row('Cortesias de item', report.item_courtesy_total)}
+        ${report.courtesy_amount != null ? row('Comandas cortesia/permuta', report.courtesy_amount) : ''}
+      </table>
+      ${report.open_partial_payments?.orders
+        ? `<p>Pagamentos parciais em comandas abertas: ${escapeReceipt(report.open_partial_payments.orders)}
+            (${amount(report.open_partial_payments.amount)}). Entram na conferência quando a comanda fechar.</p>`
+        : ''}
 
       <div class="line"></div>
 
@@ -598,12 +648,18 @@ export default function CashierPage() {
   const [onlineItems, setOnlineItems] = useState([]); // [{product_id, quantity}]
   const [onlineProducts, setOnlineProducts] = useState([]);
   const [onlineSubmitting, setOnlineSubmitting] = useState(false);
+  // Cobrança por item e pagamento parcial
+  const [courtesyItem, setCourtesyItem] = useState(null);
+  const [discountItem, setDiscountItem] = useState(null);
+  const [partialOpen, setPartialOpen] = useState(false);
   const isMountedRef = useRef(true);
 
   // Encontra o pedido selecionado de forma memoizada
   const selectedOrder = useMemo(() => {
     return orders.find(o => o.id === selectedOrderId) || null;
   }, [orders, selectedOrderId]);
+  // Valor que o fechamento cobra: total menos o que já foi pago em parciais.
+  const amountDue = selectedOrder ? orderSummary(selectedOrder).remaining : 0;
 
   const fetchData = useCallback(async () => {
     if (!isMountedRef.current) return;
@@ -865,8 +921,23 @@ export default function CashierPage() {
 
   const selectOrder = useCallback((order) => {
     setSelectedOrderId(order.id);
-    setPayments([{ id: Date.now(), method: 'cash', amount: order.total }]);
+    setPayments([{ id: Date.now(), method: 'cash', amount: orderSummary(order).remaining }]);
   }, []);
+
+  // Depois de mexer na cobrança (cortesia, desconto, parcial, estorno): recarrega e
+  // ajusta o pagamento padrão para o novo "Falta pagar".
+  const refreshBilling = useCallback(async () => {
+    await fetchData();
+    try {
+      const res = await ordersAPI.get(selectedOrderId);
+      if (res.data && isMountedRef.current) {
+        setOrders(prev => prev.map(o => (o.id === res.data.id ? res.data : o)));
+        setPayments([{ id: Date.now(), method: 'cash', amount: orderSummary(res.data).remaining }]);
+      }
+    } catch {
+      // a lista já foi recarregada; segue com ela
+    }
+  }, [fetchData, selectedOrderId]);
 
   const clearSelection = useCallback(() => {
     setSelectedOrderId(null);
@@ -952,7 +1023,7 @@ export default function CashierPage() {
   return;
 }
 
-    if (getTotalPayments + 0.001 < selectedOrder.total) {
+    if (getTotalPayments + 0.001 < amountDue) {
       toast.error('Valor dos pagamentos insuficiente');
       return;
     }
@@ -1317,6 +1388,14 @@ export default function CashierPage() {
                               {formatCurrency(order.total)}
                             </span>
                           </div>
+                          {Number(order.paid_amount) > 0 && (
+                            <p className="text-xs flex justify-between" data-testid={`order-card-paid-${order.id}`}>
+                              <span className="text-green-700">Pago {formatCurrency(order.paid_amount)}</span>
+                              <span className="font-bold text-red-700">
+                                Falta {formatCurrency(orderSummary(order).remaining)}
+                              </span>
+                            </p>
+                          )}
                         </CardContent>
                       </Card>
                     ))}
@@ -1350,7 +1429,7 @@ export default function CashierPage() {
                 </CardHeader>
 
                 <CardContent className="space-y-3 sm:space-y-4">
-                  <ScrollArea className="h-32 sm:h-48 border rounded p-2">
+                  <ScrollArea className="h-48 sm:h-64 border rounded p-2">
                     {(selectedOrder.items || []).map((item) => {
                       const isCancelled = item.status === 'cancelled';
 
@@ -1386,6 +1465,17 @@ export default function CashierPage() {
                                 CANCELADO
                               </Badge>
                             )}
+                            <ItemBillingInfo item={item} />
+                            {isSalonBilling(selectedOrder) && (
+                              <ItemBillingActions
+                                order={selectedOrder}
+                                item={item}
+                                disabled={closingOrder}
+                                onCourtesy={setCourtesyItem}
+                                onDiscount={setDiscountItem}
+                                onChanged={refreshBilling}
+                              />
+                            )}
                           </span>
 
                           <span className="shrink-0">
@@ -1413,31 +1503,42 @@ export default function CashierPage() {
                   {hasPlatformBreakdown(selectedOrder) ? (
                     <PlatformTotals order={selectedOrder} />
                   ) : (
-                  <div className="space-y-1 sm:space-y-2 border-t pt-2">
-                    <div className="flex justify-between text-xs sm:text-sm">
-                      <span>Subtotal:</span>
-                      <span>{formatCurrency(selectedOrder.subtotal)}</span>
-                    </div>
-                    <div className="flex justify-between text-xs sm:text-sm">
-                      <span>
-                        Serviço ({selectedOrder.service_fee_percentage}%):
-                      </span>
-                      <span>{formatCurrency(selectedOrder.service_fee)}</span>
-                    </div>
-                    {Number(selectedOrder.delivery_fee) > 0 && (
-                      <div className="flex justify-between text-xs sm:text-sm">
-                        <span>Taxa de entrega:</span>
-                        <span>{formatCurrency(selectedOrder.delivery_fee)}</span>
-                      </div>
-                    )}
-                    <div className="flex justify-between font-bold text-base sm:text-lg">
-                      <span>Total:</span>
-                      <span className="text-primary">
-                        {formatCurrency(selectedOrder.total)}
-                      </span>
-                    </div>
-                  </div>
+                    <BillingSummary order={selectedOrder} />
                   )}
+
+                  <PartialPaymentsList order={selectedOrder} isAdmin={isAdmin} onChanged={refreshBilling} />
+                  {isSalonBilling(selectedOrder) && !selectedOrder.is_closed && amountDue > 0 && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="w-full border-green-600 text-green-700 hover:bg-green-600/10"
+                      disabled={closingOrder || !register}
+                      title={register ? '' : 'Abra o caixa para receber pagamentos'}
+                      onClick={() => setPartialOpen(true)}
+                      data-testid="partial-payment-btn"
+                    >
+                      Receber parte da conta
+                    </Button>
+                  )}
+                  <PartialPaymentDialog
+                    order={selectedOrder}
+                    open={partialOpen}
+                    onOpenChange={setPartialOpen}
+                    onDone={refreshBilling}
+                  />
+                  <CourtesyDialog
+                    order={selectedOrder}
+                    item={courtesyItem}
+                    onClose={() => setCourtesyItem(null)}
+                    onDone={refreshBilling}
+                  />
+                  <DiscountDialog
+                    order={selectedOrder}
+                    item={discountItem}
+                    isAdmin={isAdmin}
+                    onClose={() => setDiscountItem(null)}
+                    onDone={refreshBilling}
+                  />
 
                   {selectedOrder.external_source === 'nostfood' && (
                     <div className="rounded border p-3 text-xs sm:text-sm space-y-1" data-testid="cashier-delivery-info">
@@ -1539,10 +1640,10 @@ export default function CashierPage() {
                   </div>
 
                   <div className="flex justify-between font-bold text-sm">
-                    <span>Total Pagamentos:</span>
+                    <span>{Number(selectedOrder.paid_amount) > 0 ? 'Pagamentos (falta pagar):' : 'Total Pagamentos:'}</span>
                     <span
                       className={cn(
-                        getTotalPayments >= selectedOrder.total
+                        getTotalPayments + 0.001 >= amountDue
                           ? 'text-green-600'
                           : 'text-red-600'
                       )}
@@ -1551,12 +1652,12 @@ export default function CashierPage() {
                     </span>
                   </div>
 
-                  {getTotalPayments > selectedOrder.total && (
+                  {getTotalPayments > amountDue + 0.001 && (
                     <div className="flex justify-between text-base sm:text-lg bg-muted p-2 rounded">
                       <span>Troco:</span>
                       <span className="font-bold">
                         {formatCurrency(
-                          getTotalPayments - selectedOrder.total
+                          getTotalPayments - amountDue
                         )}
                       </span>
                     </div>
@@ -1609,7 +1710,7 @@ export default function CashierPage() {
                     disabled={
                       closingOrder ||
                       (!isPlatformSettled(selectedOrder) &&
-                        getTotalPayments + 0.001 < selectedOrder.total)
+                        getTotalPayments + 0.001 < amountDue)
                     }
                     data-testid="close-order-btn"
                   >
