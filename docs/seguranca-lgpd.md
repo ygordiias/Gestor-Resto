@@ -29,7 +29,7 @@ Inventário dos dados pessoais que o Gestor guarda, quem acessa, por quanto temp
 | Dado | Perfis com acesso pela API |
 |---|---|
 | Pedidos com dados do cliente | equipe inteira (`GET /api/orders/open`, `/api/orders/{id}`), admin (`GET /api/orders`) |
-| CPF das notas | admin e caixa (`GET /api/invoices`). O histórico paginado não devolve o CPF |
+| CPF das notas | ninguém pela API: `GET /api/invoices` e `POST /api/invoices` devolvem o CPF mascarado (`***.456.***-**`) e o histórico paginado não devolve o CPF. O banco guarda o CPF completo |
 | Contas de usuário | admin e superadmin (sem senha) |
 | Crédito de funcionários | caixa vê lista e saldos; admin vê extratos e faz acertos |
 | Fotos das tarefas | equipe, com regra por setor e responsável |
@@ -41,7 +41,7 @@ Inventário dos dados pessoais que o Gestor guarda, quem acessa, por quanto temp
 |---|---|---|
 | Socket.IO **sem autenticação** e com broadcast | Os eventos `kitchen_update` e `bar_update` levam **todos os pedidos abertos**, com nome, telefone e endereço de clientes online, para qualquer cliente que conectar no Socket.IO | Corrigido na branch `fix/cors-socket` (PR #4, aberta) |
 | CORS liberado para qualquer origem (`*`) | Qualquer site pode chamar a API a partir do navegador de um usuário logado | Corrigido no PR #4 (`CORS_ORIGINS`) |
-| Chave do emissor fiscal | `settings.fiscal.taxApiKey` fica em texto puro no banco | Em aberto |
+| Chave do emissor fiscal | `settings.fiscal.taxApiKey` fica em texto puro no banco. A API nunca devolve o valor (`GET /api/settings` só informa `taxApiKeyConfigured`) | Cifrar no banco: em aberto |
 | Código do pedido público sequencial | `EM-0001`, `EM-0002`... é fácil de adivinhar; expõe itens e total, não dados pessoais | Em aberto |
 | Backups manuais (`mongodump`) | Contêm todos os dados acima | Guardar fora do repositório, com acesso restrito |
 

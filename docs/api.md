@@ -100,7 +100,7 @@ Não existe cadastro público.
 | Método | Rota | Permissão | Descrição |
 |---|---|---|---|
 | GET | `/api/orders` | admin | Lista com filtros `status` e `is_closed` |
-| GET | `/api/orders/open` | equipe | Pedidos abertos |
+| GET | `/api/orders/open` | equipe | Todos os pedidos abertos (sem limite), do mais antigo para o mais novo |
 | GET | `/api/orders/table/{table_id}` | equipe | Pedido aberto da mesa |
 | GET | `/api/orders/{id}` | equipe | Um pedido |
 | POST | `/api/orders` | logado | Lança itens. Com `tab_number`, soma na comanda já vinculada; sem, usa o pedido sem comanda da mesa. Aplica a promoção ativa do salão e recalcula subtotal, 10% e total |
@@ -170,7 +170,7 @@ Formas de pagamento aceitas: `cash`, `pix`, `credit`, `debit`, `voucher` e `card
 
 | Método | Rota | Permissão | Descrição |
 |---|---|---|---|
-| GET | `/api/invoices` | caixa | Lista todas as notas (inclui CPF) |
+| GET | `/api/invoices` | caixa | Lista as notas (até 500). O CPF sai mascarado (`***.456.***-**`) |
 | POST | `/api/invoices` | caixa | Registra nota `{order_id, customer_name, customer_cpf}` com status `mock` (não há emissor fiscal) |
 | GET | `/api/invoices/history` | caixa | Histórico paginado com filtros, **sem** o CPF |
 
@@ -210,8 +210,8 @@ Formas de pagamento aceitas: `cash`, `pix`, `credit`, `debit`, `voucher` e `card
 
 | Método | Rota | Permissão | Descrição |
 |---|---|---|---|
-| GET | `/api/settings` | admin | `{restaurant, operations, fiscal}` |
-| PUT | `/api/settings` | admin | Salva os blocos enviados. Nome, endereço e CNPJ também vão para a configuração pública |
+| GET | `/api/settings` | admin | `{restaurant, operations, fiscal}`. Em `fiscal` a chave da API nunca volta: só `taxApiKeyConfigured` (true/false) |
+| PUT | `/api/settings` | admin | Salva os blocos enviados. Nome, endereço e CNPJ também vão para a configuração pública. Em `fiscal`, `taxApiKey` vazio mantém a chave salva e `taxApiKeyClear: true` a remove |
 
 ## Promoções
 

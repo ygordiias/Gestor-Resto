@@ -28,7 +28,11 @@ export default function SettingsPage() {
   });
   const [fiscal, setFiscal] = useState({
     taxEnabled: false,
+    // A chave salva nunca volta da API: só taxApiKeyConfigured. O campo fica
+    // vazio; vazio ao salvar mantém a chave atual.
     taxApiKey: '',
+    taxApiKeyConfigured: false,
+    taxApiKeyClear: false,
   });
 
   useEffect(() => {
@@ -54,6 +58,12 @@ export default function SettingsPage() {
         body: JSON.stringify({ restaurant, operations, fiscal }),
       });
       if (!res.ok) throw new Error();
+      setFiscal(prev => ({
+        ...prev,
+        taxApiKeyConfigured: prev.taxApiKey.trim() ? true : (prev.taxApiKeyClear ? false : prev.taxApiKeyConfigured),
+        taxApiKey: '',
+        taxApiKeyClear: false,
+      }));
       toast.success('Configurações salvas!');
     } catch {
       toast.error('Erro ao salvar');
@@ -217,10 +227,34 @@ export default function SettingsPage() {
                     <Label>Chave da API (NF-e)</Label>
                     <Input
                       type="password"
+                      autoComplete="off"
+                      data-testid="fiscal-api-key-input"
                       value={fiscal.taxApiKey}
-                      onChange={e => setFiscal({ ...fiscal, taxApiKey: e.target.value })}
-                      placeholder="Sua chave de API do serviço de NF-e"
+                      onChange={e => setFiscal({ ...fiscal, taxApiKey: e.target.value, taxApiKeyClear: false })}
+                      placeholder={fiscal.taxApiKeyConfigured
+                        ? 'Chave configurada. Digite uma nova para trocar.'
+                        : 'Sua chave de API do serviço de NF-e'}
                     />
+                    <div className="flex items-center justify-between">
+                      <p className="text-sm text-muted-foreground" data-testid="fiscal-api-key-status">
+                        {fiscal.taxApiKeyClear
+                          ? 'A chave será removida ao salvar.'
+                          : fiscal.taxApiKeyConfigured
+                            ? 'Chave configurada. Por segurança, o valor não é exibido.'
+                            : 'Nenhuma chave configurada.'}
+                      </p>
+                      {fiscal.taxApiKeyConfigured && !fiscal.taxApiKeyClear && (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          data-testid="fiscal-api-key-clear"
+                          onClick={() => setFiscal({ ...fiscal, taxApiKey: '', taxApiKeyClear: true })}
+                        >
+                          Remover chave
+                        </Button>
+                      )}
+                    </div>
                   </div>
                 )}
                 <div className="p-4 bg-muted rounded-lg">

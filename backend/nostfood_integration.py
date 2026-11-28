@@ -558,7 +558,9 @@ def _schedule(coro):
 
 
 async def _open_orders():
-    return await S.db.orders.find({"is_closed": False}, {"_id": 0}).to_list(100)
+    # Sem limite fixo, como server.list_open_orders: só pedidos abertos.
+    return await S.db.orders.find({"is_closed": False}, {"_id": 0}).sort(
+        [("created_at", 1), ("_id", 1)]).to_list(None)
 
 
 async def _emit_kds():
@@ -1572,7 +1574,7 @@ def build_router(require_role, UserRole) -> APIRouter:
         rows = await S.db.orders.find({"$or": [
             {"kds_ack_pending": True, "status": "cancelled", "cancelled_at": {"$gte": since}},
             {"kds_item_cancel_pending": True, "kds_item_cancel_at": {"$gte": since}},
-        ]}, {"_id": 0}).to_list(100)
+        ]}, {"_id": 0}).sort([("created_at", 1), ("_id", 1)]).to_list(None)  # janela de horas: sem corte
         if current_user.get("role") in FULL_ORDER_ROLES:
             return rows  # admin e caixa: pedido completo
         return [kds_cancelled_view(o) for o in rows]

@@ -29,6 +29,7 @@ import kds_cancel
 import order_billing as billing
 import order_observations
 import physical_tabs
+import db_indexes
 import promotions
 import sobre
 
@@ -106,6 +107,10 @@ async def startup_validate_db():
         # Superadmin inicial: só via variáveis de ambiente e só se não existir
         # nenhum superadmin. Nunca derruba o servidor (ver bootstrap.py).
         await ensure_initial_superadmin(db, logger)
+
+        # Índices de vendas, pagamentos, notas e caixa (db_indexes.py).
+        # Uma falha só fica no log: não derruba o servidor.
+        await db_indexes.ensure_indexes(db, logger)
 
     except Exception as e:
         # Só o tipo do erro: a mensagem do driver pode conter o endereço do banco.
@@ -849,10 +854,18 @@ async def get_orders(status_filter: Optional[str] = Query(None, alias="status"),
     orders = await db.orders.find(query, {"_id": 0}).to_list(500)
     return orders
 
+async def list_open_orders():
+    """Todos os pedidos abertos, do mais antigo para o mais novo.
+
+    Sem limite fixo: com um limite (antes 100) o caixa e a cozinha deixavam de
+    ver pedidos sem aviso. São só os abertos, então o volume é pequeno.
+    """
+    return await db.orders.find({"is_closed": False}, {"_id": 0}).sort(
+        [("created_at", 1), ("_id", 1)]).to_list(None)
+
 @api_router.get("/orders/open", dependencies=[Depends(require_role(STAFF_ROLES))])
 async def get_open_orders():
-    orders = await db.orders.find({"is_closed": False}, {"_id": 0}).to_list(100)
-    return orders
+    return await list_open_orders()
 
 @api_router.get("/orders/table/{table_id}", dependencies=[Depends(require_role(STAFF_ROLES))])
 async def get_table_order(table_id: str):
@@ -1076,11 +1089,11 @@ async def emit_order_updates(items):
     drink_items = [i for i in items if i.get("type") == OrderItemType.DRINK.value]
     
     if food_items:
-        kitchen_orders = await db.orders.find({"is_closed": False}, {"_id": 0}).to_list(100)
+        kitchen_orders = await list_open_orders()
         await emit_orders('kitchen_update', kitchen_orders)
     
     if drink_items:
-        bar_orders = await db.orders.find({"is_closed": False}, {"_id": 0}).to_list(100)
+        bar_orders = await list_open_orders()
         await emit_orders('bar_update', bar_orders)
 
 @api_router.put("/orders/{order_id}/item/{item_id}/status", dependencies=[Depends(require_role(ITEM_STATUS_ROLES))])
@@ -1116,8 +1129,8 @@ async def update_item_status(order_id: str, item_id: str, status_data: dict):
     
     # Emit updates
     updated_order = await db.orders.find_one({"id": order_id}, {"_id": 0})
-    await emit_orders('kitchen_update', await db.orders.find({"is_closed": False}, {"_id": 0}).to_list(100))
-    await emit_orders('bar_update', await db.orders.find({"is_closed": False}, {"_id": 0}).to_list(100))
+    await emit_orders('kitchen_update', await list_open_orders())
+    await emit_orders('bar_update', await list_open_orders())
     await emit_orders('order_updated', updated_order)
     
     # Emitir atualização de estoque em tempo real
@@ -2107,8 +2120,8 @@ async def quick_cancel_order(order_id: str, current_user: dict = Depends(require
     # Emitir atualizações
     await emit_staff('tables_updated', await get_tables())
     await emit_staff('order_cancelled', {"order_id": order_id})
-    await emit_orders('kitchen_update', await db.orders.find({"is_closed": False}, {"_id": 0}).to_list(100))
-    await emit_orders('bar_update', await db.orders.find({"is_closed": False}, {"_id": 0}).to_list(100))
+    await emit_orders('kitchen_update', await list_open_orders())
+    await emit_orders('bar_update', await list_open_orders())
     await emit_staff('kds_cancelled', {"order_id": order_id})
 
     return {"message": "Pedido cancelado com sucesso"}
@@ -2973,7 +2986,20 @@ async def register_deposit(movement_data: dict, current_user: dict = Depends(req
 @api_router.get("/invoices", response_model=List[dict], dependencies=[Depends(require_role(CASH_ROLES))])
 async def get_invoices():
     invoices = await db.invoices.find({}, {"_id": 0}).to_list(500)
-    return invoices
+    return [invoice_view(i) for i in invoices]
+
+def mask_cpf(cpf) -> Optional[str]:
+    """CPF mascarado: só os 3 dígitos do meio aparecem (***.456.***-**)."""
+    if not cpf:
+        return cpf
+    digits = "".join(ch for ch in str(cpf) if ch.isdigit())
+    if len(digits) != 11:
+        return "***"  # formato inesperado: não mostra nada
+    return f"***.{digits[3:6]}.***-**"
+
+def invoice_view(invoice: dict) -> dict:
+    """Nota para a tela: o CPF completo nunca sai da API."""
+    return {**invoice, "customer_cpf": mask_cpf(invoice.get("customer_cpf"))}
 
 @api_router.post("/invoices", dependencies=[Depends(require_role(CASH_ROLES))])
 async def create_invoice(invoice_data: InvoiceBase):
@@ -2985,7 +3011,7 @@ async def create_invoice(invoice_data: InvoiceBase):
     inv_dict = invoice.model_dump()
     inv_dict["created_at"] = inv_dict["created_at"].isoformat()
     await db.invoices.insert_one(inv_dict)
-    return {k: v for k, v in inv_dict.items() if k != "_id"}
+    return invoice_view({k: v for k, v in inv_dict.items() if k != "_id"})
 
 # ==================== REPORTS ROUTES ====================
 def _sold_orders_match(start_date) -> dict:
@@ -3867,8 +3893,33 @@ async def get_settings(current_user: dict = Depends(require_role([UserRole.ADMIN
     return {
         "restaurant": info or {},
         "operations": ops or {},
-        "fiscal": fiscal or {},
+        "fiscal": fiscal_settings_view(fiscal),
     }
+
+FISCAL_SECRET_FIELDS = ("taxApiKey",)
+
+def fiscal_settings_view(fiscal: Optional[dict]) -> dict:
+    """Configuração fiscal sem a chave da API: só diz se ela está configurada."""
+    view = {k: v for k, v in (fiscal or {}).items() if k not in FISCAL_SECRET_FIELDS}
+    view["taxApiKeyConfigured"] = bool(str((fiscal or {}).get("taxApiKey") or "").strip())
+    return view
+
+def fiscal_settings_update(data: dict) -> dict:
+    """Monta o update da configuração fiscal.
+
+    A chave da API nunca volta para a tela, então o formulário a envia vazia:
+    vazio mantém a chave salva. Só `taxApiKeyClear: true` remove a chave.
+    """
+    fields = {k: v for k, v in (data or {}).items() if k not in ("taxApiKeyConfigured", "taxApiKeyClear")}
+    key = str(fields.pop("taxApiKey", "") or "").strip()
+    update = {}
+    if key:
+        fields["taxApiKey"] = key
+    if fields:
+        update["$set"] = fields
+    if (data or {}).get("taxApiKeyClear") is True and not key:
+        update["$unset"] = {"taxApiKey": ""}
+    return update
 
 @api_router.put("/settings")
 async def save_settings(data: dict, current_user: dict = Depends(require_role([UserRole.ADMIN]))):
@@ -3887,7 +3938,9 @@ async def save_settings(data: dict, current_user: dict = Depends(require_role([U
     if "operations" in data:
         await db.settings.update_one({"_id": "operations"}, {"$set": data["operations"]}, upsert=True)
     if "fiscal" in data:
-        await db.settings.update_one({"_id": "fiscal"}, {"$set": data["fiscal"]}, upsert=True)
+        fiscal_update = fiscal_settings_update(data["fiscal"])
+        if fiscal_update:
+            await db.settings.update_one({"_id": "fiscal"}, fiscal_update, upsert=True)
     return {"message": "Configurações salvas"}
 
 # ==================== TAREFAS OPERACIONAIS ====================

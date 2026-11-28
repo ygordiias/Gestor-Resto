@@ -87,6 +87,11 @@ Todos os documentos usam um campo `id` (UUID em texto) como chave de negócio. O
 | `operations_tasks` | Tarefas v1 (legado, sem foto) | `id`, `name`, `sector`, `status`, `completed_*` |
 | `fs.files` / `fs.chunks` | GridFS: fotos das tarefas | metadados `task_id`, `submission_id`, `content_type` |
 
+**Índices** (`backend/db_indexes.py`, criados na subida do servidor; uma falha só vai para o log):
+`orders` (`is_closed`+`closed_at`, `created_at`, `table_id`+`is_closed`), `payments` (`order_id`, `register_id`, `created_at`),
+`invoices` (`order_id`, `created_at`, `status`+`created_at`), `cash_registers` (`closed_at`) e `payment_reversals` (`order_id`).
+Antes de qualquer índice único em `id`, rode `backend/scripts/verificar_duplicados.py` (somente leitura).
+
 **Pendente (branch `feat/integracao-nostfood`):** `nostfood_events` (TTL de 30 dias), `nostfood_product_map`, `nostfood_unlinked`, `nostfood_tombstones`, `nostfood_settings` e `stock_losses`. Veja [integracoes/nostfood.md](integracoes/nostfood.md).
 
 **Pendente (branch `fix/estoque-cmv`, PR #5):** registro das falhas de baixa de estoque e unidade na receita.

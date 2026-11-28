@@ -94,7 +94,11 @@ class Cursor:
         self._docs = docs
 
     def sort(self, key, direction=1):
-        self._docs.sort(key=lambda d: (d.get(key) is None, d.get(key)), reverse=direction == -1)
+        # Aceita sort("campo", -1) e sort([("a", 1), ("b", -1)]), como o Motor.
+        keys = [(key, direction)] if isinstance(key, str) else list(key)
+        for k, d in reversed(keys):  # ordenação estável: da última chave para a primeira
+            self._docs.sort(key=lambda doc, k=k: (doc.get(k) is None, doc.get(k)),
+                            reverse=d == -1)
         return self
 
     async def to_list(self, length=None):
@@ -166,6 +170,8 @@ class Collection:
                     doc[k] = copy.deepcopy(v)
                 elif op == "$setOnInsert":
                     pass
+                elif op == "$unset":
+                    doc.pop(k, None)
                 elif op == "$inc":
                     doc[k] = doc.get(k, 0) + v
                 elif op == "$push":
